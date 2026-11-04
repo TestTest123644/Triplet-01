@@ -31,7 +31,7 @@ logger = logging.getLogger("twin.main")
 async def wait_for_kafka_ready(bootstrap_servers: str, max_retries: int = 30, delay: float = 1.0) -> bool:
     """Check connectivity to Kafka broker before starting high-rate streaming."""
     logger.info(f"Checking connectivity to Kafka broker at {bootstrap_servers}...")
-    import confluent_kafka
+    import confluent_kafka.admin
 
     for attempt in range(1, max_retries + 1):
         try:

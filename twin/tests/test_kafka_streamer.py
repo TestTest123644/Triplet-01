@@ -104,3 +104,14 @@ def test_payload_size_benchmark_across_all_42_devices():
     # Validate that maximum size is under 300 bytes
     assert max_size <= 300
     print(f"\nPayload size stats: min={min_size}B, max={max_size}B, avg={avg_size:.1f}B")
+
+
+@pytest.mark.asyncio
+async def test_wait_for_kafka_ready_import_and_failure_handling():
+    """Verify wait_for_kafka_ready correctly imports confluent_kafka.admin and handles unreachable brokers."""
+    from twin.main import wait_for_kafka_ready
+
+    # Test with non-existent port to verify AdminClient doesn't crash on import/attribute access
+    ready = await wait_for_kafka_ready("127.0.0.1:59998", max_retries=1, delay=0.01)
+    assert ready is False
+
