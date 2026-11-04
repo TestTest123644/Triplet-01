@@ -136,10 +136,35 @@ class GroundTruthLedger:
         run_id TEXT
     );
 
+    CREATE TABLE IF NOT EXISTS commands_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        run_id TEXT,
+        sim_ts TEXT NOT NULL,
+        caller TEXT NOT NULL,
+        tool TEXT NOT NULL,
+        args_json TEXT NOT NULL,
+        executed INTEGER NOT NULL,
+        refused_code TEXT,
+        result_json TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS containment_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        run_id TEXT,
+        sim_ts TEXT NOT NULL,
+        caller TEXT NOT NULL,
+        tool TEXT NOT NULL,
+        target TEXT NOT NULL,
+        from_status TEXT NOT NULL,
+        to_status TEXT NOT NULL
+    );
+
     CREATE INDEX IF NOT EXISTS idx_readings_device_ts ON readings_truth (device_id, ts);
     CREATE INDEX IF NOT EXISTS idx_readings_seq ON readings_truth (device_id, seq);
     CREATE INDEX IF NOT EXISTS idx_readings_attacked ON readings_truth (is_attacked);
     CREATE INDEX IF NOT EXISTS idx_attacks_capability ON attacks_injected (capability, active);
+    CREATE INDEX IF NOT EXISTS idx_commands_sim_ts ON commands_log (sim_ts);
+    CREATE INDEX IF NOT EXISTS idx_containment_target ON containment_log (target);
     """
 
     def __init__(self, db_path: Optional[str] = None):
@@ -158,12 +183,14 @@ class GroundTruthLedger:
 
         self._init_and_migrate_db()
 
-        # 6. RESET_LEDGER handling: wipe readings_truth, attacks_injected, and runs, KEEP devices intact
+        # 6. RESET_LEDGER handling: wipe readings_truth, attacks_injected, runs, commands_log, containment_log, KEEP devices intact
         if os.getenv("RESET_LEDGER", "false").lower() in ("true", "1", "yes"):
             with self._writer_lock:
                 self._writer_conn.execute("DELETE FROM readings_truth;")
                 self._writer_conn.execute("DELETE FROM attacks_injected;")
                 self._writer_conn.execute("DELETE FROM runs;")
+                self._writer_conn.execute("DELETE FROM commands_log;")
+                self._writer_conn.execute("DELETE FROM containment_log;")
                 self._writer_conn.commit()
 
     def _get_connection(self, read_only: bool = False) -> sqlite3.Connection:
@@ -209,6 +236,33 @@ class GroundTruthLedger:
         cols_atk = {row["name"] for row in cur.fetchall()}
         if "run_id" not in cols_atk:
             self._writer_conn.execute("ALTER TABLE attacks_injected ADD COLUMN run_id TEXT;")
+
+        # Migration: ensure commands_log and containment_log tables exist
+        self._writer_conn.execute("""
+        CREATE TABLE IF NOT EXISTS commands_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id TEXT,
+            sim_ts TEXT NOT NULL,
+            caller TEXT NOT NULL,
+            tool TEXT NOT NULL,
+            args_json TEXT NOT NULL,
+            executed INTEGER NOT NULL,
+            refused_code TEXT,
+            result_json TEXT NOT NULL
+        );
+        """)
+        self._writer_conn.execute("""
+        CREATE TABLE IF NOT EXISTS containment_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id TEXT,
+            sim_ts TEXT NOT NULL,
+            caller TEXT NOT NULL,
+            tool TEXT NOT NULL,
+            target TEXT NOT NULL,
+            from_status TEXT NOT NULL,
+            to_status TEXT NOT NULL
+        );
+        """)
 
         self._writer_conn.commit()
 
@@ -390,17 +444,21 @@ class GroundTruthLedger:
             for rec in records
         ]
         with self._writer_lock:
-            self._writer_conn.executemany(
-                """
-                INSERT INTO readings_truth (
-                    reading_id, device_id, ts, seq, true_value, broadcast_value,
-                    unit, status, sig, attack_type, is_attacked, created_at_wall_clock,
-                    run_id, wire_sig, wire_bytes
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                params,
-            )
-            self._writer_conn.commit()
+            try:
+                self._writer_conn.executemany(
+                    """
+                    INSERT INTO readings_truth (
+                        reading_id, device_id, ts, seq, true_value, broadcast_value,
+                        unit, status, sig, attack_type, is_attacked, created_at_wall_clock,
+                        run_id, wire_sig, wire_bytes
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    params,
+                )
+                self._writer_conn.commit()
+            except sqlite3.IntegrityError:
+                self._writer_conn.rollback()
+                raise
 
     def record_wire_batch(self, wire_records: List[Tuple[str, str, int]]) -> None:
         """Update wire_sig and wire_bytes for emitted readings in a single executemany call."""
@@ -461,6 +519,73 @@ class GroundTruthLedger:
             )
             self._writer_conn.commit()
             return cur.rowcount
+
+    # Journals (truth side; MCP never reads them)
+    def log_command(
+        self,
+        run_id: Optional[str],
+        sim_ts: str,
+        caller: str,
+        tool: str,
+        args: Dict[str, Any],
+        executed: bool,
+        refused_code: Optional[str],
+        result: Dict[str, Any],
+    ) -> None:
+        """Record an actuation or tool command in commands_log."""
+        with self._writer_lock:
+            self._writer_conn.execute(
+                """
+                INSERT INTO commands_log (
+                    run_id, sim_ts, caller, tool, args_json, executed, refused_code, result_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    run_id,
+                    sim_ts,
+                    caller,
+                    tool,
+                    json.dumps(args),
+                    1 if executed else 0,
+                    refused_code,
+                    json.dumps(result),
+                ),
+            )
+            self._writer_conn.commit()
+
+    def log_containment(
+        self,
+        run_id: Optional[str],
+        sim_ts: str,
+        caller: str,
+        tool: str,
+        target: str,
+        from_status: str,
+        to_status: str,
+    ) -> None:
+        """Record a containment action in containment_log."""
+        with self._writer_lock:
+            self._writer_conn.execute(
+                """
+                INSERT INTO containment_log (
+                    run_id, sim_ts, caller, tool, target, from_status, to_status
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (run_id, sim_ts, caller, tool, target, from_status, to_status),
+            )
+            self._writer_conn.commit()
+
+    def get_recent_commands_log(self, limit: int = 30) -> List[Dict[str, Any]]:
+        """Fetch recent entries from commands_log for verification."""
+        with self._get_connection(read_only=True) as conn:
+            cur = conn.execute("SELECT * FROM commands_log ORDER BY id DESC LIMIT ?", (limit,))
+            return [dict(row) for row in cur.fetchall()]
+
+    def get_recent_containment_log(self, limit: int = 30) -> List[Dict[str, Any]]:
+        """Fetch recent entries from containment_log for verification."""
+        with self._get_connection(read_only=True) as conn:
+            cur = conn.execute("SELECT * FROM containment_log ORDER BY id DESC LIMIT ?", (limit,))
+            return [dict(row) for row in cur.fetchall()]
 
     # State inspection and recovery
     def get_max_sequences_per_device(self) -> Dict[str, int]:

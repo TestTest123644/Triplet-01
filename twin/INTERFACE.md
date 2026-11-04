@@ -406,3 +406,73 @@ Marks a specific reading in the historical buffer as `"rolled_back"` following d
 | **Zone 6** (South Logistics Hub)   | `z6-tc1`..`z6-ec1` | (same 5 types) | - | - | - |
 
 *(Total: 42 devices across 6 zones, generating 420 msgs/sec at 10 Hz).*
+
+---
+
+## 5. Reference: Allowed Values, Error Codes & Auth
+
+### Allowed Values & Parameter Constraints
+- **Identifier Length Limit:** All string parameters (`device_id`, `zone_id`, `reading_id`, `idempotency_key`, `target_state`, `incident_type`) must not exceed 64 characters. Longer values return `INVALID_ARGUMENT`.
+- **Zones:** `["zone-1", "zone-2", "zone-3", "zone-4", "zone-5", "zone-6"]`.
+- **Incident Types (`dispatch`):** Must match `^[a-z_]{1,32}$`. Known types: `medical_surge`, `medical_emergency`, `flood`, `traffic_accident`, `fire`, `blackout`, `air_hazard`. Any other matching string is dispatched as generic and returns `"note": "unrecognized incident_type, dispatched as generic"`.
+- **Traffic Signal Plans (`set_signal_plan`):** Allowed values are `["normal", "green_wave", "red_restriction", "all_red", "adaptive"]`.
+- **Water Drainage Valves (`set_valve`):** Allowed values are `["open", "half", "closed", "0%-100%"]`. Ratios: `open` = 1.0, `half` = 0.5, `closed` = 0.0, `NN%` = NN/100.0.
+- **Power Grid States (`switch_grid`):** Allowed values are `["grid_a", "grid_b", "island", "shed", "standby"]`.
+- **Reading Queries (`get_readings`):** `since_ts` must parse as RFC 3339 UTC ending with `Z` (e.g. `2026-10-17T12:00:00Z`); `limit` must be an integer between 1 and 500.
+
+### Uniform Error Response Format
+All tools return errors adhering to this exact JSON structure:
+```json
+{
+  "status": "error",
+  "code": "<UPPER_SNAKE_CODE>",
+  "message": "<Human-readable explanatory sentence>",
+  "allowed": ["optional", "list", "of", "valid", "options"]
+}
+```
+
+| Error Code | Description | Trigger Example |
+| :--- | :--- | :--- |
+| `DEVICE_NOT_FOUND` | Device ID does not exist in registered inventory. | `get_device_state("unknown-1")` |
+| `ZONE_NOT_FOUND` | Zone ID does not exist. (Includes `allowed` field). | `dispatch("flood", "zone-99")` |
+| `WRONG_DEVICE_TYPE` | Command invoked on incompatible device type. | `set_valve("z1-tc1", "open")` |
+| `INVALID_TARGET_STATE` | Target state not recognized for device type. (Includes `allowed`). | `set_signal_plan("z1-tc1", "turbo")` |
+| `INVALID_INCIDENT_TYPE` | Incident type syntax does not match `^[a-z_]{1,32}$`. | `dispatch("MEDICAL SURGE!", "zone-1")` |
+| `INVALID_ARGUMENT` | Parameter exceeds 64 characters or numeric bound is invalid. | String length > 64 chars, or `limit=0` |
+| `INVALID_TIMESTAMP` | Timestamp is not valid RFC 3339 UTC ending in `'Z'`. | `get_readings(since_ts="2026-10-17")` |
+| `DEVICE_CONTAINED` | Target device is isolated or quarantined and refuses actuation. | `set_signal_plan` on quarantined camera |
+| `COMMAND_NOT_FOUND` | Idempotency key not found in results cache. | `get_command_result("missing-key")` |
+| `IDEMPOTENCY_CONFLICT` | Idempotency key was previously used with different tool or arguments. | Reusing key with altered payload |
+| `READING_NOT_FOUND` | Reading ID not found in broadcast cache. | `get_reading("r-nonexistent-1")` |
+
+> [!NOTE]
+> **Exception for `get_device_key`:** To maintain compatibility with Guardian rogue detection logic (`if not pub_key`), `get_device_key` returns `null` (never an error object) for unknown or invalid device IDs.
+
+### Authentication & Transports
+- **Authentication:** Controlled by environment variable `MCP_AUTH_TOKENS="brain:<token>,guardian:<token>"`.
+  - When unset: open access mode is enabled; Twin logs `[ALERT]` on startup; tool caller identity recorded as `"anonymous"`.
+  - When set: every HTTP request (`/sse`, `/messages/`, `/mcp`) requires header `Authorization: Bearer <token>`. Unauthorized requests return HTTP 401 with code `UNAUTHORIZED`.
+  - Caller identity (`"brain"` or `"guardian"`) is verified in constant time and logged in truth journals.
+- **Transports:**
+  - SSE transport served at `/sse` (messages at `/messages/`).
+  - Streamable HTTP transport served at `/mcp`.
+  - Host/DNS rebinding protection allows hosts listed in `MCP_ALLOWED_HOSTS` (defaults to `"localhost,127.0.0.1,twin_layer"`).
+
+---
+
+## 6. Behaviour Changes in Rework
+
+The following partner-visible behaviour changes apply to the Twin Layer:
+1. `get_device_state` and `get_city_state` return the last broadcast value, not physical truth. `list_devices` never returned a value and is unchanged.
+2. Actuation with an unknown `target_state`, or on an isolated or quarantined device, returns `{"status":"error",...}`.
+3. Repeating an idempotency key returns the cached result without running the command again.
+4. Public keys are stable across restarts, and `seq` continues across restarts.
+5. Rogue messages now actually reach `twin.sensors`.
+6. `/api/attack/*` moves off port 8000.
+7. Zone coordinates are corrected onto land.
+8. MCP gains optional bearer-token auth and an extra `/mcp` streamable-HTTP endpoint; `/sse` stays. Auth is off unless `MCP_AUTH_TOKENS` is set.
+9. The root `docker-compose.yml` network is now named `city_network` (it was `twin_network`). This matters only for partners who attach their own containers to it.
+10. `get_reading` for an unknown or expired id returns `{"status":"error","code":"READING_NOT_FOUND",...}` instead of `null`.
+11. `get_device_state` and `get_command_result` return structured errors (`DEVICE_NOT_FOUND`, `COMMAND_NOT_FOUND`) instead of `null`. `get_device_key` still returns `null` for unknown ids.
+12. Quarantining or isolating an active rogue id stops that id's messages from the next tick.
+13. `reinstate_device` and `release_device` both return isolated or quarantined devices to `ok`.

@@ -134,6 +134,20 @@ class CitySimulator:
         {"suffix": "ec1", "type": "emergency_call", "unit": "call/min", "min": 0.0, "max": 30.0, "init": 1.0},
     ]
 
+    ALLOWED_ZONES = ["zone-1", "zone-2", "zone-3", "zone-4", "zone-5", "zone-6"]
+    KNOWN_INCIDENTS = {
+        "medical_surge",
+        "medical_emergency",
+        "flood",
+        "traffic_accident",
+        "fire",
+        "blackout",
+        "air_hazard",
+    }
+    ALLOWED_SIGNAL_PLANS = ["normal", "green_wave", "red_restriction", "all_red", "adaptive"]
+    ALLOWED_VALVE_STATES = ["open", "half", "closed", "0%-100%"]
+    ALLOWED_GRID_STATES = ["grid_a", "grid_b", "island", "shed", "standby"]
+
     def __init__(
         self,
         seed: int = 42,
@@ -163,7 +177,8 @@ class CitySimulator:
         self.devices: Dict[str, DeviceState] = {}
         self.zone_dispatches: Dict[str, List[Dict[str, Any]]] = {z["zone_id"]: [] for z in self.ZONES}
         self.reported_zone_dispatches: Dict[str, List[Dict[str, Any]]] = {z["zone_id"]: [] for z in self.ZONES}
-        self.command_results: Dict[str, Dict[str, Any]] = {}
+        self.command_results_max = 10000
+        self.command_results: collections.OrderedDict[str, Dict[str, Any]] = collections.OrderedDict()
         self.reading_cache_max = int(os.getenv("READING_CACHE_MAX", "50400"))
         self.recent_readings_buffer: collections.OrderedDict[str, Dict[str, Any]] = collections.OrderedDict()
         self.active_attacks: Dict[str, Dict[str, Any]] = {}
@@ -203,6 +218,42 @@ class CitySimulator:
             self.recent_readings_buffer.popitem(last=False)
         self.recent_readings_buffer[reading_id] = reading_dict
 
+    def check_idempotency(
+        self, idempotency_key: str, tool: str, args: Dict[str, Any]
+    ) -> Tuple[bool, Optional[Dict[str, Any]]]:
+        """Check idempotency key against LRU cache.
+
+        Returns (is_handled, response_dict):
+        - If conflict: (True, {"status": "error", "code": "IDEMPOTENCY_CONFLICT", ...})
+        - If replay: (True, cached_result with "idempotent_replay": True)
+        - If new key: (False, None)
+        """
+        if idempotency_key in self.command_results:
+            cached = self.command_results[idempotency_key]
+            self.command_results.move_to_end(idempotency_key)
+            if cached.get("tool") == tool and cached.get("args") == args:
+                replay = dict(cached["result"])
+                replay["idempotent_replay"] = True
+                return True, replay
+            else:
+                conflict = {
+                    "status": "error",
+                    "code": "IDEMPOTENCY_CONFLICT",
+                    "message": f"Idempotency key '{idempotency_key}' was previously used for a different command or arguments.",
+                }
+                return True, conflict
+        return False, None
+
+    def record_idempotency_result(
+        self, idempotency_key: str, tool: str, args: Dict[str, Any], result: Dict[str, Any]
+    ) -> None:
+        """Record command execution result in LRU cache."""
+        if idempotency_key in self.command_results:
+            self.command_results.move_to_end(idempotency_key)
+        elif len(self.command_results) >= self.command_results_max:
+            self.command_results.popitem(last=False)
+        self.command_results[idempotency_key] = {"tool": tool, "args": args, "result": result}
+
     def signing_key_for(self, device_id: str) -> Optional[str]:
         """Return private Ed25519 signing key for registered device or active rogue device."""
         dev = self.devices.get(device_id)
@@ -216,6 +267,13 @@ class CitySimulator:
     def _generate_device_inventory(self) -> None:
         """Generate the exact 42 devices (7 per zone across 6 zones)."""
         device_records: List[DeviceRecord] = []
+        all_device_ids = [
+            f"z{zone['zone_id'].split('-')[-1]}-{tmpl['suffix']}"
+            for zone in self.ZONES
+            for tmpl in self.DEVICE_TEMPLATES
+        ]
+        keys_map = self.keystore.ensure_device_keys(all_device_ids)
+
         for zone in self.ZONES:
             zone_id = zone["zone_id"]
             zone_num = zone_id.split("-")[-1]
@@ -228,7 +286,7 @@ class CitySimulator:
                 lat = round(z_lat + (idx * 0.0012) - 0.0036, 6)
                 lon = round(z_lon + (idx * 0.0015) - 0.0045, 6)
 
-                priv_key, pub_key = self.keystore.get_or_create_keypair(device_id)
+                priv_key, pub_key = keys_map[device_id]
 
                 initial_actuator: Dict[str, Any] = {}
                 if tmpl["type"] == "traffic_camera":
@@ -725,15 +783,27 @@ class CitySimulator:
         ]
 
     def get_device_public_key(self, device_id: str) -> Optional[str]:
-        """Fetch device public key."""
+        """Fetch device public key. Returns None for unknown devices (never an error object)."""
+        if len(device_id) > 64:
+            return None
         dev = self.devices.get(device_id)
         return dev.public_key if dev else None
 
-    def get_device_state(self, device_id: str) -> Optional[Dict[str, Any]]:
+    def get_device_state(self, device_id: str) -> Dict[str, Any]:
         """Fetch current telemetry and status for a single device."""
+        if len(device_id) > 64:
+            return {
+                "status": "error",
+                "code": "INVALID_ARGUMENT",
+                "message": "device_id exceeds maximum length of 64 characters.",
+            }
         dev = self.devices.get(device_id)
         if not dev:
-            return None
+            return {
+                "status": "error",
+                "code": "DEVICE_NOT_FOUND",
+                "message": f"Device '{device_id}' not found.",
+            }
         return {
             "device_id": dev.device_id,
             "zone_id": dev.zone_id,
@@ -776,107 +846,505 @@ class CitySimulator:
         return self.recent_readings_buffer.get(reading_id)
 
     # Actuation Handlers (Layer 2 - City Brain)
-    def handle_dispatch(self, incident_type: str, zone_id: str, idempotency_key: Optional[str] = None) -> Dict[str, Any]:
+    def handle_dispatch(
+        self,
+        incident_type: str,
+        zone_id: str,
+        idempotency_key: Optional[str] = None,
+        caller: str = "anonymous",
+    ) -> Dict[str, Any]:
         """Handle dispatch command from City Brain."""
-        if zone_id not in self.zone_dispatches:
-            result = {"status": "error", "message": f"Unknown zone_id: {zone_id}"}
-        else:
-            dispatch_id = f"disp-{uuid.uuid4().hex[:8]}"
-            record = {
-                "dispatch_id": dispatch_id,
-                "incident_type": incident_type,
-                "zone_id": zone_id,
-                "dispatched_at": self.get_sim_time(),
+        # 1. String length check
+        if len(zone_id) > 64 or len(incident_type) > 64 or (idempotency_key and len(idempotency_key) > 64):
+            res = {
+                "status": "error",
+                "code": "INVALID_ARGUMENT",
+                "message": "Argument string exceeds maximum length of 64 characters.",
             }
-            self.reported_zone_dispatches[zone_id].append(record)
-            zone_attack = any(
-                atk.get("capability") == "actuator" and atk.get("target_zone_id") == zone_id
-                for atk in self.active_attacks.values()
+            self.ledger.log_command(
+                self.run_id, self.get_sim_time(), caller, "dispatch",
+                {"incident_type": incident_type, "zone_id": zone_id, "idempotency_key": idempotency_key},
+                False, "INVALID_ARGUMENT", res,
             )
-            if not zone_attack:
-                self.zone_dispatches[zone_id].append(record)
-            result = {"status": "ok", "dispatch_id": dispatch_id, "zone_id": zone_id}
+            return res
+
+        # 2. Zone lookup
+        if zone_id not in self.ALLOWED_ZONES:
+            res = {
+                "status": "error",
+                "code": "ZONE_NOT_FOUND",
+                "message": f"Zone '{zone_id}' not found.",
+                "allowed": list(self.ALLOWED_ZONES),
+            }
+            self.ledger.log_command(
+                self.run_id, self.get_sim_time(), caller, "dispatch",
+                {"incident_type": incident_type, "zone_id": zone_id, "idempotency_key": idempotency_key},
+                False, "ZONE_NOT_FOUND", res,
+            )
+            return res
+
+        # 3. Incident type syntax validation
+        if not re.match(r"^[a-z_]{1,32}$", incident_type):
+            res = {
+                "status": "error",
+                "code": "INVALID_INCIDENT_TYPE",
+                "message": f"Invalid incident_type '{incident_type}': must match ^[a-z_]{{1,32}}$.",
+            }
+            self.ledger.log_command(
+                self.run_id, self.get_sim_time(), caller, "dispatch",
+                {"incident_type": incident_type, "zone_id": zone_id, "idempotency_key": idempotency_key},
+                False, "INVALID_INCIDENT_TYPE", res,
+            )
+            return res
+
+        # 4. Idempotency check
+        args = {"incident_type": incident_type, "zone_id": zone_id}
+        if idempotency_key:
+            handled, replay = self.check_idempotency(idempotency_key, "dispatch", args)
+            if handled:
+                if replay.get("status") == "error":
+                    self.ledger.log_command(
+                        self.run_id, self.get_sim_time(), caller, "dispatch", args, False, replay.get("code"), replay
+                    )
+                return replay
+
+        # 5. Generic incident note
+        note = None
+        if incident_type not in self.KNOWN_INCIDENTS:
+            note = "unrecognized incident_type, dispatched as generic"
+
+        # 6. Physical execution & Actuator attack
+        dispatch_id = f"disp-{uuid.uuid4().hex[:8]}"
+        record = {
+            "dispatch_id": dispatch_id,
+            "incident_type": incident_type,
+            "zone_id": zone_id,
+            "dispatched_at": self.get_sim_time(),
+        }
+        self.reported_zone_dispatches[zone_id].append(record)
+
+        zone_attack = any(
+            atk.get("capability") == "actuator" and atk.get("target_zone_id") == zone_id
+            for atk in self.active_attacks.values()
+        )
+        if zone_attack:
+            executed = False
+            refused_code = "ACTUATOR_ATTACK"
+        else:
+            self.zone_dispatches[zone_id].append(record)
+            executed = True
+            refused_code = None
+
+        result: Dict[str, Any] = {"status": "ok", "dispatch_id": dispatch_id, "zone_id": zone_id}
+        if note:
+            result["note"] = note
 
         if idempotency_key:
-            self.command_results[idempotency_key] = result
+            self.record_idempotency_result(idempotency_key, "dispatch", args, result)
+
+        self.ledger.log_command(
+            self.run_id, self.get_sim_time(), caller, "dispatch", args, executed, refused_code, result
+        )
         return result
 
-    def handle_set_signal_plan(self, device_id: str, target_state: str, idempotency_key: Optional[str] = None) -> Dict[str, Any]:
+    def handle_set_signal_plan(
+        self,
+        device_id: str,
+        target_state: str,
+        idempotency_key: Optional[str] = None,
+        caller: str = "anonymous",
+    ) -> Dict[str, Any]:
         """Handle signal plan configuration for traffic cameras."""
-        dev = self.devices.get(device_id)
-        if not dev or dev.device_type != "traffic_camera":
-            result = {"status": "error", "message": f"Device {device_id} is not a valid traffic_camera"}
-        else:
-            dev.reported_actuator_state["signal_plan"] = target_state
-            # Check if actuator attack is active: accepts command but does not execute physically
-            if not (dev.active_attack and dev.active_attack.get("capability") == "actuator"):
-                dev.actuator_state["signal_plan"] = target_state
-            result = {"status": "ok", "device_id": device_id, "signal_plan": target_state}
+        args = {"device_id": device_id, "target_state": target_state}
 
-        if idempotency_key:
-            self.command_results[idempotency_key] = result
-        return result
+        # 1. Length checks
+        if len(device_id) > 64 or len(target_state) > 64 or (idempotency_key and len(idempotency_key) > 64):
+            res = {
+                "status": "error",
+                "code": "INVALID_ARGUMENT",
+                "message": "Argument string exceeds maximum length of 64 characters.",
+            }
+            self.ledger.log_command(
+                self.run_id, self.get_sim_time(), caller, "set_signal_plan", args, False, "INVALID_ARGUMENT", res
+            )
+            return res
 
-    def handle_set_valve(self, device_id: str, target_state: str, idempotency_key: Optional[str] = None) -> Dict[str, Any]:
-        """Handle water valve actuation."""
-        dev = self.devices.get(device_id)
-        if not dev or dev.device_type != "water_level":
-            result = {"status": "error", "message": f"Device {device_id} is not a valid water_level sensor"}
-        else:
-            ratio = 1.0 if target_state == "open" else 0.0
-            try:
-                if target_state.endswith("%"):
-                    ratio = float(target_state.rstrip("%")) / 100.0
-            except ValueError:
-                pass
-            dev.reported_actuator_state["valve_position"] = target_state
-            dev.reported_actuator_state["valve_ratio"] = max(0.0, min(1.0, ratio))
-            # Check if actuator attack is active: accepts command but does not execute physically
-            if not (dev.active_attack and dev.active_attack.get("capability") == "actuator"):
-                dev.actuator_state["valve_position"] = target_state
-                dev.actuator_state["valve_ratio"] = max(0.0, min(1.0, ratio))
-            result = {"status": "ok", "device_id": device_id, "valve_position": target_state}
-
-        if idempotency_key:
-            self.command_results[idempotency_key] = result
-        return result
-
-    def handle_switch_grid(self, device_id: str, target_state: str, idempotency_key: Optional[str] = None) -> Dict[str, Any]:
-        """Handle power grid switching actuation."""
-        dev = self.devices.get(device_id)
-        if not dev or dev.device_type != "power_load":
-            result = {"status": "error", "message": f"Device {device_id} is not a valid power_load sensor"}
-        else:
-            dev.reported_actuator_state["grid_state"] = target_state
-            # Check if actuator attack is active: accepts command but does not execute physically
-            if not (dev.active_attack and dev.active_attack.get("capability") == "actuator"):
-                dev.actuator_state["grid_state"] = target_state
-            result = {"status": "ok", "device_id": device_id, "grid_state": target_state}
-
-        if idempotency_key:
-            self.command_results[idempotency_key] = result
-        return result
-
-    def get_command_result(self, idempotency_key: str) -> Optional[Dict[str, Any]]:
-        """Retrieve command actuation result by idempotency key."""
-        return self.command_results.get(idempotency_key)
-
-    # Containment Handlers (Layer 3 - Guardian)
-    def update_device_status(self, device_id: str, new_status: str) -> Dict[str, Any]:
-        """Update device containment status (ok, isolated, quarantined, rolled_back, modelled)."""
-        valid_statuses = {"ok", "isolated", "quarantined", "rolled_back", "modelled"}
-        if new_status not in valid_statuses:
-            return {"status": "error", "message": f"Invalid status: {new_status}"}
-
+        # 2. Device lookup
         dev = self.devices.get(device_id)
         if not dev:
-            return {"status": "error", "message": f"Device {device_id} not found"}
+            res = {
+                "status": "error",
+                "code": "DEVICE_NOT_FOUND",
+                "message": f"Device '{device_id}' not found.",
+            }
+            self.ledger.log_command(
+                self.run_id, self.get_sim_time(), caller, "set_signal_plan", args, False, "DEVICE_NOT_FOUND", res
+            )
+            return res
 
-        dev.status = new_status
-        return {"status": "ok", "device_id": device_id, "new_status": new_status}
+        # 3. Device type validation
+        if dev.device_type != "traffic_camera":
+            res = {
+                "status": "error",
+                "code": "WRONG_DEVICE_TYPE",
+                "message": f"Device '{device_id}' is of type '{dev.device_type}', expected 'traffic_camera'.",
+            }
+            self.ledger.log_command(
+                self.run_id, self.get_sim_time(), caller, "set_signal_plan", args, False, "WRONG_DEVICE_TYPE", res
+            )
+            return res
 
-    def rollback_reading(self, reading_id: str) -> Dict[str, Any]:
+        # 4. Containment check
+        if dev.status in ("isolated", "quarantined"):
+            res = {
+                "status": "error",
+                "code": "DEVICE_CONTAINED",
+                "message": f"Device '{device_id}' is currently {dev.status} and cannot be actuated.",
+            }
+            self.ledger.log_command(
+                self.run_id, self.get_sim_time(), caller, "set_signal_plan", args, False, "DEVICE_CONTAINED", res
+            )
+            return res
+
+        # 5. Target state validation
+        if target_state not in self.ALLOWED_SIGNAL_PLANS:
+            res = {
+                "status": "error",
+                "code": "INVALID_TARGET_STATE",
+                "message": f"Invalid target_state '{target_state}' for traffic_camera.",
+                "allowed": list(self.ALLOWED_SIGNAL_PLANS),
+            }
+            self.ledger.log_command(
+                self.run_id, self.get_sim_time(), caller, "set_signal_plan", args, False, "INVALID_TARGET_STATE", res
+            )
+            return res
+
+        # 6. Idempotency check
+        if idempotency_key:
+            handled, replay = self.check_idempotency(idempotency_key, "set_signal_plan", args)
+            if handled:
+                if replay.get("status") == "error":
+                    self.ledger.log_command(
+                        self.run_id, self.get_sim_time(), caller, "set_signal_plan", args, False, replay.get("code"), replay
+                    )
+                return replay
+
+        # 7. Execution & Actuator attack
+        dev.reported_actuator_state["signal_plan"] = target_state
+        actuator_attack = (dev.active_attack and dev.active_attack.get("capability") == "actuator")
+        if actuator_attack:
+            executed = False
+            refused_code = "ACTUATOR_ATTACK"
+        else:
+            dev.actuator_state["signal_plan"] = target_state
+            executed = True
+            refused_code = None
+
+        result = {"status": "ok", "device_id": device_id, "signal_plan": target_state}
+        if idempotency_key:
+            self.record_idempotency_result(idempotency_key, "set_signal_plan", args, result)
+
+        self.ledger.log_command(
+            self.run_id, self.get_sim_time(), caller, "set_signal_plan", args, executed, refused_code, result
+        )
+        return result
+
+    def handle_set_valve(
+        self,
+        device_id: str,
+        target_state: str,
+        idempotency_key: Optional[str] = None,
+        caller: str = "anonymous",
+    ) -> Dict[str, Any]:
+        """Handle water valve actuation."""
+        args = {"device_id": device_id, "target_state": target_state}
+
+        # 1. Length checks
+        if len(device_id) > 64 or len(target_state) > 64 or (idempotency_key and len(idempotency_key) > 64):
+            res = {
+                "status": "error",
+                "code": "INVALID_ARGUMENT",
+                "message": "Argument string exceeds maximum length of 64 characters.",
+            }
+            self.ledger.log_command(
+                self.run_id, self.get_sim_time(), caller, "set_valve", args, False, "INVALID_ARGUMENT", res
+            )
+            return res
+
+        # 2. Device lookup
+        dev = self.devices.get(device_id)
+        if not dev:
+            res = {
+                "status": "error",
+                "code": "DEVICE_NOT_FOUND",
+                "message": f"Device '{device_id}' not found.",
+            }
+            self.ledger.log_command(
+                self.run_id, self.get_sim_time(), caller, "set_valve", args, False, "DEVICE_NOT_FOUND", res
+            )
+            return res
+
+        # 3. Device type validation
+        if dev.device_type != "water_level":
+            res = {
+                "status": "error",
+                "code": "WRONG_DEVICE_TYPE",
+                "message": f"Device '{device_id}' is of type '{dev.device_type}', expected 'water_level'.",
+            }
+            self.ledger.log_command(
+                self.run_id, self.get_sim_time(), caller, "set_valve", args, False, "WRONG_DEVICE_TYPE", res
+            )
+            return res
+
+        # 4. Containment check
+        if dev.status in ("isolated", "quarantined"):
+            res = {
+                "status": "error",
+                "code": "DEVICE_CONTAINED",
+                "message": f"Device '{device_id}' is currently {dev.status} and cannot be actuated.",
+            }
+            self.ledger.log_command(
+                self.run_id, self.get_sim_time(), caller, "set_valve", args, False, "DEVICE_CONTAINED", res
+            )
+            return res
+
+        # 5. Target state & ratio validation (open -> 1.0, half -> 0.5, closed -> 0.0, NN% -> NN/100)
+        ratio: Optional[float] = None
+        if target_state == "open":
+            ratio = 1.0
+        elif target_state == "half":
+            ratio = 0.5
+        elif target_state == "closed":
+            ratio = 0.0
+        elif target_state.endswith("%"):
+            m = re.match(r"^(\d+(?:\.\d+)?)%$", target_state)
+            if m:
+                pct = float(m.group(1))
+                if 0.0 <= pct <= 100.0:
+                    ratio = pct / 100.0
+
+        if ratio is None:
+            res = {
+                "status": "error",
+                "code": "INVALID_TARGET_STATE",
+                "message": f"Invalid target_state '{target_state}' for water_level.",
+                "allowed": ["open", "half", "closed", "0%-100%"],
+            }
+            self.ledger.log_command(
+                self.run_id, self.get_sim_time(), caller, "set_valve", args, False, "INVALID_TARGET_STATE", res
+            )
+            return res
+
+        # 6. Idempotency check
+        if idempotency_key:
+            handled, replay = self.check_idempotency(idempotency_key, "set_valve", args)
+            if handled:
+                if replay.get("status") == "error":
+                    self.ledger.log_command(
+                        self.run_id, self.get_sim_time(), caller, "set_valve", args, False, replay.get("code"), replay
+                    )
+                return replay
+
+        # 7. Execution & Actuator attack
+        dev.reported_actuator_state["valve_position"] = target_state
+        dev.reported_actuator_state["valve_ratio"] = ratio
+        actuator_attack = (dev.active_attack and dev.active_attack.get("capability") == "actuator")
+        if actuator_attack:
+            executed = False
+            refused_code = "ACTUATOR_ATTACK"
+        else:
+            dev.actuator_state["valve_position"] = target_state
+            dev.actuator_state["valve_ratio"] = ratio
+            executed = True
+            refused_code = None
+
+        result = {"status": "ok", "device_id": device_id, "valve_position": target_state}
+        if idempotency_key:
+            self.record_idempotency_result(idempotency_key, "set_valve", args, result)
+
+        self.ledger.log_command(
+            self.run_id, self.get_sim_time(), caller, "set_valve", args, executed, refused_code, result
+        )
+        return result
+
+    def handle_switch_grid(
+        self,
+        device_id: str,
+        target_state: str,
+        idempotency_key: Optional[str] = None,
+        caller: str = "anonymous",
+    ) -> Dict[str, Any]:
+        """Handle power grid switching actuation."""
+        args = {"device_id": device_id, "target_state": target_state}
+
+        # 1. Length checks
+        if len(device_id) > 64 or len(target_state) > 64 or (idempotency_key and len(idempotency_key) > 64):
+            res = {
+                "status": "error",
+                "code": "INVALID_ARGUMENT",
+                "message": "Argument string exceeds maximum length of 64 characters.",
+            }
+            self.ledger.log_command(
+                self.run_id, self.get_sim_time(), caller, "switch_grid", args, False, "INVALID_ARGUMENT", res
+            )
+            return res
+
+        # 2. Device lookup
+        dev = self.devices.get(device_id)
+        if not dev:
+            res = {
+                "status": "error",
+                "code": "DEVICE_NOT_FOUND",
+                "message": f"Device '{device_id}' not found.",
+            }
+            self.ledger.log_command(
+                self.run_id, self.get_sim_time(), caller, "switch_grid", args, False, "DEVICE_NOT_FOUND", res
+            )
+            return res
+
+        # 3. Device type validation
+        if dev.device_type != "power_load":
+            res = {
+                "status": "error",
+                "code": "WRONG_DEVICE_TYPE",
+                "message": f"Device '{device_id}' is of type '{dev.device_type}', expected 'power_load'.",
+            }
+            self.ledger.log_command(
+                self.run_id, self.get_sim_time(), caller, "switch_grid", args, False, "WRONG_DEVICE_TYPE", res
+            )
+            return res
+
+        # 4. Containment check
+        if dev.status in ("isolated", "quarantined"):
+            res = {
+                "status": "error",
+                "code": "DEVICE_CONTAINED",
+                "message": f"Device '{device_id}' is currently {dev.status} and cannot be actuated.",
+            }
+            self.ledger.log_command(
+                self.run_id, self.get_sim_time(), caller, "switch_grid", args, False, "DEVICE_CONTAINED", res
+            )
+            return res
+
+        # 5. Target state validation
+        if target_state not in self.ALLOWED_GRID_STATES:
+            res = {
+                "status": "error",
+                "code": "INVALID_TARGET_STATE",
+                "message": f"Invalid target_state '{target_state}' for power_load.",
+                "allowed": list(self.ALLOWED_GRID_STATES),
+            }
+            self.ledger.log_command(
+                self.run_id, self.get_sim_time(), caller, "switch_grid", args, False, "INVALID_TARGET_STATE", res
+            )
+            return res
+
+        # 6. Idempotency check
+        if idempotency_key:
+            handled, replay = self.check_idempotency(idempotency_key, "switch_grid", args)
+            if handled:
+                if replay.get("status") == "error":
+                    self.ledger.log_command(
+                        self.run_id, self.get_sim_time(), caller, "switch_grid", args, False, replay.get("code"), replay
+                    )
+                return replay
+
+        # 7. Execution & Actuator attack
+        dev.reported_actuator_state["grid_state"] = target_state
+        actuator_attack = (dev.active_attack and dev.active_attack.get("capability") == "actuator")
+        if actuator_attack:
+            executed = False
+            refused_code = "ACTUATOR_ATTACK"
+        else:
+            dev.actuator_state["grid_state"] = target_state
+            executed = True
+            refused_code = None
+
+        result = {"status": "ok", "device_id": device_id, "grid_state": target_state}
+        if idempotency_key:
+            self.record_idempotency_result(idempotency_key, "switch_grid", args, result)
+
+        self.ledger.log_command(
+            self.run_id, self.get_sim_time(), caller, "switch_grid", args, executed, refused_code, result
+        )
+        return result
+
+    def get_command_result(self, idempotency_key: str) -> Dict[str, Any]:
+        """Retrieve command actuation result by idempotency key."""
+        if len(idempotency_key) > 64:
+            return {
+                "status": "error",
+                "code": "INVALID_ARGUMENT",
+                "message": "idempotency_key exceeds maximum length of 64 characters.",
+            }
+        if idempotency_key not in self.command_results:
+            return {
+                "status": "error",
+                "code": "COMMAND_NOT_FOUND",
+                "message": f"Command with idempotency key '{idempotency_key}' not found.",
+            }
+        cached = self.command_results[idempotency_key]
+        self.command_results.move_to_end(idempotency_key)
+        return cached["result"]
+
+    # Containment Handlers (Layer 3 - Guardian)
+    def update_device_status(
+        self,
+        device_id: str,
+        new_status: str,
+        tool_name: str = "update_device_status",
+        caller: str = "anonymous",
+    ) -> Dict[str, Any]:
+        """Update device containment status (ok, isolated, quarantined)."""
+        if len(device_id) > 64:
+            return {
+                "status": "error",
+                "code": "INVALID_ARGUMENT",
+                "message": "device_id exceeds maximum length of 64 characters.",
+            }
+
+        # 1. Registered device
+        if device_id in self.devices:
+            dev = self.devices[device_id]
+            from_status = dev.status
+            if new_status == "ok" and from_status == "ok":
+                self.ledger.log_containment(self.run_id, self.get_sim_time(), caller, tool_name, device_id, "ok", "ok")
+                return {"status": "ok", "device_id": device_id, "new_status": "ok", "note": "device already ok"}
+
+            dev.status = new_status
+            self.ledger.log_containment(self.run_id, self.get_sim_time(), caller, tool_name, device_id, from_status, new_status)
+            return {"status": "ok", "device_id": device_id, "new_status": new_status}
+
+        # 2. Active rogue device (quarantine or isolate)
+        if new_status in ("quarantined", "isolated"):
+            matching_atk_id = None
+            for atk_id, rogue_info in list(self.rogue_attacks.items()):
+                r_dev = rogue_info.get("params", {}).get("rogue_device_id")
+                if r_dev == device_id:
+                    matching_atk_id = atk_id
+                    break
+
+            if matching_atk_id:
+                # Revoke network authority: stops emitting rogue readings from next tick
+                self.clear_attack(matching_atk_id)
+                self.ledger.log_containment(self.run_id, self.get_sim_time(), caller, tool_name, device_id, "ok", new_status)
+                return {"status": "ok", "device_id": device_id, "blocked": True, "new_status": new_status}
+
+        return {
+            "status": "error",
+            "code": "DEVICE_NOT_FOUND",
+            "message": f"Device '{device_id}' not found.",
+        }
+
+    def rollback_reading(self, reading_id: str, caller: str = "anonymous") -> Dict[str, Any]:
         """Mark a specific reading as rolled back."""
+        if len(reading_id) > 64:
+            return {
+                "status": "error",
+                "code": "INVALID_ARGUMENT",
+                "message": "reading_id exceeds maximum length of 64 characters.",
+            }
+
         reading = self.recent_readings_buffer.get(reading_id)
         if not reading:
             return {
@@ -884,7 +1352,17 @@ class CitySimulator:
                 "code": "READING_NOT_FOUND",
                 "message": f"Reading {reading_id} not found in the reading cache: unknown id, or older than the last {self.reading_cache_max} readings",
             }
+        from_status = reading.get("status", "ok")
         reading["status"] = "rolled_back"
+        self.ledger.log_containment(
+            self.run_id,
+            self.get_sim_time(),
+            caller,
+            "rollback_reading",
+            reading_id,
+            from_status,
+            "rolled_back",
+        )
         return {"status": "ok", "reading_id": reading_id, "reading_status": "rolled_back"}
 
     def close(self) -> None:

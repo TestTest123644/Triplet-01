@@ -18,7 +18,7 @@ from typing import Optional
 import uvicorn
 
 from twin.kafka_streamer import KafkaStreamer
-from twin.mcp_server import mcp, set_active_simulator
+from twin.mcp_server import build_mcp_app, set_active_simulator
 from twin.red_team_api import build_red_team_app, get_or_create_red_team_token
 from twin.simulation import CitySimulator
 
@@ -141,8 +141,8 @@ async def main() -> None:
     red_team_host = os.getenv("RED_TEAM_HOST", "127.0.0.1")
     red_team_port = int(os.getenv("RED_TEAM_PORT", "8100"))
 
-    # 4. Configure MCP ASGI Server (strictly Port 8000, no /api routes)
-    mcp_app = mcp.sse_app(host=mcp_host)
+    # 4. Configure MCP ASGI Server (strictly Port 8000, exposes /sse and /mcp, no /api routes)
+    mcp_app = build_mcp_app()
     mcp_config = uvicorn.Config(
         app=mcp_app,
         host=mcp_host,
@@ -196,8 +196,12 @@ async def main() -> None:
         mcp_server.should_exit = True
         red_team_server.should_exit = True
 
-        for task in pending:
-            task.cancel()
+        if pending:
+            try:
+                await asyncio.wait_for(asyncio.gather(*pending, return_exceptions=True), timeout=3.0)
+            except asyncio.TimeoutError:
+                for task in pending:
+                    task.cancel()
     finally:
         sim.close()
 
