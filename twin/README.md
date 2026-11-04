@@ -75,3 +75,7 @@ PYTHONPATH=src streamlit run dashboard.py
 - **MCP Server:** `http://localhost:8000/sse` (MCP JSON-RPC only, strictly isolated from truth)
 - **Red Team Adversary API:** `http://localhost:8100/api/status` (Port 8100, protected by `X-Red-Team-Token`)
 - **Operations Console:** `http://localhost:8501`
+
+### State Persistence and Keystore
+- **Keystore (`KEYSTORE_PATH`):** Device identities are backed by a persistent JSON keystore (mode 600) to keep public keys stable across restarts. Partners can safely cache device public keys.
+- **Ledger Reset (`RESET_LEDGER=true`):** Wipes telemetry readings, attacks, and runs records from the ledger on startup while preserving registered devices and device keystore.

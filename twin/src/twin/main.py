@@ -68,7 +68,8 @@ async def run_simulation_stream_loop(
         # Execute 1 tick across all 42 devices
         readings = sim.tick()
 
-        # Stream readings to Kafka
+        # Stream readings to Kafka and collect wire confirmation
+        wire_records = []
         for raw in readings:
             dev_id = raw.get("device_id")
             signing_key = sim.signing_key_for(dev_id)
@@ -76,9 +77,18 @@ async def run_simulation_stream_loop(
                 logger.warning(f"[ALERT] No signing key found for device {dev_id}")
                 continue
             try:
-                streamer.stream_reading(raw, signing_key)
+                res = streamer.stream_reading(raw, signing_key)
+                if res is not None:
+                    reading, raw_bytes = res
+                    wire_records.append((reading.reading_id, reading.sig, len(raw_bytes)))
             except Exception as e:
                 logger.error(f"Error streaming reading {raw.get('reading_id')}: {e}")
+
+        if wire_records:
+            try:
+                sim.ledger.record_wire_batch(wire_records)
+            except Exception as e:
+                logger.error(f"Error recording wire batch to ledger: {e}")
 
         tick_count += 1
         if tick_count % 100 == 0:
@@ -177,16 +187,19 @@ async def main() -> None:
     logger.info(f"Red Team Adversary API listening on http://{red_team_host}:{red_team_port}/api/status")
     logger.info(f"Kafka stream publishing to {bootstrap_servers} topic '{topic}'")
 
-    done, pending = await asyncio.wait(
-        [sim_task, mcp_task, red_team_task],
-        return_when=asyncio.FIRST_COMPLETED,
-    )
-    stop_event.set()
-    mcp_server.should_exit = True
-    red_team_server.should_exit = True
+    try:
+        done, pending = await asyncio.wait(
+            [sim_task, mcp_task, red_team_task],
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        stop_event.set()
+        mcp_server.should_exit = True
+        red_team_server.should_exit = True
 
-    for task in pending:
-        task.cancel()
+        for task in pending:
+            task.cancel()
+    finally:
+        sim.close()
 
 
 if __name__ == "__main__":

@@ -41,3 +41,7 @@ page_*.png
 scratch/
 hackathon_shell.sh
 REVIEW_PROMPT_FOR_CLAUDE.md
+
+# Secrets & Local Identity Keystores
+device_keys.json
+*.token

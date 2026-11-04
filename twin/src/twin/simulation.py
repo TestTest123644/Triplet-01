@@ -14,6 +14,7 @@ import math
 import os
 import random
 import re
+import sqlite3
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -26,8 +27,15 @@ from twin.db_ledger import (
     GroundTruthLedger,
     InjectedAttackRecord,
     TruthReadingRecord,
+    parse_sim_time,
 )
-from twin.wire_limits import ROGUE_ID_MAX_LEN, WIRE_VALUE_MAX, WIRE_VALUE_MIN
+from twin.keystore import DeviceKeystore
+from twin.wire_limits import (
+    ROGUE_ID_MAX_LEN,
+    SEQ_SAFE_MAX,
+    WIRE_VALUE_MAX,
+    WIRE_VALUE_MIN,
+)
 
 logger = logging.getLogger("twin.simulation")
 
@@ -126,12 +134,32 @@ class CitySimulator:
         {"suffix": "ec1", "type": "emergency_call", "unit": "call/min", "min": 0.0, "max": 30.0, "init": 1.0},
     ]
 
-    def __init__(self, seed: int = 42, ledger: Optional[GroundTruthLedger] = None):
+    def __init__(
+        self,
+        seed: int = 42,
+        ledger: Optional[GroundTruthLedger] = None,
+        keystore_path: Optional[str] = None,
+    ):
         self.seed = seed
-        self.session_id = uuid.uuid4().hex[:4]
+        self.run_id = uuid.uuid4().hex
+        self.session_id = self.run_id[:4]
         self.rng = random.Random(seed)
-        self.clock = SimulationClock()
         self.ledger = ledger or GroundTruthLedger()
+        self.keystore = DeviceKeystore(keystore_path=keystore_path)
+
+        # 2.b: Resumption clock: if SIM_START_TIME is not set, resume sim time from
+        # the MAX(ts) in readings_truth plus 1 second. If empty or missing, default to 2026-10-17T12:00:00Z.
+        sim_start_env = os.getenv("SIM_START_TIME")
+        if sim_start_env:
+            start_time = parse_sim_time(sim_start_env)
+        else:
+            latest_ts = self.ledger.get_latest_sim_time()
+            if latest_ts:
+                start_time = parse_sim_time(latest_ts) + timedelta(seconds=1)
+            else:
+                start_time = datetime(2026, 10, 17, 12, 0, 0, tzinfo=timezone.utc)
+
+        self.clock = SimulationClock(start_time=start_time)
         self.devices: Dict[str, DeviceState] = {}
         self.zone_dispatches: Dict[str, List[Dict[str, Any]]] = {z["zone_id"]: [] for z in self.ZONES}
         self.reported_zone_dispatches: Dict[str, List[Dict[str, Any]]] = {z["zone_id"]: [] for z in self.ZONES}
@@ -145,6 +173,27 @@ class CitySimulator:
         self._clamped_attacks: set[str] = set()
 
         self._generate_device_inventory()
+
+        # 2.a, 2.c: Resume sequence numbers per device and check 0.9 * SEQ_SAFE_MAX threshold
+        max_seqs = self.ledger.get_max_sequences_per_device()
+        for dev in self.devices.values():
+            if dev.device_id in max_seqs:
+                dev.seq = max_seqs[dev.device_id]
+                if dev.seq >= 0.9 * SEQ_SAFE_MAX:
+                    logger.warning(
+                        f"[ALERT] Device {dev.device_id} resumed seq {dev.seq} approaches safe wire limit ({SEQ_SAFE_MAX})"
+                    )
+
+        for rogue_id, r_seq in max_seqs.items():
+            if rogue_id not in self.devices:
+                self._rogue_seqs[rogue_id] = r_seq
+                if r_seq >= 0.9 * SEQ_SAFE_MAX:
+                    logger.warning(
+                        f"[ALERT] Rogue device {rogue_id} resumed seq {r_seq} approaches safe wire limit ({SEQ_SAFE_MAX})"
+                    )
+
+        # 3.b: Record start of run in runs table
+        self.ledger.start_run(self.run_id, self.seed, self.get_sim_time())
 
     def _add_reading_to_cache(self, reading_id: str, reading_dict: Dict[str, Any]) -> None:
         """Add reading to bounded OrderedDict cache, evicting oldest when capacity is reached."""
@@ -179,7 +228,7 @@ class CitySimulator:
                 lat = round(z_lat + (idx * 0.0012) - 0.0036, 6)
                 lon = round(z_lon + (idx * 0.0015) - 0.0045, 6)
 
-                priv_key, pub_key = generate_keypair()
+                priv_key, pub_key = self.keystore.get_or_create_keypair(device_id)
 
                 initial_actuator: Dict[str, Any] = {}
                 if tmpl["type"] == "traffic_camera":
@@ -404,6 +453,7 @@ class CitySimulator:
                 start_sim_time=sim_time,
                 active=True,
                 description=attack_info["description"],
+                run_id=self.run_id,
             )
         )
 
@@ -461,6 +511,7 @@ class CitySimulator:
                 end_sim_time=self.get_sim_time(),
                 active=False,
                 description=attack_info.get("description"),
+                run_id=self.run_id,
             )
         )
         return True
@@ -567,6 +618,7 @@ class CitySimulator:
                     sig=None,
                     attack_type=attack_type,
                     is_attacked=is_attacked,
+                    run_id=self.run_id,
                 )
             )
 
@@ -636,11 +688,17 @@ class CitySimulator:
                     sig=None,
                     attack_type="rogue",
                     is_attacked=True,
+                    run_id=self.run_id,
                 )
             )
 
         # Batch record ground truth to SQLite ledger
-        self.ledger.record_readings_truth_batch(truth_records)
+        try:
+            self.ledger.record_readings_truth_batch(truth_records)
+        except sqlite3.IntegrityError as e:
+            logger.error(
+                f"[CRITICAL THREAT] Duplicate reading_id detected in ground truth ledger: {e}"
+            )
 
         # Advance clock
         self.clock.advance_tick()
@@ -828,6 +886,18 @@ class CitySimulator:
             }
         reading["status"] = "rolled_back"
         return {"status": "ok", "reading_id": reading_id, "reading_status": "rolled_back"}
+
+    def close(self) -> None:
+        """Cleanly terminate simulator, record run end in ledger, and close connections."""
+        if hasattr(self, "ledger") and self.ledger:
+            try:
+                self.ledger.end_run(self.run_id, self.get_sim_time())
+            except Exception as e:
+                logger.warning(f"Failed to record run end: {e}")
+            try:
+                self.ledger.close()
+            except Exception:
+                pass
 
 
 if __name__ == "__main__":
