@@ -7,12 +7,17 @@ from context.md, cryptographic Ed25519 signing, and the 300-byte payload limit.
 
 from __future__ import annotations
 
+import collections
 import json
 import logging
+import math
+import os
+import time
 from typing import Any, Dict, List, Literal, Optional, Tuple, Union
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from twin.crypto_utils import canonicalize_for_signing, sign_payload, verify_payload_signature
+from twin.wire_limits import WIRE_VALUE_MAX, WIRE_VALUE_MIN
 
 logger = logging.getLogger("twin.kafka_streamer")
 
@@ -61,6 +66,16 @@ class TwinSensorReading(BaseModel):
             raise ValueError("Timestamp must end with 'Z' indicating UTC RFC 3339 format")
         return v
 
+    @field_validator("value")
+    def validate_wire_value(cls, v: float) -> float:
+        if not math.isfinite(v):
+            raise ValueError(f"Sensor value must be finite, got {v}")
+        if v < WIRE_VALUE_MIN or v > WIRE_VALUE_MAX:
+            raise ValueError(
+                f"Sensor value {v} outside wire bounds [{WIRE_VALUE_MIN}, {WIRE_VALUE_MAX}]"
+            )
+        return v
+
 
 def serialize_reading(reading: TwinSensorReading) -> bytes:
     """Serialize TwinSensorReading to compact UTF-8 JSON bytes."""
@@ -85,7 +100,20 @@ class KafkaStreamer:
         self.mock_mode = mock_mode
         self.producer = None
         self.sent_count = 0
-        self.sink_buffer: List[bytes] = []
+
+        self.sink_max = int(os.getenv("SINK_MAX", "10000"))
+        self.sink_buffer: collections.deque[bytes] = collections.deque(maxlen=self.sink_max)
+
+        self.produced = 0
+        self.delivered = 0
+        self.delivery_failed = 0
+        self.sunk = 0
+        self.dropped = 0
+        self.rejected_oversize = 0
+        self.rejected_invalid = 0
+
+        self._oversize_alerted_devices: set[str] = set()
+        self._rate_history: collections.deque[Tuple[float, int]] = collections.deque(maxlen=1000)
 
         if not mock_mode:
             try:
@@ -105,6 +133,20 @@ class KafkaStreamer:
                     "Falling back to sink buffer mode."
                 )
                 self.producer = None
+
+    def _on_delivery(self, err: Any, msg: Any) -> None:
+        """Delivery report callback for confluent-kafka producer."""
+        if err is not None:
+            self.delivery_failed += 1
+        else:
+            self.delivered += 1
+
+    def _sink_payload(self, payload_bytes: bytes) -> None:
+        """Append to bounded sink buffer and track dropped packets."""
+        if len(self.sink_buffer) >= self.sink_max:
+            self.dropped += 1
+        self.sink_buffer.append(payload_bytes)
+        self.sunk += 1
 
     def sign_and_build_reading(
         self, raw_reading: Dict[str, Any], private_key_b64: str
@@ -127,12 +169,16 @@ class KafkaStreamer:
             corrupted = "AAAA" if sig.endswith("==") else "BB=="
             sig = sig[:-4] + corrupted
         payload_to_sign["sig"] = sig
-        reading = TwinSensorReading(**payload_to_sign)
+        try:
+            reading = TwinSensorReading(**payload_to_sign)
+        except (ValueError, ValidationError) as e:
+            self.rejected_invalid += 1
+            raise ValueError(f"Invalid reading payload: {e}") from e
         return reading
 
     def stream_reading(
         self, raw_reading: Dict[str, Any], private_key_b64: str
-    ) -> Tuple[TwinSensorReading, bytes]:
+    ) -> Optional[Tuple[TwinSensorReading, bytes]]:
         """Validate, sign, serialize, verify size limit (<300 bytes), and emit to Kafka."""
         reading = self.sign_and_build_reading(raw_reading, private_key_b64)
         serialized_bytes = serialize_reading(reading)
@@ -140,10 +186,15 @@ class KafkaStreamer:
         # Enforce the strict 300-byte constraint
         payload_size = len(serialized_bytes)
         if payload_size > self.MAX_PAYLOAD_BYTES:
-            raise ValueError(
-                f"Payload size {payload_size} bytes exceeds the strict {self.MAX_PAYLOAD_BYTES}-byte limit! "
-                f"Payload: {serialized_bytes.decode('utf-8')}"
-            )
+            self.rejected_oversize += 1
+            dev_id = reading.device_id
+            if dev_id not in self._oversize_alerted_devices:
+                self._oversize_alerted_devices.add(dev_id)
+                logger.warning(
+                    f"[ALERT] Payload size {payload_size} bytes for device {dev_id} "
+                    f"exceeds strict {self.MAX_PAYLOAD_BYTES}-byte limit"
+                )
+            return None
 
         if self.producer is not None:
             try:
@@ -151,17 +202,63 @@ class KafkaStreamer:
                     topic=self.topic,
                     key=reading.device_id.encode("utf-8"),
                     value=serialized_bytes,
+                    on_delivery=self._on_delivery,
                 )
+                self.produced += 1
                 # Poll to serve delivery callbacks without blocking
                 self.producer.poll(0)
+            except BufferError:
+                self.producer.poll(0.05)
+                try:
+                    self.producer.produce(
+                        topic=self.topic,
+                        key=reading.device_id.encode("utf-8"),
+                        value=serialized_bytes,
+                        on_delivery=self._on_delivery,
+                    )
+                    self.produced += 1
+                    self.producer.poll(0)
+                except Exception as e:
+                    logger.error(f"Kafka produce failed after BufferError retry: {e}")
+                    self._sink_payload(serialized_bytes)
             except Exception as e:
                 logger.error(f"Error producing to Kafka: {e}")
-                self.sink_buffer.append(serialized_bytes)
+                self._sink_payload(serialized_bytes)
         else:
-            self.sink_buffer.append(serialized_bytes)
+            self._sink_payload(serialized_bytes)
 
         self.sent_count += 1
+        now = time.monotonic()
+        if not self._rate_history or now - self._rate_history[-1][0] >= 0.2:
+            self._rate_history.append((now, self.produced + self.sunk))
+
         return reading, serialized_bytes
+
+    def stats(self) -> Dict[str, Any]:
+        """Return streaming metrics and error counters."""
+        return {
+            "produced": self.produced,
+            "delivered": self.delivered,
+            "delivery_failed": self.delivery_failed,
+            "sunk": self.sunk,
+            "dropped": self.dropped,
+            "rejected_oversize": self.rejected_oversize,
+            "rejected_invalid": self.rejected_invalid,
+        }
+
+    def get_msgs_per_sec(self) -> float:
+        """Calculate throughput averaged over the last 10 seconds of wall-clock time."""
+        now = time.monotonic()
+        total = self.produced + self.sunk
+        while self._rate_history and now - self._rate_history[0][0] > 10.0:
+            self._rate_history.popleft()
+        if not self._rate_history:
+            return 0.0
+        oldest_time, oldest_count = self._rate_history[0]
+        duration = now - oldest_time
+        if duration <= 0:
+            return 0.0
+        return round((total - oldest_count) / duration, 2)
 
     def flush(self, timeout: float = 1.0) -> None:
         """Flush remaining buffered messages in producer."""

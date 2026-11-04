@@ -127,8 +127,8 @@ if __name__ == "__main__":
 
     # 3. Rogue Device
     rogue_payload = {
-        "reading_id": "r-rogue-001",
-        "device_id": "rogue-001",
+        "reading_id": "r-rg-001",
+        "device_id": "rg-001",
         "device_type": "traffic_camera",
         "ts": sim.get_sim_time(),
         "seq": 1,

@@ -7,9 +7,13 @@ Wall-clock time is exclusively used for cycle pacing (10 Hz).
 
 from __future__ import annotations
 
+import collections
 import json
+import logging
 import math
+import os
 import random
+import re
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -23,6 +27,9 @@ from twin.db_ledger import (
     InjectedAttackRecord,
     TruthReadingRecord,
 )
+from twin.wire_limits import ROGUE_ID_MAX_LEN, WIRE_VALUE_MAX, WIRE_VALUE_MIN
+
+logger = logging.getLogger("twin.simulation")
 
 
 def format_sim_time(sim_dt: datetime) -> str:
@@ -129,11 +136,32 @@ class CitySimulator:
         self.zone_dispatches: Dict[str, List[Dict[str, Any]]] = {z["zone_id"]: [] for z in self.ZONES}
         self.reported_zone_dispatches: Dict[str, List[Dict[str, Any]]] = {z["zone_id"]: [] for z in self.ZONES}
         self.command_results: Dict[str, Dict[str, Any]] = {}
-        self.recent_readings_buffer: Dict[str, Dict[str, Any]] = {}
+        self.reading_cache_max = int(os.getenv("READING_CACHE_MAX", "50400"))
+        self.recent_readings_buffer: collections.OrderedDict[str, Dict[str, Any]] = collections.OrderedDict()
         self.active_attacks: Dict[str, Dict[str, Any]] = {}
         self.rogue_attacks: Dict[str, Dict[str, Any]] = {}
+        self._rogue_keys: Dict[str, Tuple[str, str]] = {}
+        self._rogue_seqs: Dict[str, int] = {}
+        self._clamped_attacks: set[str] = set()
 
         self._generate_device_inventory()
+
+    def _add_reading_to_cache(self, reading_id: str, reading_dict: Dict[str, Any]) -> None:
+        """Add reading to bounded OrderedDict cache, evicting oldest when capacity is reached."""
+        if reading_id in self.recent_readings_buffer:
+            del self.recent_readings_buffer[reading_id]
+        elif len(self.recent_readings_buffer) >= self.reading_cache_max:
+            self.recent_readings_buffer.popitem(last=False)
+        self.recent_readings_buffer[reading_id] = reading_dict
+
+    def signing_key_for(self, device_id: str) -> Optional[str]:
+        """Return private Ed25519 signing key for registered device or active rogue device."""
+        dev = self.devices.get(device_id)
+        if dev:
+            return dev.private_key
+        if device_id in self._rogue_keys:
+            return self._rogue_keys[device_id][0]
+        return None
 
 
     def _generate_device_inventory(self) -> None:
@@ -316,8 +344,39 @@ class CitySimulator:
         if capability not in valid_caps:
             raise ValueError(f"Invalid adversary capability: {capability}. Must be one of {valid_caps}")
 
+        params_dict = dict(params or {})
+
+        # 1.b: Reject non-finite numeric params (NaN/inf) with ValueError
+        def _check_finite(obj: Any) -> None:
+            if isinstance(obj, float):
+                if not math.isfinite(obj):
+                    raise ValueError(f"Non-finite numeric parameter detected: {obj}")
+            elif isinstance(obj, dict):
+                for v in obj.values():
+                    _check_finite(v)
+            elif isinstance(obj, (list, tuple)):
+                for v in obj:
+                    _check_finite(v)
+
+        _check_finite(params_dict)
+
+        # 2.a, 2.c: Handle rogue device ID validation and throwaway Ed25519 keypair
+        if capability == "rogue":
+            rogue_dev_id = params_dict.get("rogue_device_id", "rg-01")
+            if not re.match(r"^[a-z0-9-]{1,6}$", rogue_dev_id):
+                raise ValueError(
+                    f"Invalid rogue_device_id '{rogue_dev_id}': must match ^[a-z0-9-]{{1,{ROGUE_ID_MAX_LEN}}}$ (max length {ROGUE_ID_MAX_LEN})"
+                )
+            if rogue_dev_id in self.devices:
+                raise ValueError(
+                    f"Invalid rogue_device_id '{rogue_dev_id}': collides with registered device_id"
+                )
+            params_dict["rogue_device_id"] = rogue_dev_id
+            # Throwaway keypair per rogue attack stored privately, NOT in attack_info or params
+            priv_b64, pub_b64 = generate_keypair()
+            self._rogue_keys[rogue_dev_id] = (priv_b64, pub_b64)
+
         attack_id = f"atk-{uuid.uuid4().hex[:8]}"
-        params_dict = params or {}
         sim_time = self.get_sim_time()
 
         attack_info = {
@@ -365,7 +424,13 @@ class CitySimulator:
 
         attack_info = self.active_attacks.pop(attack_id)
         if attack_id in self.rogue_attacks:
-            self.rogue_attacks.pop(attack_id)
+            rogue_info = self.rogue_attacks.pop(attack_id)
+            r_dev_id = rogue_info.get("params", {}).get("rogue_device_id")
+            if r_dev_id:
+                self._rogue_keys.pop(r_dev_id, None)
+                self._rogue_seqs.pop(r_dev_id, None)
+
+        self._clamped_attacks.discard(attack_id)
 
         target_dev = attack_info.get("target_device_id")
         target_zone = attack_info.get("target_zone_id")
@@ -402,6 +467,9 @@ class CitySimulator:
             self.clear_attack(aid)
         self.active_attacks.clear()
         self.rogue_attacks.clear()
+        self._rogue_keys.clear()
+        self._rogue_seqs.clear()
+        self._clamped_attacks.clear()
         for d in self.devices.values():
             d.active_attack = None
             d.drift_offset = 0.0
@@ -466,6 +534,21 @@ class CitySimulator:
                     elif link_mode == "replay" and dev.last_broadcast_reading:
                         replay_reading = True
 
+            # 1.a: Clamp every broadcast value into [WIRE_VALUE_MIN, WIRE_VALUE_MAX]
+            clamped_val = max(WIRE_VALUE_MIN, min(WIRE_VALUE_MAX, float(broadcast_val)))
+            if clamped_val != broadcast_val:
+                if is_attacked and dev.active_attack:
+                    atk_id = dev.active_attack.get("attack_id")
+                    if atk_id and atk_id not in self._clamped_attacks:
+                        self._clamped_attacks.add(atk_id)
+                        logger.warning(
+                            f"[ALERT] Attack {atk_id} broadcast value {broadcast_val} clamped to "
+                            f"{clamped_val} within wire limits [{WIRE_VALUE_MIN}, {WIRE_VALUE_MAX}]"
+                        )
+                broadcast_val = clamped_val
+            else:
+                broadcast_val = clamped_val
+
             # Record truth into SQLite Ground Truth Ledger
             truth_records.append(
                 TruthReadingRecord(
@@ -504,35 +587,44 @@ class CitySimulator:
                     dev.last_broadcast_value = broadcast_val
 
                 broadcast_readings.append(reading_dict)
-                self.recent_readings_buffer[reading_id] = reading_dict
+                self._add_reading_to_cache(reading_id, reading_dict)
                 dev.last_broadcast_reading = reading_dict
 
         # Process active rogue attacks (unregistered devices broadcasting)
         for atk_id, rogue_info in list(self.rogue_attacks.items()):
             rogue_params = rogue_info.get("params", {})
-            rogue_dev_id = rogue_params.get("rogue_device_id", "rogue-01")
-            rogue_reading_id = f"r-{rogue_dev_id}-{self.clock.tick_count}"
-            rogue_val = float(rogue_params.get("value", 88.88))
+            rogue_dev_id = rogue_params.get("rogue_device_id", "rg-01")
+            seq = self._rogue_seqs.get(rogue_dev_id, 0) + 1
+            self._rogue_seqs[rogue_dev_id] = seq
+            rogue_reading_id = f"r-{rogue_dev_id}-{seq}"
+            raw_rogue_val = float(rogue_params.get("value", 88.88))
+            rogue_val = max(WIRE_VALUE_MIN, min(WIRE_VALUE_MAX, raw_rogue_val))
+            if rogue_val != raw_rogue_val and atk_id not in self._clamped_attacks:
+                self._clamped_attacks.add(atk_id)
+                logger.warning(
+                    f"[ALERT] Attack {atk_id} broadcast value {raw_rogue_val} clamped to "
+                    f"{rogue_val} within wire limits [{WIRE_VALUE_MIN}, {WIRE_VALUE_MAX}]"
+                )
             rogue_dict = {
                 "reading_id": rogue_reading_id,
                 "device_id": rogue_dev_id,
                 "device_type": "traffic_camera",
                 "ts": sim_time,
-                "seq": self.clock.tick_count,
+                "seq": seq,
                 "value": rogue_val,
                 "unit": "veh/min",
                 "location": rogue_params.get("zone_id", "zone-1"),
                 "status": "ok",
             }
             broadcast_readings.append(rogue_dict)
-            self.recent_readings_buffer[rogue_reading_id] = rogue_dict
+            self._add_reading_to_cache(rogue_reading_id, rogue_dict)
 
             truth_records.append(
                 TruthReadingRecord(
                     reading_id=rogue_reading_id,
                     device_id=rogue_dev_id,
                     ts=sim_time,
-                    seq=self.clock.tick_count,
+                    seq=seq,
                     true_value=0.0,
                     broadcast_value=rogue_val,
                     unit="veh/min",
@@ -703,10 +795,6 @@ class CitySimulator:
             self.command_results[idempotency_key] = result
         return result
 
-        if idempotency_key:
-            self.command_results[idempotency_key] = result
-        return result
-
     def get_command_result(self, idempotency_key: str) -> Optional[Dict[str, Any]]:
         """Retrieve command actuation result by idempotency key."""
         return self.command_results.get(idempotency_key)
@@ -729,7 +817,10 @@ class CitySimulator:
         """Mark a specific reading as rolled back."""
         reading = self.recent_readings_buffer.get(reading_id)
         if not reading:
-            return {"status": "error", "message": f"Reading {reading_id} not found in buffer"}
+            return {
+                "status": "error",
+                "message": f"Reading {reading_id} is older than the cache window (READING_CACHE_MAX={self.reading_cache_max})",
+            }
         reading["status"] = "rolled_back"
         return {"status": "ok", "reading_id": reading_id, "reading_status": "rolled_back"}
 

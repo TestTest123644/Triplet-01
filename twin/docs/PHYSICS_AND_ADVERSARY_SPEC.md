@@ -127,6 +127,6 @@ The adversary model implements 6 distinct attack vectors, altering telemetry bro
 | **`device_physical`** | Overwrites telemetry metric with attacker value; maintains legitimate Ed25519 signature. | Guardian detects impossible physical gradients or discrepancies with neighboring sensors; rolls back reading via MCP. |
 | **`device_key`** | Signs payload with an unauthorized, rogue private key. | Guardian verifies against public key retrieved via MCP `get_device_key`; signature check fails immediately. |
 | **`link`** | Flips bits in transit or drops packets entirely. | Guardian receives malformed JSON or cryptographic signature validation failure (`Ed25519 verification failed`). |
-| **`rogue`** | Broadcasts telemetry under an unregistered identifier (e.g. `z1-rogue-1`). | Guardian cross-checks with MCP `list_devices`; flags sensor as an unauthorized hardware intrusion. |
+| **`rogue`** | Broadcasts telemetry under an unregistered identifier (e.g. `rg-z11`). | Guardian cross-checks with MCP `list_devices`; flags sensor as an unauthorized hardware intrusion. |
 | **`actuator`** | Acknowledges MCP commands as `"ok"` but refuses to alter physical simulation state. | City Brain detects telemetry failing to converge toward expected target; alerts human operators. |
 | **`sensor_fault`** | Injects subtle continuous linear drift (`dt * drift_rate`) or frozen repeated values. | Statistical outlier filtering across zone-level sensor clusters flags drifting readings. |

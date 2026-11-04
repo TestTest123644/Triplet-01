@@ -693,7 +693,7 @@ demo_preset_options = [
     "Preset 1: Physical Spoof (z1-tc1 = 185 veh/min in Downtown)",
     "Preset 2: Compromised Key Forgery (z3-pl1 = 112 MW in Industrial)",
     "Preset 3: Link Signature Corruption (z2-wl1 in Harbor)",
-    "Preset 4: Unauthorized Rogue Transmitter (rogue-x9 in West Hills)",
+    "Preset 4: Unauthorized Rogue Transmitter (rg-x9 in West Hills)",
     "Preset 5: Sensor Drift Fault (z5-aq1 AQI +2.5/s in University)",
     "Preset 6: Actuator Non-Execution (z1-wl1 Valve Lock)",
 ]
@@ -727,7 +727,7 @@ if st.sidebar.button("LAUNCH SELECTED DEMO", type="primary", use_container_width
     elif "Preset 4" in selected_demo:
         succ, msg = inject_attack_to_simulator(
             capability="rogue",
-            params={"rogue_device_id": "rogue-x9", "value": 888.0, "zone_id": "zone-4"},
+            params={"rogue_device_id": "rg-x9", "value": 888.0, "zone_id": "zone-4"},
             description="Pitch Demo: Rogue transmitter injecting unauthorized frames into West Residential Hills",
         )
     elif "Preset 5" in selected_demo:
@@ -808,7 +808,7 @@ if selected_cap == "link":
 
 elif selected_cap == "rogue":
     st.sidebar.markdown("<b style='font-size: 0.82rem; color: #38bdf8;'>Rogue Unauthorized Transmitter</b>", unsafe_allow_html=True)
-    rogue_id = st.sidebar.text_input("Rogue Device ID", value="rogue-x1")
+    rogue_id = st.sidebar.text_input("Rogue Device ID", value="rg-x1")
     rogue_val = st.sidebar.number_input("Spoofed Reading Value", value=999.0, step=10.0)
     rogue_zone = st.sidebar.selectbox("Target Sector", options=[f"zone-{i}" for i in range(1, 7)], index=0)
     attack_params = {"rogue_device_id": rogue_id, "value": rogue_val, "zone_id": rogue_zone}

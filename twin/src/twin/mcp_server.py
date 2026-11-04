@@ -92,7 +92,10 @@ def get_reading(reading_id: str) -> Optional[Dict[str, Any]]:
     sim = get_active_simulator()
     reading = sim.get_cached_reading(reading_id)
     if reading is None:
-        return None
+        return {
+            "status": "error",
+            "message": f"Reading {reading_id} is older than the cache window (READING_CACHE_MAX={sim.reading_cache_max})",
+        }
     return {k: v for k, v in reading.items() if not k.startswith("_")}
 
 
@@ -110,13 +113,22 @@ def get_readings(
         limit: Maximum number of readings to return (default: 50).
     """
     sim = get_active_simulator()
-    readings = list(sim.recent_readings_buffer.values())
-    if device_id:
-        readings = [r for r in readings if r.get("device_id") == device_id]
-    if since_ts:
-        readings = [r for r in readings if r.get("ts", "") >= since_ts]
-    selected = readings[-limit:]
-    return [{k: v for k, v in r.items() if not k.startswith("_")} for r in selected]
+    clamped_limit = max(1, min(500, limit))
+    matches: List[Dict[str, Any]] = []
+
+    # Iterate newest-first directly over OrderedDict, stopping early when ts < since_ts
+    for r in reversed(sim.recent_readings_buffer.values()):
+        if since_ts and r.get("ts", "") < since_ts:
+            break
+        if device_id and r.get("device_id") != device_id:
+            continue
+        matches.append({k: v for k, v in r.items() if not k.startswith("_")})
+        if len(matches) >= clamped_limit:
+            break
+
+    # Return in chronological order (oldest first)
+    matches.reverse()
+    return matches
 
 
 # ============================================================================

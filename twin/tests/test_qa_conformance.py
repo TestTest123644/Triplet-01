@@ -81,10 +81,10 @@ def test_mock_guardian_verification_and_containment(test_env):
     sim.clear_all_attacks()
     sim.inject_attack(
         capability="rogue",
-        params={"rogue_device_id": "rogue-99", "value": 999.0},
+        params={"rogue_device_id": "rg-99", "value": 999.0},
     )
     rogue_readings = sim.tick()
-    rogue_raw = next(r for r in rogue_readings if r["device_id"] == "rogue-99")
+    rogue_raw = next(r for r in rogue_readings if r["device_id"] == "rg-99")
     # Stream with a random key
     from twin.crypto_utils import generate_keypair
     fake_priv, _ = generate_keypair()
@@ -92,7 +92,7 @@ def test_mock_guardian_verification_and_containment(test_env):
 
     res = guardian.process_reading(rogue_bytes)
     assert res["action"] == "rogue_device_detected"
-    assert "rogue-99" in guardian.quarantined_devices
+    assert "rg-99" in guardian.quarantined_devices
 
 
 def test_mock_brain_actuation(test_env):

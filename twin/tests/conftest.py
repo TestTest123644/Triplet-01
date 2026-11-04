@@ -47,3 +47,13 @@ def reset_mcp_active_simulator():
         twin.mcp_server._ACTIVE_SIMULATOR = None
     except ImportError:
         pass
+
+
+@pytest.fixture
+def temp_ledger():
+    """Provide an isolated temporary GroundTruthLedger instance."""
+    from twin.db_ledger import GroundTruthLedger
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = os.path.join(tmpdir, "test_temp_ledger.db")
+        ledger = GroundTruthLedger(db_path=db_path)
+        yield ledger

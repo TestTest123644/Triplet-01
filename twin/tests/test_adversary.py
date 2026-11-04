@@ -116,16 +116,16 @@ def test_rogue_attack(temp_ledger):
     sim = CitySimulator(seed=444, ledger=temp_ledger)
     sim.inject_attack(
         capability="rogue",
-        params={"rogue_device_id": "rogue-x99", "value": 777.7},
+        params={"rogue_device_id": "rg-x99", "value": 777.7},
     )
 
     readings = sim.tick()
-    rogue_reading = next((r for r in readings if r["device_id"] == "rogue-x99"), None)
+    rogue_reading = next((r for r in readings if r["device_id"] == "rg-x99"), None)
     assert rogue_reading is not None
     assert rogue_reading["value"] == 777.7
 
     # Device does not exist in legitimate device inventory
-    assert "rogue-x99" not in sim.devices
+    assert "rg-x99" not in sim.devices
 
 
 def test_actuator_attack(temp_ledger):

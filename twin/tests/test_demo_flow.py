@@ -7,7 +7,7 @@ Simulates the complete presentation walkthrough:
    - Preset 1: Physical Hardware Spoofing (z1-tc1)
    - Preset 2: Compromised Key Forgery (z3-pl1)
    - Preset 3: Link Layer Signature Corruption (z2-wl1)
-   - Preset 4: Rogue Unauthorized Transmitter (rogue-x9)
+   - Preset 4: Rogue Unauthorized Transmitter (rg-x9)
    - Preset 5: Continuous Sensor Drift Fault (z5-aq1)
    - Preset 6: Actuator Command Disobedience (z1-wl1)
 4. Mock Guardian zero-trust detection & containment.
@@ -160,15 +160,15 @@ def test_full_presentation_walkthrough(presentation_fixture):
     assert sim.devices["z2-wl1"].status == "quarantined"
 
     # -------------------------------------------------------------------------
-    # STEP 5: Execute Preset 4 - Rogue Unauthorized Transmitter (rogue-x9)
+    # STEP 5: Execute Preset 4 - Rogue Unauthorized Transmitter (rg-x9)
     # -------------------------------------------------------------------------
     p4_id = sim.inject_attack(
         capability="rogue",
-        params={"rogue_device_id": "rogue-x9", "value": 888.0, "zone_id": "zone-4"},
+        params={"rogue_device_id": "rg-x9", "value": 888.0, "zone_id": "zone-4"},
         description="Demo: Rogue transmitter in West Residential Hills",
     )
     p4_readings = sim.tick()
-    p4_raw = next(r for r in p4_readings if r["device_id"] == "rogue-x9")
+    p4_raw = next(r for r in p4_readings if r["device_id"] == "rg-x9")
     assert p4_raw["value"] == 888.0
 
     from twin.crypto_utils import generate_keypair
@@ -177,7 +177,7 @@ def test_full_presentation_walkthrough(presentation_fixture):
 
     p4_res = guardian.process_reading(p4_bytes)
     assert p4_res["action"] == "rogue_device_detected"
-    assert "rogue-x9" in guardian.quarantined_devices
+    assert "rg-x9" in guardian.quarantined_devices
 
     # -------------------------------------------------------------------------
     # STEP 6: Execute Preset 5 - Sensor Drift Fault (z5-aq1)

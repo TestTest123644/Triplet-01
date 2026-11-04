@@ -70,12 +70,15 @@ async def run_simulation_stream_loop(
 
         # Stream readings to Kafka
         for raw in readings:
-            dev = sim.devices.get(raw["device_id"])
-            if dev:
-                try:
-                    streamer.stream_reading(raw, dev.private_key)
-                except Exception as e:
-                    logger.error(f"Error streaming reading {raw.get('reading_id')}: {e}")
+            dev_id = raw.get("device_id")
+            signing_key = sim.signing_key_for(dev_id)
+            if signing_key is None:
+                logger.warning(f"[ALERT] No signing key found for device {dev_id}")
+                continue
+            try:
+                streamer.stream_reading(raw, signing_key)
+            except Exception as e:
+                logger.error(f"Error streaming reading {raw.get('reading_id')}: {e}")
 
         tick_count += 1
         if tick_count % 100 == 0:
@@ -141,7 +144,7 @@ async def main() -> None:
 
     # 5. Configure Isolated Red Team Adversary REST Server (Port 8100, token protected)
     token = get_or_create_red_team_token()
-    red_team_app = build_red_team_app(sim, token=token)
+    red_team_app = build_red_team_app(sim, token=token, streamer=streamer)
     red_team_config = uvicorn.Config(
         app=red_team_app,
         host=red_team_host,

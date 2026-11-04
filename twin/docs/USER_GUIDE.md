@@ -101,7 +101,7 @@ You can test each capability individually using the sidebar controls:
 | :--- | :--- | :--- | :--- |
 | **`device_key`** (Compromised Key) | `z3-pl1` (Power Load) | Replaces device key with an attacker key | Outbound signature remains valid, but Guardian detects revoked/unauthorized public key on MCP. |
 | **`link`** (Network Tampering) | `z2-wl1` (Water Float) | Corrupts raw JSON bytes or drops frames | Guardian signature validation immediately fails (`Ed25519 verification failed`); payload corrupted. |
-| **`rogue`** (Unregistered Transmitter) | `zone-4` (Residential) | Transmits unauthorized packet `z4-rogue-1` | Packet appears on wire; Guardian MCP tool `list_devices` flags sensor as unregistered intruder. |
+| **`rogue`** (Unregistered Transmitter) | `zone-4` (Residential) | Transmits unauthorized packet `rg-z41` | Packet appears on wire; Guardian MCP tool `list_devices` flags sensor as unregistered intruder. |
 | **`sensor_fault`** (Hardware Drift) | `z5-aq1` (Air Quality) | Injects additive drift (`+45.0 AQI`) | Values drift upward without triggering hard boundaries; caught by multi-sensor neighborhood correlation. |
 | **`actuator`** (Command Disobedience)| `z1-wl2` (Flood Valve) | Sets actuation state to `stuck_closed` | Device returns `"status": "ok"` to City Brain MCP call, but physically refuses to open drainage valve. |
 

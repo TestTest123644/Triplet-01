@@ -11,7 +11,7 @@ import hmac
 import logging
 import os
 import secrets
-from typing import Optional
+from typing import Any, Optional
 
 from starlette.applications import Starlette
 from starlette.middleware import Middleware
@@ -83,17 +83,33 @@ class RedTeamAuthMiddleware(BaseHTTPMiddleware):
         return await call_next(request)
 
 
-def build_red_team_app(sim: CitySimulator, token: str) -> Starlette:
+def build_red_team_app(sim: CitySimulator, token: str, streamer: Optional[Any] = None) -> Starlette:
     """Build Starlette ASGI application hosting Red Team control endpoints."""
 
     async def api_status(request: Request) -> JSONResponse:
-        return JSONResponse({
+        data = {
             "status": "ok",
             "sim_time": sim.get_sim_time(),
             "tick_count": sim.clock.tick_count,
             "total_devices": len(sim.devices),
             "active_attacks_count": len(sim.active_attacks),
-        })
+        }
+        if streamer is not None:
+            stream_stats = streamer.stats()
+            stream_stats["msgs_per_sec"] = streamer.get_msgs_per_sec()
+            data["stream"] = stream_stats
+        else:
+            data["stream"] = {
+                "produced": 0,
+                "delivered": 0,
+                "delivery_failed": 0,
+                "sunk": 0,
+                "dropped": 0,
+                "rejected_oversize": 0,
+                "rejected_invalid": 0,
+                "msgs_per_sec": 0.0,
+            }
+        return JSONResponse(data)
 
     async def api_inject_attack(request: Request) -> JSONResponse:
         try:
@@ -124,6 +140,15 @@ def build_red_team_app(sim: CitySimulator, token: str) -> Starlette:
                 "target_device_id": target_device_id,
                 "sim_time": sim.get_sim_time(),
             })
+        except ValueError as e:
+            return JSONResponse(
+                {
+                    "status": "error",
+                    "code": "INVALID_ATTACK",
+                    "message": str(e),
+                },
+                status_code=400,
+            )
         except Exception as e:
             logger.error(f"Error injecting attack via API: {e}")
             return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
