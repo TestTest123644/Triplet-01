@@ -56,8 +56,25 @@ class SimulationClock:
     Wall-clock time is ONLY used for cycle pacing (10 Hz).
     """
 
-    def __init__(self, start_time: Optional[datetime] = None, step_seconds: float = 0.1):
-        self.step_seconds = step_seconds  # 10 Hz = 0.1s
+    def __init__(
+        self,
+        start_time: Optional[datetime] = None,
+        step_seconds: Optional[float] = None,
+        sim_speed: Optional[float] = None,
+    ):
+        if sim_speed is None:
+            try:
+                sim_speed = float(os.getenv("SIM_SPEED", "1.0"))
+            except (ValueError, TypeError):
+                sim_speed = 1.0
+        self.sim_speed = max(0.1, min(60.0, float(sim_speed)))
+        self.wall_step_seconds = 0.1  # 10 Hz wall pacing is fixed
+
+        if step_seconds is not None and "SIM_SPEED" not in os.environ and sim_speed == 1.0:
+            self.step_seconds = step_seconds
+        else:
+            self.step_seconds = 0.1 * self.sim_speed  # sim seconds advanced per tick
+
         self.sim_dt = start_time or datetime(2026, 10, 17, 12, 0, 0, tzinfo=timezone.utc)
         self.tick_count = 0
         self._last_wall_time = time.monotonic()
@@ -67,7 +84,7 @@ class SimulationClock:
         return format_sim_time(self.sim_dt)
 
     def advance_tick(self) -> str:
-        """Advance simulation clock by exactly one fixed timestep (0.1s)."""
+        """Advance simulation clock by exactly one fixed timestep (0.1 * sim_speed s)."""
         self.tick_count += 1
         self.sim_dt += timedelta(seconds=self.step_seconds)
         return self.get_sim_time()
@@ -79,7 +96,7 @@ class SimulationClock:
         """
         now = time.monotonic()
         elapsed = now - self._last_wall_time
-        sleep_needed = self.step_seconds - elapsed
+        sleep_needed = self.wall_step_seconds - elapsed
         if sleep_needed > 0:
             time.sleep(sleep_needed)
             actual_elapsed = time.monotonic() - self._last_wall_time
@@ -87,6 +104,26 @@ class SimulationClock:
             actual_elapsed = elapsed
         self._last_wall_time = time.monotonic()
         return actual_elapsed
+
+
+@dataclass
+class PhysicalEvent:
+    event_id: str
+    type: str  # rain_storm, traffic_accident, fire, grid_overload, air_hazard
+    zone_id: str
+    device_id: Optional[str] = None
+    params: Dict[str, Any] = field(default_factory=dict)
+    intensity: float = 1.0
+    duration_s: Optional[float] = None
+    start_sim_ts: str = ""
+    elapsed_sim_seconds: float = 0.0
+    resolved_sim_ts: Optional[str] = None
+    resolved_by: Optional[str] = None
+    resolve_countdown_s: Optional[float] = None
+    resolving_dispatch_id: Optional[str] = None
+    is_active: bool = True
+    blackout: bool = False
+    overload_sim_seconds: float = 0.0
 
 
 @dataclass
@@ -110,6 +147,7 @@ class DeviceState:
     actuator_state: Dict[str, Any] = field(default_factory=dict)
     reported_actuator_state: Dict[str, Any] = field(default_factory=dict)
     active_attack: Optional[Dict[str, Any]] = None
+    camera_variety: float = 1.0
 
 
 class CitySimulator:
@@ -117,7 +155,7 @@ class CitySimulator:
 
     ZONES = [
         {"zone_id": "zone-1", "name": "Downtown Financial", "lat": 36.8000, "lon": 10.1800},
-        {"zone_id": "zone-2", "name": "Port & Coastal Harbor", "lat": 36.8050, "lon": 10.2700},
+        {"zone_id": "zone-2", "name": "Port & Coastal Harbor", "lat": 36.8185, "lon": 10.3050},
         {"zone_id": "zone-3", "name": "North Industrial Park", "lat": 36.8480, "lon": 10.2050},
         {"zone_id": "zone-4", "name": "West Residential Hills", "lat": 36.8150, "lon": 10.1300},
         {"zone_id": "zone-5", "name": "Central University & Med", "lat": 36.8320, "lon": 10.1550},
@@ -127,14 +165,15 @@ class CitySimulator:
     DEVICE_TEMPLATES = [
         {"suffix": "tc1", "type": "traffic_camera", "unit": "veh/min", "min": 0.0, "max": 200.0, "init": 45.0},
         {"suffix": "tc2", "type": "traffic_camera", "unit": "veh/min", "min": 0.0, "max": 200.0, "init": 38.0},
-        {"suffix": "wl1", "type": "water_level", "unit": "meters", "min": 0.0, "max": 12.0, "init": 3.2},
-        {"suffix": "wl2", "type": "water_level", "unit": "meters", "min": 0.0, "max": 12.0, "init": 2.8},
-        {"suffix": "pl1", "type": "power_load", "unit": "MW", "min": 5.0, "max": 120.0, "init": 48.0},
-        {"suffix": "aq1", "type": "air_quality", "unit": "AQI", "min": 10.0, "max": 350.0, "init": 42.0},
-        {"suffix": "ec1", "type": "emergency_call", "unit": "call/min", "min": 0.0, "max": 30.0, "init": 1.0},
+        {"suffix": "wl1", "type": "water_level", "unit": "meters", "min": 0.0, "max": 12.0, "init": 3.5},
+        {"suffix": "wl2", "type": "water_level", "unit": "meters", "min": 0.0, "max": 12.0, "init": 3.5},
+        {"suffix": "pl1", "type": "power_load", "unit": "MW", "min": 5.0, "max": 120.0, "init": 58.0},
+        {"suffix": "aq1", "type": "air_quality", "unit": "AQI", "min": 10.0, "max": 350.0, "init": 35.0},
+        {"suffix": "ec1", "type": "emergency_call", "unit": "call/min", "min": 0.0, "max": 30.0, "init": 2.0},
     ]
 
     ALLOWED_ZONES = ["zone-1", "zone-2", "zone-3", "zone-4", "zone-5", "zone-6"]
+    ALLOWED_EVENT_TYPES = ["rain_storm", "traffic_accident", "fire", "grid_overload", "air_hazard"]
     KNOWN_INCIDENTS = {
         "medical_surge",
         "medical_emergency",
@@ -153,11 +192,13 @@ class CitySimulator:
         seed: int = 42,
         ledger: Optional[GroundTruthLedger] = None,
         keystore_path: Optional[str] = None,
+        sim_speed: Optional[float] = None,
     ):
         self.seed = seed
         self.run_id = uuid.uuid4().hex
         self.session_id = self.run_id[:4]
         self.rng = random.Random(seed)
+        self.physics_rng = random.Random(seed)
         self.ledger = ledger or GroundTruthLedger()
         self.keystore = DeviceKeystore(keystore_path=keystore_path)
 
@@ -173,10 +214,23 @@ class CitySimulator:
             else:
                 start_time = datetime(2026, 10, 17, 12, 0, 0, tzinfo=timezone.utc)
 
-        self.clock = SimulationClock(start_time=start_time)
+        self.clock = SimulationClock(start_time=start_time, sim_speed=sim_speed)
+        self.total_sim_seconds: float = 0.0
+
         self.devices: Dict[str, DeviceState] = {}
         self.zone_dispatches: Dict[str, List[Dict[str, Any]]] = {z["zone_id"]: [] for z in self.ZONES}
         self.reported_zone_dispatches: Dict[str, List[Dict[str, Any]]] = {z["zone_id"]: [] for z in self.ZONES}
+
+        # Incident Engine and Dispatches
+        self.active_events: Dict[str, PhysicalEvent] = {}
+        self.dispatch_duration_s = float(os.getenv("DISPATCH_DURATION_S", "900.0"))
+        self.active_generic_dispatches: Dict[str, List[Dict[str, Any]]] = {
+            z["zone_id"]: [] for z in self.ZONES
+        }
+        self.emergency_call_deques: Dict[str, collections.deque] = {
+            z["zone_id"]: collections.deque() for z in self.ZONES
+        }
+
         self.command_results_max = 10000
         self.command_results: collections.OrderedDict[str, Dict[str, Any]] = collections.OrderedDict()
         self.reading_cache_max = int(os.getenv("READING_CACHE_MAX", "50400"))
@@ -291,10 +345,12 @@ class CitySimulator:
                 priv_key, pub_key = keys_map[device_id]
 
                 initial_actuator: Dict[str, Any] = {}
+                cam_variety = 1.0
                 if tmpl["type"] == "traffic_camera":
                     initial_actuator = {"signal_plan": "normal"}
+                    cam_variety = self.physics_rng.uniform(0.85, 1.15)
                 elif tmpl["type"] == "water_level":
-                    initial_actuator = {"valve_position": "closed", "valve_ratio": 0.0}
+                    initial_actuator = {"valve_position": "half", "valve_ratio": 0.5}
                 elif tmpl["type"] == "power_load":
                     initial_actuator = {"grid_state": "grid_a"}
 
@@ -315,6 +371,7 @@ class CitySimulator:
                     last_broadcast_value=tmpl["init"],
                     actuator_state=dict(initial_actuator),
                     reported_actuator_state=dict(initial_actuator),
+                    camera_variety=cam_variety,
                 )
                 self.devices[device_id] = dev_state
 
@@ -340,100 +397,417 @@ class CitySimulator:
         """Return simulation time."""
         return self.clock.get_sim_time()
 
+    def _draw_poisson(self, lam: float) -> int:
+        """Draw a sample from Poisson distribution with parameter lam using physics_rng."""
+        if lam <= 0.0:
+            return 0
+        if lam < 30.0:
+            # Knuth's algorithm
+            L = math.exp(-lam)
+            k = 0
+            p = 1.0
+            while p > L:
+                k += 1
+                p *= self.physics_rng.random()
+            return k - 1
+        else:
+            # Gaussian approximation
+            val = self.physics_rng.gauss(lam, math.sqrt(lam))
+            return max(0, int(round(val)))
+
+    def inject_event(
+        self,
+        type: str,
+        zone_id: str,
+        device_id: Optional[str] = None,
+        intensity: Optional[float] = None,
+        duration_s: Optional[float] = None,
+        params: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        """Inject a physical incident into the simulation engine.
+
+        Validation errors raise ValueError (mapped to HTTP 400 INVALID_EVENT).
+        """
+        if type not in self.ALLOWED_EVENT_TYPES:
+            raise ValueError(f"Invalid event type '{type}'. Allowed: {self.ALLOWED_EVENT_TYPES}")
+        if zone_id not in self.ALLOWED_ZONES:
+            raise ValueError(f"Invalid zone_id '{zone_id}'. Allowed: {self.ALLOWED_ZONES}")
+
+        if type == "traffic_accident":
+            if not device_id:
+                cams = [
+                    d for d in self.devices.values()
+                    if d.zone_id == zone_id and d.device_type == "traffic_camera"
+                ]
+                if cams:
+                    device_id = cams[0].device_id
+                else:
+                    raise ValueError(f"No traffic_camera found in zone '{zone_id}'")
+            else:
+                dev = self.devices.get(device_id)
+                if not dev:
+                    raise ValueError(f"Device '{device_id}' not found")
+                if dev.device_type != "traffic_camera":
+                    raise ValueError(f"Device '{device_id}' is not a traffic_camera")
+                if dev.zone_id != zone_id:
+                    raise ValueError(f"Device '{device_id}' does not belong to zone '{zone_id}'")
+
+        if type == "rain_storm":
+            if intensity is None:
+                intensity = 3.0
+            else:
+                try:
+                    intensity = float(intensity)
+                except (ValueError, TypeError):
+                    raise ValueError("intensity must be a numeric value between 1 and 5")
+                if intensity < 1.0 or intensity > 5.0:
+                    raise ValueError("intensity must be between 1.0 and 5.0")
+        else:
+            if intensity is None:
+                intensity = 1.0
+            else:
+                try:
+                    intensity = float(intensity)
+                except (ValueError, TypeError):
+                    raise ValueError("intensity must be a numeric value")
+
+        if duration_s is not None:
+            try:
+                duration_s = float(duration_s)
+            except (ValueError, TypeError):
+                raise ValueError("duration_s must be a numeric value")
+            if duration_s <= 0.0:
+                raise ValueError("duration_s must be greater than 0")
+
+        event_id = f"ev-{uuid.uuid4().hex[:8]}"
+        start_sim_ts = self.get_sim_time()
+        event_params = dict(params or {})
+        if intensity is not None:
+            event_params["intensity"] = intensity
+        if duration_s is not None:
+            event_params["duration_s"] = duration_s
+
+        event = PhysicalEvent(
+            event_id=event_id,
+            type=type,
+            zone_id=zone_id,
+            device_id=device_id,
+            params=event_params,
+            intensity=intensity,
+            duration_s=duration_s,
+            start_sim_ts=start_sim_ts,
+        )
+        self.active_events[event_id] = event
+
+        self.ledger.record_physical_event(
+            event_id=event_id,
+            run_id=self.run_id,
+            event_type=type,
+            zone_id=zone_id,
+            device_id=device_id,
+            params_json=json.dumps(event_params),
+            start_sim_ts=start_sim_ts,
+        )
+        return event_id
+
+    def clear_event(self, event_id: str) -> bool:
+        """Clear an active physical incident."""
+        ev = self.active_events.pop(event_id, None)
+        if not ev:
+            return False
+        ev.is_active = False
+        now_ts = self.get_sim_time()
+        ev.resolved_sim_ts = now_ts
+        ev.resolved_by = "cleared"
+        self.ledger.resolve_physical_event(event_id, now_ts, "cleared")
+        return True
+
+    def clear_all_events(self) -> None:
+        """Clear all active physical incidents."""
+        for ev_id in list(self.active_events.keys()):
+            self.clear_event(ev_id)
+
+    def get_active_events(self) -> List[Dict[str, Any]]:
+        """Return list of active physical incidents (NEVER exposed to MCP)."""
+        return [
+            {
+                "event_id": ev.event_id,
+                "type": ev.type,
+                "zone_id": ev.zone_id,
+                "device_id": ev.device_id,
+                "params": ev.params,
+                "intensity": ev.intensity,
+                "duration_s": ev.duration_s,
+                "start_sim_ts": ev.start_sim_ts,
+                "elapsed_sim_seconds": ev.elapsed_sim_seconds,
+                "blackout": ev.blackout,
+                "resolving": ev.resolve_countdown_s is not None,
+            }
+            for ev in self.active_events.values()
+        ]
+
     def update_physics(self) -> List[Tuple[DeviceState, float]]:
-        """Calculate standard mathematical formulas for normal physical city behavior.
+        """Calculate standard mathematical formulas for true physical city behavior.
 
         Returns list of (device_state, true_value).
         """
         results: List[Tuple[DeviceState, float]] = []
         sim_dt = self.clock.sim_dt
-        sec_of_day = (
-            sim_dt.hour * 3600
-            + sim_dt.minute * 60
-            + sim_dt.second
-            + sim_dt.microsecond / 1_000_000.0
+        dt = self.clock.step_seconds
+
+        t_hour = (
+            sim_dt.hour
+            + sim_dt.minute / 60.0
+            + (sim_dt.second + sim_dt.microsecond / 1_000_000.0) / 3600.0
         )
-        # Diurnal normalized wave (0 to 1) with 2 peaks: 8:00 (morning) and 18:00 (evening)
-        # Using a superposition of daily diurnal harmonic frequencies
-        t_norm = (sec_of_day % 86400) / 86400.0
-        diurnal_traffic = 0.5 + 0.35 * math.sin(2 * math.pi * (t_norm - 0.25)) + 0.15 * math.sin(4 * math.pi * (t_norm - 0.2))
-        diurnal_power = 0.55 + 0.3 * math.sin(2 * math.pi * (t_norm - 0.3)) + 0.15 * math.cos(2 * math.pi * t_norm)
 
-        for dev_id, dev in self.devices.items():
-            true_val = dev.current_value
-            dt = self.clock.step_seconds
+        # 1. Update traffic_camera models
+        v_star_base = (
+            25.0
+            + 95.0 * math.exp(-((t_hour - 8.5) ** 2) / (2.0 * (1.2 ** 2)))
+            + 110.0 * math.exp(-((t_hour - 17.5) ** 2) / (2.0 * (1.5 ** 2)))
+        )
 
+        # Precompute base targets per camera and zone means
+        zone_cam_targets: Dict[str, List[Tuple[DeviceState, float]]] = {z["zone_id"]: [] for z in self.ZONES}
+        for dev in self.devices.values():
             if dev.device_type == "traffic_camera":
-                # Mathematical formula: diurnal demand modulated by signal plan
-                plan = dev.actuator_state.get("signal_plan", "normal")
-                throughput_multiplier = 1.0
-                if plan == "green_wave":
-                    throughput_multiplier = 1.35
-                elif plan == "red_restriction":
-                    throughput_multiplier = 0.55
+                base_t = v_star_base * dev.camera_variety
+                zone_cam_targets[dev.zone_id].append((dev, base_t))
 
-                target_flow = (40.0 + 80.0 * max(0.0, min(1.0, diurnal_traffic))) * throughput_multiplier
-                # Low-pass filter inertia with Gaussian noise
-                noise = self.rng.gauss(0.0, 1.2)
-                true_val = dev.current_value + 0.05 * (target_flow - dev.current_value) + noise * dt
+        zone_cam_means: Dict[str, float] = {}
+        for zid, cam_list in zone_cam_targets.items():
+            if cam_list:
+                zone_cam_means[zid] = sum(t for _, t in cam_list) / len(cam_list)
+            else:
+                zone_cam_means[zid] = v_star_base
 
-            elif dev.device_type == "water_level":
-                # Drainage model: valve position controls discharge rate vs baseline runoff
-                valve = dev.actuator_state.get("valve_position", "closed")
-                valve_ratio = dev.actuator_state.get("valve_ratio", 1.0 if valve == "open" else 0.0)
+        for dev in self.devices.values():
+            if dev.device_type != "traffic_camera":
+                continue
 
-                runoff_inflow = 0.015 * (1.0 + 0.2 * math.sin(2 * math.pi * t_norm * 4))  # slight inflow
-                drainage_outflow = 0.045 * valve_ratio  # discharge capacity
+            base_target = v_star_base * dev.camera_variety
+            plan = dev.actuator_state.get("signal_plan", "normal")
 
-                net_delta = (runoff_inflow - drainage_outflow) * dt
-                noise = self.rng.gauss(0.0, 0.02)
-                true_val = dev.current_value + net_delta + (noise * dt)
+            if plan == "adaptive":
+                target = zone_cam_means[dev.zone_id]
+            elif plan == "green_wave":
+                target = base_target * 1.15
+            elif plan == "red_restriction":
+                target = base_target * 0.55
+            elif plan == "all_red":
+                target = base_target * 0.05
+            else:
+                target = base_target * 1.0
 
-            elif dev.device_type == "power_load":
-                # Electrical substation load: diurnal curve + grid switching
-                grid_state = dev.actuator_state.get("grid_state", "grid_a")
-                grid_factor = 1.0
-                if grid_state == "grid_b":
-                    grid_factor = 0.85
-                elif grid_state == "shed":
-                    grid_factor = 0.40
-                elif grid_state == "standby":
-                    grid_factor = 0.20
+            # Traffic accident impact
+            for ev in self.active_events.values():
+                if ev.type == "traffic_accident" and ev.device_id == dev.device_id:
+                    ramp = 1.0 - 0.7 * min(1.0, ev.elapsed_sim_seconds / 60.0)
+                    target *= ramp
+                    break
 
-                target_power = (30.0 + 55.0 * max(0.0, min(1.0, diurnal_power))) * grid_factor
-                noise = self.rng.gauss(0.0, 0.5)
-                true_val = dev.current_value + 0.08 * (target_power - dev.current_value) + (noise * dt)
+            tau = 60.0
+            alpha = 1.0 - math.exp(-dt / tau)
+            noise = 2.5 * math.sqrt(dt) * self.physics_rng.gauss(0.0, 1.0)
+            true_val = dev.current_value + alpha * (target - dev.current_value) + noise
+            dev.current_value = round(max(dev.min_val, min(dev.max_val, true_val)), 4)
 
-            elif dev.device_type == "air_quality":
-                # AQI correlated with zone's average traffic camera readings
-                # Find traffic in same zone
-                zone_traffic = [
-                    d.current_value for d in self.devices.values()
-                    if d.zone_id == dev.zone_id and d.device_type == "traffic_camera"
-                ]
-                avg_traffic = sum(zone_traffic) / len(zone_traffic) if zone_traffic else 50.0
-                target_aqi = 20.0 + (avg_traffic * 0.45)
-                noise = self.rng.gauss(0.0, 0.4)
-                true_val = dev.current_value + 0.02 * (target_aqi - dev.current_value) + (noise * dt)
+        # 2. Update water_level models
+        sim_ts_sec = sim_dt.timestamp()
+        tidal_term = 0.10 * math.sin(2.0 * math.pi * sim_ts_sec / 44640.0)
+        q_base = 0.003 * (1.0 + tidal_term)
 
-            elif dev.device_type == "emergency_call":
-                # Emergency call rate: low baseline with decay when dispatched
-                dispatches = self.zone_dispatches.get(dev.zone_id, [])
-                active_units = len(dispatches)
+        for dev in self.devices.values():
+            if dev.device_type != "water_level":
+                continue
 
-                if active_units > 0:
-                    target_calls = max(0.2, 0.8 - (active_units * 0.3))
+            q_in = q_base
+            for ev in self.active_events.values():
+                if ev.zone_id == dev.zone_id and ev.type == "rain_storm":
+                    intensity = float(ev.params.get("intensity", ev.intensity or 3.0))
+                    q_in *= intensity
+                    break
+
+            valve = dev.actuator_state.get("valve_position", "half")
+            valve_ratio = dev.actuator_state.get("valve_ratio")
+            if valve_ratio is not None:
+                k = float(valve_ratio)
+            elif valve == "open":
+                k = 1.0
+            elif valve == "half":
+                k = 0.5
+            elif valve == "closed":
+                k = 0.0
+            elif isinstance(valve, str) and valve.endswith("%"):
+                m = re.match(r"^(\d+(?:\.\d+)?)%$", valve)
+                k = float(m.group(1)) / 100.0 if m else 0.5
+            else:
+                k = 0.5
+
+            g = 9.81
+            h0 = 1.2
+            c = 0.00089
+
+            head = max(0.0, dev.current_value - h0)
+            drain = k * c * math.sqrt(2.0 * g * head)
+
+            dh = (q_in - drain) * dt
+            new_h = dev.current_value + dh
+            dev.current_value = round(max(dev.min_val, min(dev.max_val, new_h)), 6)
+
+        # 3. Update power_load models
+        if 6.0 <= t_hour <= 20.0:
+            p_star = 30.0 + 70.0 * (0.6 * math.sin(math.pi * (t_hour - 6.0) / 14.0) + 0.4)
+        else:
+            if t_hour >= 20.0:
+                t_night = t_hour - 20.0
+            else:
+                t_night = t_hour + 4.0
+            p_star = 44.0 + 14.0 * math.cos(math.pi * t_night / 5.0)
+
+        grid_factors = {
+            "grid_a": 1.0,
+            "grid_b": 0.85,
+            "island": 0.60,
+            "shed": 0.40,
+            "standby": 0.20,
+        }
+
+        for dev in self.devices.values():
+            if dev.device_type != "power_load":
+                continue
+
+            grid_state = dev.actuator_state.get("grid_state", "grid_a")
+            grid_factor = grid_factors.get(grid_state, 1.0)
+            target_power = p_star * grid_factor
+
+            overload_ev = None
+            for ev in self.active_events.values():
+                if ev.zone_id == dev.zone_id and ev.type == "grid_overload":
+                    overload_ev = ev
+                    if ev.blackout:
+                        target_power *= 0.10
+                    else:
+                        target_power *= 1.35
+                    break
+
+            tau = 120.0
+            alpha = 1.0 - math.exp(-dt / tau)
+            noise = 1.2 * math.sqrt(dt) * self.physics_rng.gauss(0.0, 1.0)
+            true_p = dev.current_value + alpha * (target_power - dev.current_value) + noise
+            dev.current_value = round(max(dev.min_val, min(dev.max_val, true_p)), 4)
+
+            if overload_ev and not overload_ev.blackout:
+                if dev.current_value > 114.0:
+                    overload_ev.overload_sim_seconds += dt
+                    if overload_ev.overload_sim_seconds >= 60.0:
+                        overload_ev.blackout = True
                 else:
-                    target_calls = 1.2
+                    overload_ev.overload_sim_seconds = 0.0
 
-                noise = max(0.0, self.rng.gauss(0.0, 0.15))
-                true_val = max(0.0, dev.current_value + 0.1 * (target_calls - dev.current_value) + (noise * dt))
+        # 4. Update air_quality models
+        zone_aqi_bg = {
+            "zone-1": 18.0,
+            "zone-2": 15.0,
+            "zone-3": 20.0,
+            "zone-4": 8.0,
+            "zone-5": 14.0,
+            "zone-6": 12.0,
+        }
 
-            # Clamp within physical plausible bounds
-            clamped_val = round(max(dev.min_val, min(dev.max_val, true_val)), 4)
-            dev.current_value = clamped_val
+        for dev in self.devices.values():
+            if dev.device_type != "air_quality":
+                continue
+
+            bg = zone_aqi_bg.get(dev.zone_id, 15.0)
+            zone_cams = [
+                d.current_value for d in self.devices.values()
+                if d.zone_id == dev.zone_id and d.device_type == "traffic_camera"
+            ]
+            avg_traffic = sum(zone_cams) / len(zone_cams) if zone_cams else 50.0
+            industrial_term = 25.0 if dev.zone_id == "zone-3" else 0.0
+
+            incident_terms = 0.0
+            for ev in self.active_events.values():
+                if ev.zone_id == dev.zone_id:
+                    if ev.type == "fire":
+                        ramp = min(1.0, ev.elapsed_sim_seconds / 120.0)
+                        incident_terms += 150.0 * ramp
+                    elif ev.type == "air_hazard":
+                        cam_plans = [
+                            d.actuator_state.get("signal_plan", "normal")
+                            for d in self.devices.values()
+                            if d.zone_id == dev.zone_id and d.device_type == "traffic_camera"
+                        ]
+                        if all(p == "all_red" for p in cam_plans):
+                            hazard_mult = 0.2
+                        elif any(p in ("all_red", "red_restriction") for p in cam_plans):
+                            hazard_mult = 0.5
+                        else:
+                            hazard_mult = 1.0
+                        incident_terms += 100.0 * hazard_mult
+
+            target_aqi = bg + (0.45 * avg_traffic) + industrial_term + incident_terms
+            tau = 300.0
+            alpha = 1.0 - math.exp(-dt / tau)
+            noise = 0.5 * math.sqrt(dt) * self.physics_rng.gauss(0.0, 1.0)
+            true_aqi = dev.current_value + alpha * (target_aqi - dev.current_value) + noise
+            dev.current_value = round(max(dev.min_val, min(dev.max_val, true_aqi)), 4)
+
+        # 5. Update emergency_call models
+        for dev in self.devices.values():
+            if dev.device_type != "emergency_call":
+                continue
+
+            zone_cams = [
+                d for d in self.devices.values()
+                if d.zone_id == dev.zone_id and d.device_type == "traffic_camera"
+            ]
+            any_cam_gt_120 = any(d.current_value > 120.0 for d in zone_cams)
+
+            zone_waters = [
+                d for d in self.devices.values()
+                if d.zone_id == dev.zone_id and d.device_type == "water_level"
+            ]
+            any_water_gt_8 = any(d.current_value > 8.0 for d in zone_waters)
+
+            lam = 2.0
+            if any_cam_gt_120:
+                lam += 4.5
+            if any_water_gt_8:
+                lam += 8.0
+
+            for ev in self.active_events.values():
+                if ev.zone_id == dev.zone_id:
+                    if ev.type == "traffic_accident":
+                        lam += 6.0
+                    elif ev.type == "fire":
+                        lam += 8.0
+                    elif ev.type == "grid_overload" and ev.blackout:
+                        lam += 4.0
+
+            active_generic = len(self.active_generic_dispatches.get(dev.zone_id, []))
+            lam -= 1.0 * active_generic
+            lam = max(0.2, lam)
+
+            mu = lam * (dt / 60.0)
+            n_arrivals = self._draw_poisson(mu)
+
+            eq_deque = self.emergency_call_deques[dev.zone_id]
+            eq_deque.append((self.total_sim_seconds, n_arrivals))
+            cutoff = self.total_sim_seconds - 60.0
+            while eq_deque and eq_deque[0][0] <= cutoff:
+                eq_deque.popleft()
+
+            rolling_sum = sum(cnt for _, cnt in eq_deque)
+            reported_calls = float(min(30, rolling_sum))
+            dev.current_value = round(max(dev.min_val, min(dev.max_val, reported_calls)), 4)
+
+        # Format results and increment sequences
+        for dev in self.devices.values():
             dev.seq += 1
-            results.append((dev, clamped_val))
+            results.append((dev, dev.current_value))
 
         return results
 
@@ -602,6 +976,37 @@ class CitySimulator:
         4. Updates live telemetry state cache.
         5. Advances simulation clock by 0.1s.
         """
+        dt = self.clock.step_seconds
+        self.total_sim_seconds += dt
+
+        # 1. Update active incidents countdowns and durations
+        for ev_id, ev in list(self.active_events.items()):
+            ev.elapsed_sim_seconds += dt
+
+            # Check dispatch resolution countdown
+            if ev.resolve_countdown_s is not None:
+                ev.resolve_countdown_s -= dt
+                if ev.resolve_countdown_s <= 0.0:
+                    ev.resolved_sim_ts = self.get_sim_time()
+                    ev.resolved_by = f"dispatch:{ev.resolving_dispatch_id}"
+                    self.ledger.resolve_physical_event(ev.event_id, self.get_sim_time(), ev.resolved_by)
+                    del self.active_events[ev_id]
+                    continue
+
+            # Check natural expiration by duration_s (for rain_storm, air_hazard, etc.)
+            if ev.duration_s is not None and ev.elapsed_sim_seconds >= ev.duration_s:
+                ev.resolved_sim_ts = self.get_sim_time()
+                ev.resolved_by = "expired"
+                self.ledger.resolve_physical_event(ev.event_id, self.get_sim_time(), "expired")
+                del self.active_events[ev_id]
+                continue
+
+        # 2. Expire old generic dispatches
+        for zid, d_list in list(self.active_generic_dispatches.items()):
+            self.active_generic_dispatches[zid] = [
+                d for d in d_list if d["expires_at_sim_seconds"] > self.total_sim_seconds
+            ]
+
         sim_time = self.clock.get_sim_time()
         physics_results = self.update_physics()
 
@@ -964,6 +1369,36 @@ class CitySimulator:
             executed = True
             refused_code = None
 
+            # Check matching physical incidents
+            matched_event = None
+            for ev in self.active_events.values():
+                if ev.zone_id == zone_id and ev.resolve_countdown_s is None:
+                    if ev.type == "traffic_accident" and incident_type in (
+                        "traffic_accident",
+                        "medical_emergency",
+                        "medical_surge",
+                    ):
+                        matched_event = ev
+                        ev.resolve_countdown_s = 300.0
+                        ev.resolving_dispatch_id = dispatch_id
+                        break
+                    elif ev.type == "fire" and incident_type == "fire":
+                        matched_event = ev
+                        ev.resolve_countdown_s = 180.0
+                        ev.resolving_dispatch_id = dispatch_id
+                        break
+                    elif ev.type == "grid_overload" and ev.blackout and incident_type == "blackout":
+                        matched_event = ev
+                        ev.resolve_countdown_s = 240.0
+                        ev.resolving_dispatch_id = dispatch_id
+                        break
+
+            if not matched_event:
+                self.active_generic_dispatches[zone_id].append({
+                    "dispatch_id": dispatch_id,
+                    "expires_at_sim_seconds": self.total_sim_seconds + self.dispatch_duration_s,
+                })
+
         result: Dict[str, Any] = {"status": "ok", "dispatch_id": dispatch_id, "zone_id": zone_id}
         if note:
             result["note"] = note
@@ -1289,6 +1724,15 @@ class CitySimulator:
             executed = True
             refused_code = None
 
+            if target_state in ("grid_b", "shed", "standby"):
+                for ev_id, ev in list(self.active_events.items()):
+                    if ev.zone_id == dev.zone_id and ev.type == "grid_overload" and not ev.blackout:
+                        now_ts = self.get_sim_time()
+                        ev.resolved_sim_ts = now_ts
+                        ev.resolved_by = "actuation:switch_grid"
+                        self.ledger.resolve_physical_event(ev.event_id, now_ts, "actuation:switch_grid")
+                        del self.active_events[ev_id]
+
         result = {"status": "ok", "device_id": device_id, "grid_state": target_state}
         if idempotency_key:
             self.record_idempotency_result(idempotency_key, "switch_grid", args, result)
@@ -1415,6 +1859,10 @@ class CitySimulator:
 
     def close(self) -> None:
         """Cleanly terminate simulator, record run end in ledger, and close connections."""
+        try:
+            self.clear_all_events()
+        except Exception:
+            pass
         if hasattr(self, "ledger") and self.ledger:
             try:
                 self.ledger.end_run(self.run_id, self.get_sim_time())

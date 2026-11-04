@@ -159,12 +159,25 @@ class GroundTruthLedger:
         to_status TEXT NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS physical_events (
+        event_id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL,
+        type TEXT NOT NULL,
+        zone_id TEXT NOT NULL,
+        device_id TEXT,
+        params_json TEXT NOT NULL,
+        start_sim_ts TEXT NOT NULL,
+        resolved_sim_ts TEXT,
+        resolved_by TEXT
+    );
+
     CREATE INDEX IF NOT EXISTS idx_readings_device_ts ON readings_truth (device_id, ts);
     CREATE INDEX IF NOT EXISTS idx_readings_seq ON readings_truth (device_id, seq);
     CREATE INDEX IF NOT EXISTS idx_readings_attacked ON readings_truth (is_attacked);
     CREATE INDEX IF NOT EXISTS idx_attacks_capability ON attacks_injected (capability, active);
     CREATE INDEX IF NOT EXISTS idx_commands_sim_ts ON commands_log (sim_ts);
     CREATE INDEX IF NOT EXISTS idx_containment_target ON containment_log (target);
+    CREATE INDEX IF NOT EXISTS idx_physical_events_zone ON physical_events (zone_id, resolved_sim_ts);
     """
 
     def __init__(self, db_path: Optional[str] = None):
@@ -191,6 +204,7 @@ class GroundTruthLedger:
                 self._writer_conn.execute("DELETE FROM runs;")
                 self._writer_conn.execute("DELETE FROM commands_log;")
                 self._writer_conn.execute("DELETE FROM containment_log;")
+                self._writer_conn.execute("DELETE FROM physical_events;")
                 self._writer_conn.commit()
 
     def _get_connection(self, read_only: bool = False) -> sqlite3.Connection:
@@ -261,6 +275,21 @@ class GroundTruthLedger:
             target TEXT NOT NULL,
             from_status TEXT NOT NULL,
             to_status TEXT NOT NULL
+        );
+        """)
+
+        # Migration: ensure physical_events table exists
+        self._writer_conn.execute("""
+        CREATE TABLE IF NOT EXISTS physical_events (
+            event_id TEXT PRIMARY KEY,
+            run_id TEXT NOT NULL,
+            type TEXT NOT NULL,
+            zone_id TEXT NOT NULL,
+            device_id TEXT,
+            params_json TEXT NOT NULL,
+            start_sim_ts TEXT NOT NULL,
+            resolved_sim_ts TEXT,
+            resolved_by TEXT
         );
         """)
 
@@ -585,6 +614,61 @@ class GroundTruthLedger:
         """Fetch recent entries from containment_log for verification."""
         with self._get_connection(read_only=True) as conn:
             cur = conn.execute("SELECT * FROM containment_log ORDER BY id DESC LIMIT ?", (limit,))
+            return [dict(row) for row in cur.fetchall()]
+
+    # Physical events tracking (Phase 6)
+    def record_physical_event(
+        self,
+        event_id: str,
+        run_id: str,
+        event_type: str,
+        zone_id: str,
+        device_id: Optional[str],
+        params_json: str,
+        start_sim_ts: str,
+    ) -> None:
+        """Record initiation of a physical incident event."""
+        with self._writer_lock:
+            self._writer_conn.execute(
+                """
+                INSERT INTO physical_events (
+                    event_id, run_id, type, zone_id, device_id, params_json, start_sim_ts
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(event_id) DO UPDATE SET
+                    run_id=excluded.run_id,
+                    type=excluded.type,
+                    zone_id=excluded.zone_id,
+                    device_id=excluded.device_id,
+                    params_json=excluded.params_json,
+                    start_sim_ts=excluded.start_sim_ts;
+                """,
+                (event_id, run_id, event_type, zone_id, device_id, params_json, start_sim_ts),
+            )
+            self._writer_conn.commit()
+
+    def resolve_physical_event(
+        self,
+        event_id: str,
+        resolved_sim_ts: str,
+        resolved_by: str,
+    ) -> bool:
+        """Mark a physical incident event as resolved or expired."""
+        with self._writer_lock:
+            cur = self._writer_conn.execute(
+                """
+                UPDATE physical_events
+                SET resolved_sim_ts = ?, resolved_by = ?
+                WHERE event_id = ?
+                """,
+                (resolved_sim_ts, resolved_by, event_id),
+            )
+            self._writer_conn.commit()
+            return cur.rowcount > 0
+
+    def get_recent_physical_events(self, limit: int = 30) -> List[Dict[str, Any]]:
+        """Fetch recent entries from physical_events for verification."""
+        with self._get_connection(read_only=True) as conn:
+            cur = conn.execute("SELECT * FROM physical_events ORDER BY rowid DESC LIMIT ?", (limit,))
             return [dict(row) for row in cur.fetchall()]
 
     # State inspection and recovery

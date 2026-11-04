@@ -1,132 +1,167 @@
 # Twin Layer: Physical Simulation & Adversary Specifications
 
-This reference documents the physical formulas, diurnal kinetic curves, and state machines powering the simulation engine in `twin/simulation.py`.
+This reference documents the physical formulas, diurnal kinetic curves, incident engine dynamics, and adversary state machines powering the simulation engine in `twin/simulation.py`.
 
 ---
 
-## 1. Simulation Engine Principles
+## 1. Simulation Engine Principles & Dual-Clock System
 
-1. **Fixed Timestep (10 Hz):** The simulation clock advances by exactly 100 milliseconds (`Delta-t = 0.1 s`) every tick. All differential equations integrate with respect to this fixed timestep.
-2. **Deterministic Seeded PRNG:** All sensor noise, baseline fluctuations, and initial device keypairs derive from a deterministic random seed (`SIM_SEED = 42`). Executing the simulation with the same seed produces the identical sequence of readings.
-3. **Diurnal Time Mapping:** Simulation time maps continuously to a 24-hour daily cycle (`t_day` from `0.0` to `24.0` hours). Sensor kinetics vary according to circadian human activity patterns.
+1. **Dual-Clock Coordination:**
+   - **Simulation Time:** Strictly deterministic RFC 3339 UTC timestamps (`YYYY-MM-DDTHH:MM:SSZ`).
+   - **Wall-Clock Pacing:** Cycle pacing runs strictly at 10 Hz (100 ms per wall cycle) via `SimulationClock.pace_wall_clock()`. Wall-clock time is never leaked into Kafka payloads, SQLite truth readings, or MCP responses.
+2. **Simulation Speed Acceleration (`SIM_SPEED`):**
+   - Configurable via environment variable `SIM_SPEED` (default `1.0`, allowable range `0.1` to `60.0`).
+   - Each simulation tick advances simulation time by $\Delta t = 0.1 \times \text{SIM\_SPEED}$ simulation seconds.
+   - All physical differential equations, noise terms, and exponential lags are written per simulation second, ensuring physical trajectory invariance regardless of `SIM_SPEED`.
+3. **Euler-Maruyama Stochastic Integration & Lags:**
+   - Noise terms scale with $\sqrt{\Delta t}$ in accordance with the Euler-Maruyama scheme: $\sigma \sqrt{\Delta t} \cdot \mathcal{N}(0, 1)$.
+   - Dynamic inertia follows first-order exponential lag: $\alpha = 1 - \exp(-\Delta t / \tau)$, where $\tau$ is the characteristic time constant in simulation seconds.
+4. **Dedicated Physics PRNG (`physics_rng`):**
+   - Physics updates, camera variety factors, and stochastic Poisson arrival processes derive exclusively from a dedicated instance of `random.Random(SIM_SEED)`.
+   - Network interactions, mock clients, and API requests do not advance the physics RNG, guaranteeing bit-for-bit trajectory determinism across identical runs.
+5. **Municipal Zones & Geographic Coordinates:**
+   - The city comprises 42 IoT devices distributed evenly (7 devices per zone) across 6 municipal zones.
+   - Zone-2 ("Port & Coastal Harbor") is positioned at the residential center of **La Goulette** with centroid coordinates `(36.8185, 10.3050)`.
+   - The 7 devices in each zone follow the deterministic geographic offset formula:
+     $$\text{lat} = \text{round}(z_{\text{lat}} + (\text{idx} \times 0.0012) - 0.0036, 6)$$
+     $$\text{lon} = \text{round}(z_{\text{lon}} + (\text{idx} \times 0.0015) - 0.0045, 6)$$
 
 ---
 
-## 2. Sensor Kinetics & Physical Models
+## 2. Sensor Kinetics & Physical Formulations
 
-The system models 42 IoT devices across 5 distinct municipal sensor categories:
+The digital twin models 42 IoT devices across 5 municipal categories:
 
 ### A. Traffic Camera (`traffic_camera`)
-- **Metric:** Vehicle passage rate in vehicles per minute (`V`).
-- **Operating Bounds:** `0.0 <= V <= 200.0 veh/min`.
-- **Physical Model:** Bimodal diurnal curve with morning rush hour (08:30) and evening rush hour (17:30):
-
-> **V(t) = V_base + A1 * exp[ -(t - 8.5)^2 / (2 * sigma1^2) ] + A2 * exp[ -(t - 17.5)^2 / (2 * sigma2^2) ] + GaussianNoise(0, sigma_noise)**
-
-- **Parameters:**
-  - `V_base`: Overnight baseline flow (~25.0 veh/min).
-  - `A1`: Morning peak amplitude (~95.0 veh/min, spread `sigma1 = 1.2` hrs).
-  - `A2`: Evening peak amplitude (~110.0 veh/min, spread `sigma2 = 1.5` hrs).
-  - `sigma_noise`: High-frequency camera jitter (standard deviation = 2.5 veh/min).
+- **Metric:** Vehicle passage throughput in vehicles per minute ($V$).
+- **Operating Bounds:** $0.0 \le V \le 200.0\text{ veh/min}$.
+- **Diurnal Target Demand ($V^*(t)$):**
+  For simulation hour $t \in [0.0, 24.0)$:
+  $$V^*(t) = 25.0 + 95.0 \cdot \exp\left( -\frac{(t - 8.5)^2}{2 \cdot 1.2^2} \right) + 110.0 \cdot \exp\left( -\frac{(t - 17.5)^2}{2 \cdot 1.5^2} \right)$$
+  - Morning rush hour peaks around 08:30 (~120 veh/min).
+  - Evening rush hour peaks around 17:30 (~135 veh/min).
+  - Overnight baseline remains below 35 veh/min (~25 veh/min).
+- **Per-Camera Variety:** Each traffic camera is assigned a fixed variety multiplier drawn from $[0.85, 1.15]$ using `physics_rng`.
 - **Actuation Impact (`set_signal_plan`):**
-  - `green_wave`: Relieves queue bottlenecks by reducing effective density (-18% queue volume over 30 simulation ticks).
-  - `all_red`: Stops traffic inflow for emergency clearance.
-  - `adaptive`: Dynamically balances cross-street vehicle throughput.
+  - `normal`: Multiplier $1.0$.
+  - `green_wave`: Multiplier $1.15$ (clears congestion corridors).
+  - `red_restriction`: Multiplier $0.55$ (dampens incoming vehicle density).
+  - `all_red`: Multiplier $0.05$ (emergency cordon stop).
+  - `adaptive`: Targets the zone-wide mean target across both cameras in the zone.
+- **Incident Impact (`traffic_accident`):**
+  - Reduces target throughput to $\times 0.3$ ramped over 60 simulation seconds.
+- **Dynamics:** Time constant $\tau = 60\text{ s}$, noise $\sigma = 2.5\sqrt{\Delta t}\text{ veh/min}$.
 
 ---
 
 ### B. Water Level Float (`water_level`)
-- **Metric:** Drainage channel water depth in meters (`H`).
-- **Operating Bounds:** `0.0 <= H <= 12.0 meters`.
-- **Physical Model:** Torricelli gravity drainage differential model with upstream tidal inflow:
-
-> **dH/dt = Q_inflow(t) - k_valve * sqrt[ 2 * g * max(0, H - H0) ]**
-
-- **Parameters:**
-  - `g`: Gravitational acceleration (9.81 m/s^2).
-  - `H0`: Baseline retention channel depth (1.2 meters).
-  - `Q_inflow`: Environmental precipitation and tidal runoff rate (m/s).
+- **Metric:** Drainage channel flood level in meters ($H$).
+- **Operating Bounds:** $0.0 \le H \le 12.0\text{ meters}$.
+- **Differential Equation:**
+  $$\frac{dH}{dt} = Q_{\text{in}}(t) - k \cdot c \cdot \sqrt{2g \max(0, H - H_0)}$$
+- **Constants & Parameters:**
+  - Gravitational acceleration: $g = 9.81\text{ m/s}^2$.
+  - Retention threshold: $H_0 = 1.2\text{ meters}$.
+  - Calibrated discharge coefficient: $c = 0.00089$.
+  - Inflow rate: $Q_{\text{base}} = 0.003\text{ m/s}$ modulated by a $\pm 10\%$ tidal term with a 12.4-hour period ($44,640\text{ s}$):
+    $$Q_{\text{in}}(t) = 0.003 \cdot \left(1.0 + 0.10 \cdot \sin\left(\frac{2\pi \cdot t_{\text{sim\_sec}}}{44640}\right)\right)$$
 - **Actuation Impact (`set_valve`):**
-  - `open`: `k = 1.0` (rapid gravity discharge; drains water at ~0.08 m/s).
-  - `half`: `k = 0.5` (restricted flow rate).
-  - `closed`: `k = 0.0` (zero discharge; water accumulates with upstream runoff).
+  - Valve ratio $k$: `open` ($1.0$), `half` ($0.5$), `closed` ($0.0$), `"NN%"` ($\text{NN}/100$).
+  - Default initial valve position: `"half"` ($k = 0.5$).
+  - Initial baseline water level: $3.5\text{ meters}$.
+- **Calibrated Behaviors:**
+  - *Nominal Half Valve:* Holds steady between $2.5\text{ m}$ and $4.5\text{ m}$ for 2+ simulation hours.
+  - *Closed Valve:* Starting from $3.5\text{ m}$, crosses the $8.0\text{ m}$ critical threshold after $15$ to $40$ simulation minutes (~25 min).
+  - *Open Valve:* Rapid gravity drainage settles near $1.78\text{ m} \approx 1.8\text{ m}$.
+  - *Rain Storm ($\times 3$ Inflow) with Half Valve:* Crosses $8.0\text{ m}$ within $8$ to $25$ simulation minutes (~16.6 min).
+  - *Rain Storm ($\times 3$ Inflow) with Open Valve:* Equilibrium settles at $H \approx 6.41\text{ m}$, staying safely below $8.0\text{ m}$.
 
 ---
 
 ### C. Power Load Meter (`power_load`)
-- **Metric:** Substation electrical demand in megawatts (`P`).
-- **Operating Bounds:** `5.0 <= P <= 120.0 MW`.
-- **Physical Model:** Base baseline idle demand plus commercial and industrial daytime load:
-
-> **P(t) = P_base + P_peak * [ 0.6 * sin( pi * (t - 6.0) / 14.0 ) + 0.4 ] + GaussianNoise(0, 1.2)**
-
-- **Operational Behavior:**
-  - During daytime hours (`06:00 <= t <= 20:00`), industrial refrigeration, air conditioning, and manufacturing draw power toward peak load (~85 to 110 MW).
-  - During night hours (`t < 06:00` or `t > 22:00`), demand stabilizes at base idle (~25 to 35 MW).
+- **Metric:** Substation electrical load in megawatts ($P$).
+- **Operating Bounds:** $5.0 \le P \le 120.0\text{ MW}$.
+- **Diurnal Target Demand ($P^*(t)$):**
+  - **Daytime ($06:00 \le t \le 20:00$):**
+    $$P^*(t) = 30.0 + 70.0 \cdot \left(0.6 \cdot \sin\left(\frac{\pi(t - 6.0)}{14.0}\right) + 0.4\right)$$
+    Daytime peak reaches $100.0\text{ MW}$ (within $85 - 110\text{ MW}$).
+  - **Night ($20:00 < t < 06:00$):**
+    Using hours into the night $t_{\text{night}} \in [0, 10]$ ($t_{\text{night}} = t - 20$ if $t \ge 20$ else $t + 4$):
+    $$P^*(t) = 44.0 + 14.0 \cdot \cos\left(\frac{\pi \cdot t_{\text{night}}}{5.0}\right)$$
+    Night load settles around $30.0\text{ MW}$ (within $25 - 35\text{ MW}$).
+  - Smooth $C^1$ transition: Zero first derivative at $06:00$ and $20:00$ ($58.0\text{ MW}$), preventing jumps $> 3\text{ MW}$ between consecutive simulation minutes.
 - **Actuation Impact (`switch_grid`):**
-  - `grid_a`: Primary high-voltage transmission line.
-  - `grid_b`: Redundant secondary substation (sheds non-critical industrial load by 15%).
-  - `island`: Microgrid isolation mode for localized electrical fault containment.
+  - Grid state factors: `grid_a` ($1.0$), `grid_b` ($0.85$), `island` ($0.60$), `shed` ($0.40$), `standby` ($0.20$).
+- **Incident Impact (`grid_overload`):**
+  - Target demand multiplied by $1.35$.
+  - If true power exceeds $114.0\text{ MW}$ continuously for 60 simulation seconds, **blackout** triggers: power target drops to $10\%$ of normal target and emergency calls surge ($+4.0$).
+- **Dynamics:** Time constant $\tau = 120\text{ s}$, noise $\sigma = 1.2\sqrt{\Delta t}\text{ MW}$.
 
 ---
 
 ### D. Air Quality Station (`air_quality`)
-- **Metric:** Particulate Matter Pollution Index (`AQI`).
-- **Operating Bounds:** `10 <= AQI <= 350`.
-- **Physical Model:** Strongly correlated with local vehicular traffic `V(t)` and ambient atmospheric dispersion:
-
-> **AQI(t) = AQI_background + alpha * V(t) + beta * IndustrialFactor + BrownianJitter**
-
-- **Operational Behavior:**
-  - Heavy traffic congestion directly elevates particulate counts in Downtown Financial (`zone-1`) and Industrial Charguia (`zone-3`).
-  - Residential Hills (`zone-4`) benefits from atmospheric dispersion and remains near clean baseline (AQI 25 to 45).
+- **Metric:** Ambient Air Quality Index ($AQI$).
+- **Operating Bounds:** $10.0 \le AQI \le 350.0$.
+- **Target Formulation:**
+  $$\text{Target} = \text{Background}(\text{zone}) + 0.45 \cdot \text{mean}(\text{zone true traffic}) + \text{IndustrialTerm} + \text{IncidentTerms}$$
+- **Parameters:**
+  - Zone Backgrounds: `zone-1` ($18.0$), `zone-2` ($15.0$), `zone-3` ($20.0$), `zone-4` ($8.0$), `zone-5` ($14.0$), `zone-6` ($12.0$).
+  - Clean Baseline: In `zone-4` (Green Hills), background of $8.0$ ensures baseline AQI stays reliably between $25$ and $45$.
+  - Industrial Contribution: `zone-3` receives $+25.0\text{ AQI}$.
+  - Incidents:
+    - `fire`: $+150.0\text{ AQI}$ ramping linearly over 120 simulation seconds.
+    - `air_hazard`: $+100.0\text{ AQI}$, mitigated by signal plans (`red_restriction` reduces bonus by 50%, `all_red` reduces bonus by 80%).
+- **Dynamics:** Time constant $\tau = 300\text{ s}$, noise $\sigma = 0.5\sqrt{\Delta t}\text{ AQI}$.
 
 ---
 
 ### E. Emergency Call Dispatch (`emergency_call`)
-- **Metric:** Incoming emergency call rate in calls per minute (`C`).
-- **Operating Bounds:** `0 <= C <= 30 calls/min`.
-- **Physical Model:** Poisson arrival process with dynamic rate parameter `lambda(t)`:
-
-> **lambda(t) = lambda_base + gamma_traffic * Indicator(V > 120) + gamma_flood * Indicator(H > 8.0)**
-
-- **Operational Behavior:**
-  - Baseline call rate is low (`lambda_base = 2.0 calls/min`).
-  - Severe traffic gridlock (`V > 120 veh/min`) triggers accident reports (+4.5 calls/min).
-  - Dangerous flood channel levels (`H > 8.0 meters`) activate flood rescue calls (+8.0 calls/min).
-- **Actuation Impact (`dispatch`):**
-  - City Brain invokes `dispatch(incident_type, zone_id)` to acknowledge and route municipal emergency units (police, fire, EMS), decrementing active incident counts.
+- **Metric:** Municipal emergency 911/112 call volume in calls per minute ($C$).
+- **Operating Bounds:** $0.0 \le C \le 30.0\text{ calls/min}$.
+- **Arrival Process:**
+  - In each tick, arrivals $n \sim \text{Poisson}(\lambda \cdot \Delta t / 60)$ are drawn from `physics_rng`.
+  - Rate parameter $\lambda$ (calls/min) is dynamic per zone:
+    $$\lambda = 2.0 + 4.5 \cdot \mathbb{I}(\text{any zone cam} > 120) + 8.0 \cdot \mathbb{I}(\text{any zone water} > 8.0) + \text{IncidentSurges} - 1.0 \cdot N_{\text{generic\_dispatches}}$$
+    Floored at $\lambda_{\text{min}} = 0.2\text{ calls/min}$.
+  - Incident surges: `traffic_accident` ($+6.0$), `fire` ($+8.0$), `grid_overload` with blackout ($+4.0$).
+- **Telemetry Reporting:**
+  - Reported reading is the exact count of arrivals during the past 60 simulation seconds, maintained in a FIFO deque per zone and capped at 30 calls/min.
+  - Active generic dispatches relieve emergency pressure for `DISPATCH_DURATION_S` (default 900 s).
 
 ---
 
-## 3. Adversary Capability Engine
+## 3. Physical Incident Engine
 
-The adversary model implements 6 distinct attack vectors, altering telemetry broadcast on the Kafka stream while the internal SQLite ledger preserves ground truth:
+Physical incidents represent real municipal emergencies, distinct from adversary cyber attacks. They alter physical reality directly and can be resolved through timely city actuation.
 
-```text
-+-----------------------+         +-----------------------+
-|     Physics Engine    |         | SQLite "readings_truth"|
-| (True Physical State) |-------->|  (Preserved Truth)    |
-+----------+------------+         +-----------------------+
-           |
-           v
-+-----------------------+
-|   Adversary Module    | <------- Active Attacks Table
-| (Injected Corruption) |
-+----------+------------+
-           |
-           v
-+-----------------------+
-|  Kafka "twin.sensors" | --------> External World (Brain & Guardian)
-| (Poisoned Wire Stream)|
-+-----------------------+
-```
+| Incident Type | Scope | Physical Effect | Resolution Mechanism |
+| :--- | :--- | :--- | :--- |
+| **`rain_storm`** | Zone | Upstream inflow $Q_{\text{in}}$ multiplied by intensity ($1.0 - 5.0$, default $3.0$). | Naturally expires at `duration_s`; water recedes through gravity valves. |
+| **`traffic_accident`** | Device (Camera) | Camera target multiplied by $\times 0.3$ ramped over 60 s; zone $\lambda + 6.0$. | Resolved by `dispatch` matching `traffic_accident`, `medical_emergency`, or `medical_surge` after 300 s response time. |
+| **`fire`** | Zone | AQI target $+150$ ramped over 120 s; zone $\lambda + 8.0$. | Resolved by `dispatch` matching `fire` after 180 s response time. |
+| **`grid_overload`** | Zone (Power) | Power target $\times 1.35$. Continuous load $> 114\text{ MW}$ for 60 s causes blackout (target $\times 0.10$, $\lambda + 4.0$). | Pre-blackout: resolved immediately by `switch_grid` to `grid_b`, `shed`, or `standby`. Post-blackout: resolved by `dispatch("blackout")` after 240 s. |
+| **`air_hazard`** | Zone | AQI target $+100$, mitigated by `red_restriction` or `all_red` signal plans. | Naturally expires at `duration_s`. |
 
-| Attack Capability | Wire Manipulation Method | Detection & Mitigation |
+### Zero-Trust Isolation of Physical Incidents
+- **MCP Invisibility:** Physical events are never exposed to City Brain or Guardian through MCP queries.
+- **Contained / Attacked Commands:** Any command refused due to device containment (`DEVICE_CONTAINED`) or suppressed by an actuator attack does **not** resolve physical incidents.
+- **Red Team API (Port 8100):** Protected by `X-Red-Team-Token`:
+  - `POST /api/event/inject`: Injects incident (`type`, `zone_id`, `device_id`, `intensity`, `duration_s`).
+  - `POST /api/event/clear`: Clears specific incident or all incidents.
+  - `GET /api/event/active`: Lists active physical events.
+- **Ground Truth Ledger:** Initiations, durations, and resolutions are recorded in SQLite table `physical_events`.
+
+---
+
+## 4. Adversary Capability Engine
+
+The adversary model corrupts wire telemetry while the internal SQLite ledger preserves ground truth:
+
+| Attack Capability | Wire Manipulation Method | Detection & Guardian Mitigation |
 | :--- | :--- | :--- |
-| **`device_physical`** | Overwrites telemetry metric with attacker value; maintains legitimate Ed25519 signature. | Guardian detects impossible physical gradients or discrepancies with neighboring sensors; rolls back reading via MCP. |
-| **`device_key`** | Signs payload with an unauthorized, rogue private key. | Guardian verifies against public key retrieved via MCP `get_device_key`; signature check fails immediately. |
-| **`link`** | Flips bits in transit or drops packets entirely. | Guardian receives malformed JSON or cryptographic signature validation failure (`Ed25519 verification failed`). |
-| **`rogue`** | Broadcasts telemetry under an unregistered identifier (e.g. `rg-z11`). | Guardian cross-checks with MCP `list_devices`; flags sensor as an unauthorized hardware intrusion. |
-| **`actuator`** | Acknowledges MCP commands as `"ok"` but refuses to alter physical simulation state. | City Brain detects telemetry failing to converge toward expected target; alerts human operators. |
-| **`sensor_fault`** | Injects subtle continuous linear drift (`dt * drift_rate`) or frozen repeated values. | Statistical outlier filtering across zone-level sensor clusters flags drifting readings. |
+| **`device_physical`** | Overwrites telemetry value with attacker-defined spoofing; generates valid Ed25519 signature with legitimate device key. | Guardian flags anomalous physical gradients or cross-sensor contradictions; invokes `rollback_reading` or `isolate_device`. |
+| **`device_key`** | Attacker extracts valid private key and broadcasts malicious readings that cryptographically verify on wire. | Guardian cross-checks with historical sensor baselines and neighbor correlations; invokes `quarantine_device`. |
+| **`link`** | Flips payload bits (`corrupt_bytes`), drops readings (`drop`), or replays past packets (`replay`). | Guardian detects invalid Ed25519 signatures, sequence gaps, or timestamp regression; alerts operators. |
+| **`rogue`** | Broadcasts telemetry under an unregistered identifier (e.g., `rg-01`). | Guardian compares against `list_devices`; quaranines rogue hardware via MCP `quarantine_device`. |
+| **`actuator`** | Acknowledges MCP commands as `"ok"` but leaves true physical state unchanged. | City Brain observes telemetry failing to converge toward expected physical setpoints. |
+| **`sensor_fault`** | Injects subtle linear drift ($\Delta t \cdot \text{drift\_rate}$), stuck frozen values, or zero dropouts. | Statistical moving-average and deviation filters identify sensor drift. |

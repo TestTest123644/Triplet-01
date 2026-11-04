@@ -77,7 +77,7 @@ def test_actuator_attack_commanded_vs_physics(tmp_path):
 
     water_dev = "z1-wl1"
     init_valve = sim.devices[water_dev].actuator_state["valve_position"]
-    assert init_valve == "closed"
+    assert init_valve == "half"
 
     # Inject actuator attack on z1-wl1 and zone-1
     sim.inject_attack(
@@ -99,8 +99,8 @@ def test_actuator_attack_commanded_vs_physics(tmp_path):
     wl_entry = next(d for d in devices_list if d["device_id"] == water_dev)
     assert wl_entry["actuator_state"]["valve_position"] == "open"
 
-    # Physical truth inside simulator must retain the original unexecuted state ("closed")
-    assert sim.devices[water_dev].actuator_state["valve_position"] == "closed"
+    # Physical truth inside simulator must retain the original unexecuted state ("half")
+    assert sim.devices[water_dev].actuator_state["valve_position"] == init_valve
 
     # Brain dispatches an emergency unit to zone-1
     disp_result = dispatch(incident_type="flood", zone_id="zone-1")

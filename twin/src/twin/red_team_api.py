@@ -93,6 +93,7 @@ def build_red_team_app(sim: CitySimulator, token: str, streamer: Optional[Any] =
             "tick_count": sim.clock.tick_count,
             "total_devices": len(sim.devices),
             "active_attacks_count": len(sim.active_attacks),
+            "active_events_count": len(sim.active_events),
             "blocked_frames": dict(getattr(sim, "blocked_rogue_frames", {})),
         }
         if streamer is not None:
@@ -183,6 +184,74 @@ def build_red_team_app(sim: CitySimulator, token: str, streamer: Optional[Any] =
             "blocked_frames": dict(blocked_frames_map),
         })
 
+    async def api_inject_event(request: Request) -> JSONResponse:
+        try:
+            body = await request.json()
+            event_type = body.get("type")
+            zone_id = body.get("zone_id")
+            device_id = body.get("device_id")
+            intensity = body.get("intensity")
+            duration_s = body.get("duration_s")
+            params = body.get("params", {})
+
+            if not event_type or not zone_id:
+                return JSONResponse(
+                    {
+                        "status": "error",
+                        "code": "INVALID_EVENT",
+                        "message": "Missing required fields: 'type' and 'zone_id'",
+                    },
+                    status_code=400,
+                )
+
+            event_id = sim.inject_event(
+                type=event_type,
+                zone_id=zone_id,
+                device_id=device_id,
+                intensity=intensity,
+                duration_s=duration_s,
+                params=params,
+            )
+            return JSONResponse({
+                "status": "ok",
+                "event_id": event_id,
+                "type": event_type,
+                "zone_id": zone_id,
+                "sim_time": sim.get_sim_time(),
+            })
+        except ValueError as e:
+            return JSONResponse(
+                {
+                    "status": "error",
+                    "code": "INVALID_EVENT",
+                    "message": str(e),
+                },
+                status_code=400,
+            )
+        except Exception as e:
+            logger.error(f"Error injecting physical event via API: {e}")
+            return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
+
+    async def api_clear_event(request: Request) -> JSONResponse:
+        try:
+            body = await request.json() if request.headers.get("content-length") not in (None, "0") else {}
+            event_id = body.get("event_id")
+            if event_id and event_id != "all":
+                cleared = sim.clear_event(event_id)
+                return JSONResponse({"status": "ok", "cleared": cleared, "event_id": event_id})
+            else:
+                sim.clear_all_events()
+                return JSONResponse({"status": "ok", "cleared_all": True})
+        except Exception as e:
+            logger.error(f"Error clearing physical events via API: {e}")
+            return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
+
+    async def api_active_events(request: Request) -> JSONResponse:
+        return JSONResponse({
+            "status": "ok",
+            "active_events": sim.get_active_events(),
+        })
+
     app = Starlette(
         middleware=[Middleware(RedTeamAuthMiddleware, token=token)],
     )
@@ -190,6 +259,9 @@ def build_red_team_app(sim: CitySimulator, token: str, streamer: Optional[Any] =
     app.add_route("/api/attack/inject", api_inject_attack, methods=["POST"])
     app.add_route("/api/attack/clear", api_clear_attack, methods=["POST"])
     app.add_route("/api/attack/active", api_active_attacks, methods=["GET"])
+    app.add_route("/api/event/inject", api_inject_event, methods=["POST"])
+    app.add_route("/api/event/clear", api_clear_event, methods=["POST"])
+    app.add_route("/api/event/active", api_active_events, methods=["GET"])
 
     return app
 
