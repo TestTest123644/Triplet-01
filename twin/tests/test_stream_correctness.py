@@ -3,7 +3,9 @@
 import asyncio
 import collections
 import json
+import logging
 import math
+import time
 import pytest
 from starlette.testclient import TestClient
 
@@ -84,11 +86,13 @@ def test_bounded_reading_cache(temp_ledger):
     res_get = get_reading(old_id)
     assert res_get is not None
     assert res_get.get("status") == "error"
-    assert "50" in res_get.get("message", "")
+    assert res_get.get("code") == "READING_NOT_FOUND"
+    assert res_get.get("message") == f"Reading {old_id} not found in the reading cache: unknown id, or older than the last 50 readings"
 
     res_rb = rollback_reading(old_id)
     assert res_rb.get("status") == "error"
-    assert "50" in res_rb.get("message", "")
+    assert res_rb.get("code") == "READING_NOT_FOUND"
+    assert res_rb.get("message") == f"Reading {old_id} not found in the reading cache: unknown id, or older than the last 50 readings"
 
 
 def test_get_readings_filtering_and_order(temp_ledger):
@@ -287,7 +291,7 @@ def test_buffer_error_retry_and_deque_overflow():
     }
     reading, b = streamer.stream_reading(raw, priv)
     assert streamer.producer.calls == 2
-    assert 0.05 in streamer.producer.poll_calls
+    assert 0 in streamer.producer.poll_calls
     assert streamer.produced == 1
     assert streamer.sunk == 0
 
@@ -318,3 +322,171 @@ def test_buffer_error_retry_and_deque_overflow():
     assert st["dropped"] == 5
     assert st["rejected_oversize"] == 0
     assert st["rejected_invalid"] == 0
+
+
+def test_kafka_outage_non_blocking_performance(caplog):
+    """3.1 Item 1: Kafka queue full does not stall the loop (< 0.1 s for 42 msgs, <= 1 log warning)."""
+    priv, _ = generate_keypair()
+    # Producer pointing to unreachable address with queue size 100
+    streamer = KafkaStreamer(
+        bootstrap_servers="127.0.0.1:9",
+        producer_config={"queue.buffering.max.messages": 100},
+    )
+    raw = {
+        "reading_id": "r-z1-tc1-1",
+        "device_id": "z1-tc1",
+        "device_type": "traffic_camera",
+        "ts": "2026-10-17T12:00:00Z",
+        "seq": 1,
+        "value": 45.0,
+        "unit": "veh/min",
+        "location": "zone-1",
+        "status": "ok",
+    }
+
+    # Fill the 100-message queue until buffer error occurs
+    for i in range(120):
+        raw["seq"] = i + 1
+        streamer.stream_reading(raw, priv)
+
+    # Verify 42 stream_reading calls take < 0.1 s in total and emit at most 1 WARNING+ log record
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        start = time.monotonic()
+        for i in range(42):
+            raw["seq"] = 200 + i
+            streamer.stream_reading(raw, priv)
+        elapsed = time.monotonic() - start
+
+    assert elapsed < 0.1, f"42 stream_reading calls took {elapsed:.4f} s (expected < 0.1 s)"
+    warning_records = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert len(warning_records) <= 1, f"Expected <= 1 warning log, got {len(warning_records)}: {[r.message for r in warning_records]}"
+
+    st = streamer.stats()
+    assert st["kafka_state"] == "degraded"
+
+
+def test_rogue_reading_id_continuity_across_attack_clears(temp_ledger):
+    """3.1 Item 2: Re-injecting rogue device continues sequence counter without reuse."""
+    sim = CitySimulator(seed=111, ledger=temp_ledger)
+
+    # Inject rogue "rg-x9" and tick 3 times
+    atk1 = sim.inject_attack(
+        capability="rogue",
+        params={"rogue_device_id": "rg-x9", "value": 100.0},
+    )
+    r1 = sim.tick()
+    r2 = sim.tick()
+    r3 = sim.tick()
+
+    rg1 = next(r for r in r1 if r["device_id"] == "rg-x9")
+    rg2 = next(r for r in r2 if r["device_id"] == "rg-x9")
+    rg3 = next(r for r in r3 if r["device_id"] == "rg-x9")
+    assert rg1["reading_id"] == "r-rg-x9-1"
+    assert rg2["reading_id"] == "r-rg-x9-2"
+    assert rg3["reading_id"] == "r-rg-x9-3"
+
+    # Clear attack
+    sim.clear_attack(atk1)
+
+    # Re-inject same rogue id
+    atk2 = sim.inject_attack(
+        capability="rogue",
+        params={"rogue_device_id": "rg-x9", "value": 200.0},
+    )
+    r4 = sim.tick()
+    rg4 = next(r for r in r4 if r["device_id"] == "rg-x9")
+    assert rg4["reading_id"] == "r-rg-x9-4"
+    assert rg4["seq"] == 4
+
+
+def test_duplicate_active_rogue_id_rejected(temp_ledger):
+    """3.1 Item 3: Injecting duplicate active rogue id rejected with ValueError (400 INVALID_ATTACK)."""
+    sim = CitySimulator(seed=222, ledger=temp_ledger)
+
+    # Inject first active rogue attack
+    atk = sim.inject_attack(
+        capability="rogue",
+        params={"rogue_device_id": "rg-x9", "value": 100.0},
+    )
+    assert atk.startswith("atk-")
+
+    # Second injection with same active rogue id must be rejected
+    with pytest.raises(ValueError, match="already active"):
+        sim.inject_attack(
+            capability="rogue",
+            params={"rogue_device_id": "rg-x9", "value": 200.0},
+        )
+
+    # Test via Red Team HTTP API
+    token = "test-token"
+    app = build_red_team_app(sim, token=token)
+    client = TestClient(app)
+
+    res = client.post(
+        "/api/attack/inject",
+        json={
+            "capability": "rogue",
+            "params": {"rogue_device_id": "rg-x9", "value": 300.0},
+        },
+        headers={"X-Red-Team-Token": token},
+    )
+    assert res.status_code == 400
+    assert res.json()["code"] == "INVALID_ATTACK"
+
+    # After clearing the attack, injecting the rogue id is accepted again
+    sim.clear_attack(atk)
+    atk3 = sim.inject_attack(
+        capability="rogue",
+        params={"rogue_device_id": "rg-x9", "value": 400.0},
+    )
+    assert atk3.startswith("atk-")
+
+
+def test_get_readings_since_ts_link_replay_no_truncation(temp_ledger):
+    """3.1 Item 4: get_readings(since_ts) skips replayed readings instead of truncating."""
+    sim = CitySimulator(seed=333, ledger=temp_ledger)
+    set_active_simulator(sim)
+
+    # Initial tick
+    sim.tick()
+
+    # Inject link replay attack on z1-tc1 before since_ts
+    sim.inject_attack(
+        capability="link",
+        target_device_id="z1-tc1",
+        params={"link_mode": "replay"},
+    )
+    for _ in range(5):
+        sim.tick()
+
+    since_ts = sim.get_sim_time()
+
+    # Run 20 ticks: 42 readings per tick = 840 readings total
+    # 41 devices emit fresh readings (ts >= since_ts); 1 device (z1-tc1) emits replayed readings (ts < since_ts)
+    for _ in range(20):
+        sim.tick()
+
+    res = get_readings(since_ts=since_ts, limit=500)
+    # Must NOT truncate to 41 readings
+    assert len(res) == 500
+    assert all(r["ts"] >= since_ts for r in res)
+
+
+def test_error_messages_for_missing_readings(temp_ledger):
+    """3.1 Item 5: get_reading and rollback_reading return standardized READING_NOT_FOUND error."""
+    sim = CitySimulator(seed=444, ledger=temp_ledger)
+    set_active_simulator(sim)
+
+    missing_id = "r-unknown-999"
+    expected = {
+        "status": "error",
+        "code": "READING_NOT_FOUND",
+        "message": f"Reading {missing_id} not found in the reading cache: unknown id, or older than the last {sim.reading_cache_max} readings",
+    }
+
+    res_get = get_reading(missing_id)
+    assert res_get == expected
+
+    res_rb = rollback_reading(missing_id)
+    assert res_rb == expected

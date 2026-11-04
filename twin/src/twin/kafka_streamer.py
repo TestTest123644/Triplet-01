@@ -94,6 +94,7 @@ class KafkaStreamer:
         bootstrap_servers: str = "localhost:9092",
         topic: str = "twin.sensors",
         mock_mode: bool = False,
+        producer_config: Optional[Dict[str, Any]] = None,
     ):
         self.bootstrap_servers = bootstrap_servers
         self.topic = topic
@@ -115,31 +116,61 @@ class KafkaStreamer:
         self._oversize_alerted_devices: set[str] = set()
         self._rate_history: collections.deque[Tuple[float, int]] = collections.deque(maxlen=1000)
 
+        # Operational health state tracking
+        self._error_history: collections.deque[float] = collections.deque(maxlen=1000)
+        self._kafka_state: str = "disabled" if mock_mode else "ok"
+
         if not mock_mode:
             try:
                 import confluent_kafka
 
+                message_timeout_ms = int(os.getenv("KAFKA_MESSAGE_TIMEOUT_MS", "10000"))
                 conf = {
                     "bootstrap.servers": self.bootstrap_servers,
                     "linger.ms": 5,
                     "batch.num.messages": 1000,
                     "queue.buffering.max.messages": 100000,
+                    "message.timeout.ms": message_timeout_ms,
                     "acks": 1,
                 }
+                if producer_config:
+                    conf.update(producer_config)
+
                 self.producer = confluent_kafka.Producer(conf)
+                self._kafka_state = "ok"
             except Exception as e:
                 logger.warning(
                     f"Could not connect to Kafka broker at {self.bootstrap_servers} ({e}). "
                     "Falling back to sink buffer mode."
                 )
                 self.producer = None
+                self._kafka_state = "disabled"
+
+    def _record_error(self) -> None:
+        """Record error timestamp and handle transition to degraded state."""
+        now = time.monotonic()
+        self._error_history.append(now)
+        if self._kafka_state != "degraded":
+            self._kafka_state = "degraded"
+            logger.warning("[ALERT] Kafka producer degraded: buffer error or delivery failure encountered")
+
+    def _record_delivery_success(self) -> None:
+        """Record successful delivery and transition back to nominal if no recent errors."""
+        now = time.monotonic()
+        while self._error_history and now - self._error_history[0] > 10.0:
+            self._error_history.popleft()
+        if not self._error_history and self._kafka_state == "degraded":
+            self._kafka_state = "ok"
+            logger.info("[NOMINAL] Kafka producer recovered to nominal operational state")
 
     def _on_delivery(self, err: Any, msg: Any) -> None:
         """Delivery report callback for confluent-kafka producer."""
         if err is not None:
             self.delivery_failed += 1
+            self._record_error()
         else:
             self.delivered += 1
+            self._record_delivery_success()
 
     def _sink_payload(self, payload_bytes: bytes) -> None:
         """Append to bounded sink buffer and track dropped packets."""
@@ -208,7 +239,8 @@ class KafkaStreamer:
                 # Poll to serve delivery callbacks without blocking
                 self.producer.poll(0)
             except BufferError:
-                self.producer.poll(0.05)
+                self._record_error()
+                self.producer.poll(0)
                 try:
                     self.producer.produce(
                         topic=self.topic,
@@ -218,11 +250,10 @@ class KafkaStreamer:
                     )
                     self.produced += 1
                     self.producer.poll(0)
-                except Exception as e:
-                    logger.error(f"Kafka produce failed after BufferError retry: {e}")
+                except Exception:
                     self._sink_payload(serialized_bytes)
-            except Exception as e:
-                logger.error(f"Error producing to Kafka: {e}")
+            except Exception:
+                self._record_error()
                 self._sink_payload(serialized_bytes)
         else:
             self._sink_payload(serialized_bytes)
@@ -234,6 +265,17 @@ class KafkaStreamer:
 
         return reading, serialized_bytes
 
+    def get_kafka_state(self) -> str:
+        """Evaluate current operational state of Kafka producer pipeline."""
+        if self.producer is None:
+            return "disabled"
+        now = time.monotonic()
+        while self._error_history and now - self._error_history[0] > 10.0:
+            self._error_history.popleft()
+        if self._error_history:
+            return "degraded"
+        return self._kafka_state
+
     def stats(self) -> Dict[str, Any]:
         """Return streaming metrics and error counters."""
         return {
@@ -244,6 +286,7 @@ class KafkaStreamer:
             "dropped": self.dropped,
             "rejected_oversize": self.rejected_oversize,
             "rejected_invalid": self.rejected_invalid,
+            "kafka_state": self.get_kafka_state(),
         }
 
     def get_msgs_per_sec(self) -> float:

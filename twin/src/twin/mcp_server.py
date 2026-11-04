@@ -94,7 +94,8 @@ def get_reading(reading_id: str) -> Optional[Dict[str, Any]]:
     if reading is None:
         return {
             "status": "error",
-            "message": f"Reading {reading_id} is older than the cache window (READING_CACHE_MAX={sim.reading_cache_max})",
+            "code": "READING_NOT_FOUND",
+            "message": f"Reading {reading_id} not found in the reading cache: unknown id, or older than the last {sim.reading_cache_max} readings",
         }
     return {k: v for k, v in reading.items() if not k.startswith("_")}
 
@@ -116,10 +117,10 @@ def get_readings(
     clamped_limit = max(1, min(500, limit))
     matches: List[Dict[str, Any]] = []
 
-    # Iterate newest-first directly over OrderedDict, stopping early when ts < since_ts
+    # Iterate newest-first directly over OrderedDict, skipping entries older than since_ts
     for r in reversed(sim.recent_readings_buffer.values()):
         if since_ts and r.get("ts", "") < since_ts:
-            break
+            continue
         if device_id and r.get("device_id") != device_id:
             continue
         matches.append({k: v for k, v in r.items() if not k.startswith("_")})

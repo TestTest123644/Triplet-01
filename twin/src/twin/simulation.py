@@ -371,6 +371,10 @@ class CitySimulator:
                 raise ValueError(
                     f"Invalid rogue_device_id '{rogue_dev_id}': collides with registered device_id"
                 )
+            if rogue_dev_id in self._rogue_keys:
+                raise ValueError(
+                    f"Rogue device_id '{rogue_dev_id}' is already active in an ongoing rogue attack"
+                )
             params_dict["rogue_device_id"] = rogue_dev_id
             # Throwaway keypair per rogue attack stored privately, NOT in attack_info or params
             priv_b64, pub_b64 = generate_keypair()
@@ -428,7 +432,7 @@ class CitySimulator:
             r_dev_id = rogue_info.get("params", {}).get("rogue_device_id")
             if r_dev_id:
                 self._rogue_keys.pop(r_dev_id, None)
-                self._rogue_seqs.pop(r_dev_id, None)
+                # NOTE: _rogue_seqs is preserved across clear_attack to prevent reading_id collision on re-injection
 
         self._clamped_attacks.discard(attack_id)
 
@@ -468,7 +472,7 @@ class CitySimulator:
         self.active_attacks.clear()
         self.rogue_attacks.clear()
         self._rogue_keys.clear()
-        self._rogue_seqs.clear()
+        # NOTE: _rogue_seqs is preserved across clear_all_attacks to prevent reading_id collision
         self._clamped_attacks.clear()
         for d in self.devices.values():
             d.active_attack = None
@@ -819,7 +823,8 @@ class CitySimulator:
         if not reading:
             return {
                 "status": "error",
-                "message": f"Reading {reading_id} is older than the cache window (READING_CACHE_MAX={self.reading_cache_max})",
+                "code": "READING_NOT_FOUND",
+                "message": f"Reading {reading_id} not found in the reading cache: unknown id, or older than the last {self.reading_cache_max} readings",
             }
         reading["status"] = "rolled_back"
         return {"status": "ok", "reading_id": reading_id, "reading_status": "rolled_back"}
