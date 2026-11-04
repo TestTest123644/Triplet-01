@@ -40,3 +40,4 @@ test_*.png
 page_*.png
 scratch/
 hackathon_shell.sh
+REVIEW_PROMPT_FOR_CLAUDE.md
