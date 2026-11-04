@@ -18,15 +18,16 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt
 
-# Copy Twin package, dashboard, and initialization artifacts
-COPY twin/ ./twin/
+# Copy Twin source package, dashboard, and mock components
+COPY src/ ./src/
 COPY dashboard.py ./
-COPY ground_truth.db* ./
+COPY mocks/ ./mocks/
 
 # Expose MCP Command Server port and Streamlit Dashboard port
 EXPOSE 8000 8501
 
 # Set environment defaults
+ENV PYTHONPATH=/app/src
 ENV KAFKA_BOOTSTRAP_SERVERS="kafka:9092"
 ENV KAFKA_TOPIC="twin.sensors"
 ENV MCP_HOST="0.0.0.0"

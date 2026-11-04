@@ -50,7 +50,7 @@ This document describes the cross-layer communication architecture connecting th
    - `set_signal_plan(device_id, target_state)`: Switch traffic light programs (`green_wave`, `all_red`, `adaptive`).
    - `set_valve(device_id, target_state)`: Adjust flood drainage valves (`open`, `half`, `closed`).
    - `switch_grid(device_id, target_state)`: Switch substation power routing (`grid_a`, `grid_b`, `island`).
-3. **Reference Implementation:** See `twin/mocks/mock_brain.py` or `mocks/mock_brain.py`.
+3. **Reference Implementation:** See `twin/mocks/mock_brain.py`.
 
 ### Layer 3: Guardian
 1. **Consume Telemetry:** Subscribe to `twin.sensors` on `localhost:19092`.
@@ -59,11 +59,11 @@ This document describes the cross-layer communication architecture connecting th
    - `quarantine_device(device_id)`: Blacklist and revoke device network authority.
    - `isolate_device(device_id)`: Isolate physical zone segment.
    - `rollback_reading(reading_id)`: Mark reading as rolled back in the system.
-4. **Reference Implementation:** See `twin/mocks/mock_guardian.py` or `mocks/mock_guardian.py`.
+4. **Reference Implementation:** See `twin/mocks/mock_guardian.py`.
 
 ---
 
 ## 4. Contract Specifications
-- **Full API Specification:** See `INTERFACE.md` or `twin/INTERFACE.md`.
-- **Developer Guide:** See `DEVELOPER_GUIDE.md`.
-- **User Guide:** See `USER_GUIDE.md`.
+- **Full API Specification:** See [twin/INTERFACE.md](twin/INTERFACE.md).
+- **Developer Guide:** See [twin/docs/DEVELOPER_GUIDE.md](twin/docs/DEVELOPER_GUIDE.md).
+- **User Guide:** See [twin/docs/USER_GUIDE.md](twin/docs/USER_GUIDE.md).

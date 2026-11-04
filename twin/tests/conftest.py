@@ -2,11 +2,22 @@
 
 Sets GROUND_TRUTH_DB_PATH to a temporary database file at conftest import time,
 ensuring no test can accidentally read or write to ./ground_truth.db.
+Also ensures twin/src and twin are added to sys.path so tests can import
+twin, dashboard, and mocks cleanly whether invoked from twin/ or repo root.
 """
 
 import os
+from pathlib import Path
+import sys
 import tempfile
 import pytest
+
+# Ensure twin/src and twin root are on sys.path for both local and root test invocations
+_twin_dir = Path(__file__).resolve().parent.parent
+_src_dir = _twin_dir / "src"
+for _path_str in [str(_src_dir), str(_twin_dir)]:
+    if _path_str not in sys.path:
+        sys.path.insert(0, _path_str)
 
 # Ensure GROUND_TRUTH_DB_PATH is set before any twin module is imported.
 # twin.mcp_server.get_active_simulator() lazily builds a CitySimulator on the
