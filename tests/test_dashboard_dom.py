@@ -22,7 +22,11 @@ from twin.mcp_server import set_active_simulator
 def dom_app():
     os.environ["STREAMLIT_TESTING"] = "1"
     set_active_simulator(None)
-    dashboard_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "dashboard.py"))
+    candidates = [
+        os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "dashboard.py")),
+        os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "dashboard.py")),
+    ]
+    dashboard_path = next((p for p in candidates if os.path.isfile(p)), candidates[0])
     at = AppTest.from_file(dashboard_path, default_timeout=30)
     at.run()
     yield at
