@@ -90,7 +90,10 @@ def get_city_state() -> Dict[str, Any]:
 def get_reading(reading_id: str) -> Optional[Dict[str, Any]]:
     """Fetch past published reading using its reading_id from the broadcast cache."""
     sim = get_active_simulator()
-    return sim.get_cached_reading(reading_id)
+    reading = sim.get_cached_reading(reading_id)
+    if reading is None:
+        return None
+    return {k: v for k, v in reading.items() if not k.startswith("_")}
 
 
 @mcp.tool()
@@ -112,7 +115,8 @@ def get_readings(
         readings = [r for r in readings if r.get("device_id") == device_id]
     if since_ts:
         readings = [r for r in readings if r.get("ts", "") >= since_ts]
-    return readings[-limit:]
+    selected = readings[-limit:]
+    return [{k: v for k, v in r.items() if not k.startswith("_")} for r in selected]
 
 
 # ============================================================================

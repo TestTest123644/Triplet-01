@@ -11,17 +11,56 @@ Validates via Streamlit AppTest:
 """
 
 import os
+from pathlib import Path
 import pytest
+import requests
+from starlette.testclient import TestClient
 from streamlit.testing.v1 import AppTest
 
-
-from twin.mcp_server import set_active_simulator
+from twin.db_ledger import GroundTruthLedger
+from twin.red_team_api import build_red_team_app
+from twin.simulation import CitySimulator
 
 
 @pytest.fixture
-def dom_app():
+def dom_app(tmp_path, monkeypatch):
     os.environ["STREAMLIT_TESTING"] = "1"
-    set_active_simulator(None)
+    db_path = str(tmp_path / "dom_truth.db")
+    os.environ["GROUND_TRUTH_DB_PATH"] = db_path
+
+    # Seed temporary ledger with clean baseline readings
+    ledger = GroundTruthLedger(db_path=db_path)
+    sim = CitySimulator(seed=123, ledger=ledger)
+    for _ in range(5):
+        sim.tick()
+
+    token = "test-token"
+    os.environ["RED_TEAM_TOKEN"] = token
+    app = build_red_team_app(sim, token=token)
+    client = TestClient(app)
+
+    orig_post = requests.post
+    orig_get = requests.get
+
+    def mock_post(url, *args, **kwargs):
+        kwargs.pop("timeout", None)
+        twin_url = os.environ.get("TWIN_API_URL", "http://127.0.0.1:9")
+        if url.startswith(twin_url):
+            path = url[len(twin_url):]
+            return client.post(path, *args, **kwargs)
+        return orig_post(url, *args, **kwargs)
+
+    def mock_get(url, *args, **kwargs):
+        kwargs.pop("timeout", None)
+        twin_url = os.environ.get("TWIN_API_URL", "http://127.0.0.1:9")
+        if url.startswith(twin_url):
+            path = url[len(twin_url):]
+            return client.get(path, *args, **kwargs)
+        return orig_get(url, *args, **kwargs)
+
+    monkeypatch.setattr(requests, "post", mock_post)
+    monkeypatch.setattr(requests, "get", mock_get)
+
     candidates = [
         os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "dashboard.py")),
         os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "dashboard.py")),
@@ -30,7 +69,6 @@ def dom_app():
     at = AppTest.from_file(dashboard_path, default_timeout=30)
     at.run()
     yield at
-    set_active_simulator(None)
 
 
 def test_dashboard_dom_mounting_and_header(dom_app):

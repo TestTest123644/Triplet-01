@@ -25,6 +25,8 @@ for _path_str in [str(_src_dir), str(_twin_dir)]:
 _GLOBAL_TEST_TMPDIR = tempfile.mkdtemp(prefix="twin_conftest_")
 _GLOBAL_TEST_DB = os.path.join(_GLOBAL_TEST_TMPDIR, "conftest_ground_truth.db")
 os.environ["GROUND_TRUTH_DB_PATH"] = _GLOBAL_TEST_DB
+os.environ["TWIN_API_URL"] = "http://127.0.0.1:9"
+os.environ["RED_TEAM_TOKEN"] = "test-token"
 
 
 @pytest.fixture(autouse=True)

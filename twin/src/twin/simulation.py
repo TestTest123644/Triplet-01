@@ -89,9 +89,11 @@ class DeviceState:
     status: str = "ok"  # ok, isolated, quarantined, rolled_back, modelled
     seq: int = 0
     current_value: float = 0.0
+    last_broadcast_value: float = 0.0
     drift_offset: float = 0.0
     last_broadcast_reading: Optional[Dict[str, Any]] = None
     actuator_state: Dict[str, Any] = field(default_factory=dict)
+    reported_actuator_state: Dict[str, Any] = field(default_factory=dict)
     active_attack: Optional[Dict[str, Any]] = None
 
 
@@ -125,6 +127,7 @@ class CitySimulator:
         self.ledger = ledger or GroundTruthLedger()
         self.devices: Dict[str, DeviceState] = {}
         self.zone_dispatches: Dict[str, List[Dict[str, Any]]] = {z["zone_id"]: [] for z in self.ZONES}
+        self.reported_zone_dispatches: Dict[str, List[Dict[str, Any]]] = {z["zone_id"]: [] for z in self.ZONES}
         self.command_results: Dict[str, Dict[str, Any]] = {}
         self.recent_readings_buffer: Dict[str, Dict[str, Any]] = {}
         self.active_attacks: Dict[str, Dict[str, Any]] = {}
@@ -172,7 +175,9 @@ class CitySimulator:
                     status="ok",
                     seq=0,
                     current_value=tmpl["init"],
-                    actuator_state=initial_actuator,
+                    last_broadcast_value=tmpl["init"],
+                    actuator_state=dict(initial_actuator),
+                    reported_actuator_state=dict(initial_actuator),
                 )
                 self.devices[device_id] = dev_state
 
@@ -481,6 +486,7 @@ class CitySimulator:
             if not drop_reading:
                 if replay_reading and dev.last_broadcast_reading:
                     reading_dict = dict(dev.last_broadcast_reading)
+                    dev.last_broadcast_value = reading_dict["value"]
                 else:
                     reading_dict = {
                         "reading_id": reading_id,
@@ -495,6 +501,7 @@ class CitySimulator:
                     }
                     if corrupt_sig:
                         reading_dict["_corrupt_sig"] = True
+                    dev.last_broadcast_value = broadcast_val
 
                 broadcast_readings.append(reading_dict)
                 self.recent_readings_buffer[reading_id] = reading_dict
@@ -558,7 +565,7 @@ class CitySimulator:
                 "min_val": d.min_val,
                 "max_val": d.max_val,
                 "status": d.status,
-                "actuator_state": d.actuator_state,
+                "actuator_state": d.reported_actuator_state,
             }
             for d in self.devices.values()
         ]
@@ -577,11 +584,11 @@ class CitySimulator:
             "device_id": dev.device_id,
             "zone_id": dev.zone_id,
             "device_type": dev.device_type,
-            "current_value": dev.current_value,
+            "current_value": dev.last_broadcast_value,
             "unit": dev.unit,
             "seq": dev.seq,
             "status": dev.status,
-            "actuator_state": dev.actuator_state,
+            "actuator_state": dev.reported_actuator_state,
             "ts": self.get_sim_time(),
         }
 
@@ -593,12 +600,12 @@ class CitySimulator:
             "zones": {
                 z["zone_id"]: {
                     "name": z["name"],
-                    "active_dispatches": len(self.zone_dispatches.get(z["zone_id"], [])),
+                    "active_dispatches": len(self.reported_zone_dispatches.get(z["zone_id"], [])),
                     "devices": [
                         {
                             "device_id": d.device_id,
                             "type": d.device_type,
-                            "value": d.current_value,
+                            "value": d.last_broadcast_value,
                             "unit": d.unit,
                             "status": d.status,
                         }
@@ -621,17 +628,18 @@ class CitySimulator:
             result = {"status": "error", "message": f"Unknown zone_id: {zone_id}"}
         else:
             dispatch_id = f"disp-{uuid.uuid4().hex[:8]}"
+            record = {
+                "dispatch_id": dispatch_id,
+                "incident_type": incident_type,
+                "zone_id": zone_id,
+                "dispatched_at": self.get_sim_time(),
+            }
+            self.reported_zone_dispatches[zone_id].append(record)
             zone_attack = any(
                 atk.get("capability") == "actuator" and atk.get("target_zone_id") == zone_id
                 for atk in self.active_attacks.values()
             )
             if not zone_attack:
-                record = {
-                    "dispatch_id": dispatch_id,
-                    "incident_type": incident_type,
-                    "zone_id": zone_id,
-                    "dispatched_at": self.get_sim_time(),
-                }
                 self.zone_dispatches[zone_id].append(record)
             result = {"status": "ok", "dispatch_id": dispatch_id, "zone_id": zone_id}
 
@@ -645,7 +653,8 @@ class CitySimulator:
         if not dev or dev.device_type != "traffic_camera":
             result = {"status": "error", "message": f"Device {device_id} is not a valid traffic_camera"}
         else:
-            # Check if actuator attack is active: accepts command but does not execute
+            dev.reported_actuator_state["signal_plan"] = target_state
+            # Check if actuator attack is active: accepts command but does not execute physically
             if not (dev.active_attack and dev.active_attack.get("capability") == "actuator"):
                 dev.actuator_state["signal_plan"] = target_state
             result = {"status": "ok", "device_id": device_id, "signal_plan": target_state}
@@ -660,14 +669,16 @@ class CitySimulator:
         if not dev or dev.device_type != "water_level":
             result = {"status": "error", "message": f"Device {device_id} is not a valid water_level sensor"}
         else:
-            # Check if actuator attack is active: accepts command but does not execute
+            ratio = 1.0 if target_state == "open" else 0.0
+            try:
+                if target_state.endswith("%"):
+                    ratio = float(target_state.rstrip("%")) / 100.0
+            except ValueError:
+                pass
+            dev.reported_actuator_state["valve_position"] = target_state
+            dev.reported_actuator_state["valve_ratio"] = max(0.0, min(1.0, ratio))
+            # Check if actuator attack is active: accepts command but does not execute physically
             if not (dev.active_attack and dev.active_attack.get("capability") == "actuator"):
-                ratio = 1.0 if target_state == "open" else 0.0
-                try:
-                    if target_state.endswith("%"):
-                        ratio = float(target_state.rstrip("%")) / 100.0
-                except ValueError:
-                    pass
                 dev.actuator_state["valve_position"] = target_state
                 dev.actuator_state["valve_ratio"] = max(0.0, min(1.0, ratio))
             result = {"status": "ok", "device_id": device_id, "valve_position": target_state}
@@ -682,10 +693,15 @@ class CitySimulator:
         if not dev or dev.device_type != "power_load":
             result = {"status": "error", "message": f"Device {device_id} is not a valid power_load sensor"}
         else:
-            # Check if actuator attack is active: accepts command but does not execute
+            dev.reported_actuator_state["grid_state"] = target_state
+            # Check if actuator attack is active: accepts command but does not execute physically
             if not (dev.active_attack and dev.active_attack.get("capability") == "actuator"):
                 dev.actuator_state["grid_state"] = target_state
             result = {"status": "ok", "device_id": device_id, "grid_state": target_state}
+
+        if idempotency_key:
+            self.command_results[idempotency_key] = result
+        return result
 
         if idempotency_key:
             self.command_results[idempotency_key] = result

@@ -19,6 +19,7 @@ import uvicorn
 
 from twin.kafka_streamer import KafkaStreamer
 from twin.mcp_server import mcp, set_active_simulator
+from twin.red_team_api import build_red_team_app, get_or_create_red_team_token
 from twin.simulation import CitySimulator
 
 logging.basicConfig(
@@ -124,91 +125,39 @@ async def main() -> None:
     # 3. Initialize Kafka Streamer
     streamer = KafkaStreamer(bootstrap_servers=bootstrap_servers, topic=topic)
 
-    # 4. Configure MCP ASGI Server & Internal Red Team Console Endpoints
-    starlette_app = mcp.sse_app(host=mcp_host)
+    red_team_host = os.getenv("RED_TEAM_HOST", "127.0.0.1")
+    red_team_port = int(os.getenv("RED_TEAM_PORT", "8100"))
 
-    from starlette.requests import Request
-    from starlette.responses import JSONResponse
-
-    async def api_status(request: Request) -> JSONResponse:
-        return JSONResponse({
-            "status": "ok",
-            "sim_time": sim.get_sim_time(),
-            "tick_count": sim.clock.tick_count,
-            "total_devices": len(sim.devices),
-            "active_attacks_count": len(sim.active_attacks),
-        })
-
-    async def api_inject_attack(request: Request) -> JSONResponse:
-        try:
-            body = await request.json()
-            capability = body.get("capability")
-            target_device_id = body.get("target_device_id")
-            target_zone_id = body.get("target_zone_id")
-            params = body.get("params", {})
-            description = body.get("description")
-
-            if not capability:
-                return JSONResponse({"status": "error", "message": "Missing capability field"}, status_code=400)
-
-            attack_id = sim.inject_attack(
-                capability=capability,
-                target_device_id=target_device_id,
-                target_zone_id=target_zone_id,
-                params=params,
-                description=description,
-            )
-            return JSONResponse({
-                "status": "ok",
-                "attack_id": attack_id,
-                "capability": capability,
-                "target_device_id": target_device_id,
-                "sim_time": sim.get_sim_time(),
-            })
-        except Exception as e:
-            logger.error(f"Error injecting attack via API: {e}")
-            return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
-
-    async def api_clear_attack(request: Request) -> JSONResponse:
-        try:
-            body = await request.json() if request.headers.get("content-length") not in (None, "0") else {}
-            attack_id = body.get("attack_id")
-            if attack_id and attack_id != "all":
-                cleared = sim.clear_attack(attack_id)
-                return JSONResponse({"status": "ok", "cleared": cleared, "attack_id": attack_id})
-            else:
-                sim.clear_all_attacks()
-                return JSONResponse({"status": "ok", "cleared_all": True})
-        except Exception as e:
-            logger.error(f"Error clearing attacks via API: {e}")
-            return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
-
-    async def api_active_attacks(request: Request) -> JSONResponse:
-        return JSONResponse({
-            "status": "ok",
-            "active_attacks": list(sim.active_attacks.values()),
-        })
-
-    starlette_app.add_route("/api/status", api_status, methods=["GET"])
-    starlette_app.add_route("/api/attack/inject", api_inject_attack, methods=["POST"])
-    starlette_app.add_route("/api/attack/clear", api_clear_attack, methods=["POST"])
-    starlette_app.add_route("/api/attack/active", api_active_attacks, methods=["GET"])
-
-    config = uvicorn.Config(
-        app=starlette_app,
+    # 4. Configure MCP ASGI Server (strictly Port 8000, no /api routes)
+    mcp_app = mcp.sse_app(host=mcp_host)
+    mcp_config = uvicorn.Config(
+        app=mcp_app,
         host=mcp_host,
         port=mcp_port,
         log_level="info",
         access_log=False,
     )
-    server = uvicorn.Server(config)
+    mcp_server = uvicorn.Server(mcp_config)
+
+    # 5. Configure Isolated Red Team Adversary REST Server (Port 8100, token protected)
+    token = get_or_create_red_team_token()
+    red_team_app = build_red_team_app(sim, token=token)
+    red_team_config = uvicorn.Config(
+        app=red_team_app,
+        host=red_team_host,
+        port=red_team_port,
+        log_level="info",
+        access_log=False,
+    )
+    red_team_server = uvicorn.Server(red_team_config)
 
     stop_event = asyncio.Event()
 
     def handle_signal(*_):
         logger.info("Received termination signal. Shutting down Twin Layer...")
         stop_event.set()
-        server.should_exit = True
+        mcp_server.should_exit = True
+        red_team_server.should_exit = True
 
     for sig in (signal.SIGINT, signal.SIGTERM):
         try:
@@ -216,16 +165,22 @@ async def main() -> None:
         except (ValueError, AttributeError):
             pass
 
-    # 5. Run both tasks concurrently
+    # 6. Run all three tasks concurrently in the same event loop
     sim_task = asyncio.create_task(run_simulation_stream_loop(sim, streamer, stop_event))
-    server_task = asyncio.create_task(server.serve())
+    mcp_task = asyncio.create_task(mcp_server.serve())
+    red_team_task = asyncio.create_task(red_team_server.serve())
 
     logger.info(f"Twin Layer online. MCP Command Server listening on http://{mcp_host}:{mcp_port}/sse")
+    logger.info(f"Red Team Adversary API listening on http://{red_team_host}:{red_team_port}/api/status")
     logger.info(f"Kafka stream publishing to {bootstrap_servers} topic '{topic}'")
 
-    done, pending = await asyncio.wait([sim_task, server_task], return_when=asyncio.FIRST_COMPLETED)
+    done, pending = await asyncio.wait(
+        [sim_task, mcp_task, red_team_task],
+        return_when=asyncio.FIRST_COMPLETED,
+    )
     stop_event.set()
-    server.should_exit = True
+    mcp_server.should_exit = True
+    red_team_server.should_exit = True
 
     for task in pending:
         task.cancel()

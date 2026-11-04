@@ -490,27 +490,42 @@ def fetch_timeline_events(limit: int = 40) -> List[Dict[str, Any]]:
 # ==============================================================================
 # Simulation Engine Coordinator (Dual Mode: REST Daemon or Standalone)
 # ==============================================================================
+def get_red_team_token() -> Optional[str]:
+    """Retrieve Red Team API token from environment variable or shared token file."""
+    token = os.getenv("RED_TEAM_TOKEN")
+    if token:
+        return token.strip()
+    token_file = os.getenv("RED_TEAM_TOKEN_FILE")
+    if not token_file:
+        db_dir = os.path.dirname(os.path.abspath(DB_PATH)) or "."
+        token_file = os.path.join(db_dir, "red_team.token")
+    if os.path.isfile(token_file):
+        try:
+            with open(token_file, "r", encoding="utf-8") as f:
+                content = f.read().strip()
+                if content:
+                    return content
+        except Exception:
+            pass
+    return None
+
+
+def get_red_team_headers() -> Dict[str, str]:
+    token = get_red_team_token()
+    return {"X-Red-Team-Token": token} if token else {}
+
+
 def check_twin_daemon_online() -> bool:
-    """Check if the twin.main uvicorn daemon is actively listening on port 8000."""
+    """Check if the Red Team API server is actively listening."""
     try:
-        resp = requests.get(f"{TWIN_API_URL}/api/status", timeout=0.8)
+        resp = requests.get(
+            f"{TWIN_API_URL}/api/status",
+            headers=get_red_team_headers(),
+            timeout=0.8,
+        )
         return resp.status_code == 200
     except Exception:
         return False
-
-
-def advance_simulation_ticks(ticks_count: int = 5) -> int:
-    """Advance local simulator ticks to produce fresh readings in standalone mode."""
-    try:
-        from twin.mcp_server import get_active_simulator
-        sim = get_active_simulator()
-        if sim:
-            for _ in range(ticks_count):
-                sim.tick()
-            return ticks_count
-    except Exception:
-        pass
-    return 0
 
 
 def inject_attack_to_simulator(
@@ -520,7 +535,7 @@ def inject_attack_to_simulator(
     params: Optional[Dict[str, Any]] = None,
     description: Optional[str] = None,
 ) -> Tuple[bool, str]:
-    """Interface with running simulation.py to inject adversary capability."""
+    """Interface with Red Team API to inject adversary capability."""
     payload = {
         "capability": capability,
         "target_device_id": target_device_id,
@@ -529,63 +544,60 @@ def inject_attack_to_simulator(
         "description": description or f"Injected from Red Team Console: {capability}",
     }
 
-    # 1. Attempt internal HTTP REST endpoint
     try:
-        resp = requests.post(f"{TWIN_API_URL}/api/attack/inject", json=payload, timeout=2.0)
+        resp = requests.post(
+            f"{TWIN_API_URL}/api/attack/inject",
+            json=payload,
+            headers=get_red_team_headers(),
+            timeout=2.0,
+        )
         if resp.status_code == 200:
             data = resp.json()
             return True, f"Injected attack {data.get('attack_id')} ({capability}) on {target_device_id or target_zone_id}"
-    except Exception:
-        pass
-
-    # 2. Standalone in-process simulation runner
-    try:
-        from twin.mcp_server import get_active_simulator
-        sim = get_active_simulator()
-        if sim:
-            aid = sim.inject_attack(
-                capability=capability,
-                target_device_id=target_device_id,
-                target_zone_id=target_zone_id,
-                params=params,
-                description=description,
-            )
-            # Advance 5 simulation ticks immediately so ground_truth.db gets the attacked readings
-            for _ in range(5):
-                sim.tick()
-            return True, f"Injected attack {aid} ({capability}) into local simulation engine [5 Ticks Generated]."
+        elif resp.status_code == 401:
+            return False, "[ALERT] Red Team API authentication failed (401 Unauthorized: missing or invalid X-Red-Team-Token)."
+        else:
+            try:
+                err_data = resp.json()
+                msg = err_data.get("message", resp.text)
+            except Exception:
+                msg = resp.text
+            return False, f"[ALERT] Red Team API rejected injection ({resp.status_code}): {msg}"
+    except requests.exceptions.ConnectionError:
+        return False, f"[ALERT] Cannot connect to Red Team API at {TWIN_API_URL} (Connection refused)."
+    except requests.exceptions.Timeout:
+        return False, f"[ALERT] Connection to Red Team API timed out at {TWIN_API_URL}."
     except Exception as e:
-        return False, f"Failed to inject attack: {e}"
-
-    return False, "Failed to connect to simulation engine."
+        return False, f"[ALERT] Red Team API error: {e}"
 
 
 def clear_attacks_in_simulator(attack_id: Optional[str] = None) -> Tuple[bool, str]:
-    """Interface with running simulation.py to clear active attacks."""
+    """Interface with Red Team API to clear active attacks."""
     payload = {"attack_id": attack_id or "all"}
     try:
-        resp = requests.post(f"{TWIN_API_URL}/api/attack/clear", json=payload, timeout=2.0)
+        resp = requests.post(
+            f"{TWIN_API_URL}/api/attack/clear",
+            json=payload,
+            headers=get_red_team_headers(),
+            timeout=2.0,
+        )
         if resp.status_code == 200:
             return True, "Active attacks cleared successfully."
-    except Exception:
-        pass
-
-    try:
-        from twin.mcp_server import get_active_simulator
-        sim = get_active_simulator()
-        if sim:
-            if attack_id and attack_id != "all":
-                sim.clear_attack(attack_id)
-            else:
-                sim.clear_all_attacks()
-            # Advance 3 ticks to restore nominal baseline in database
-            for _ in range(3):
-                sim.tick()
-            return True, "Cleared active attacks in local simulation engine [Nominal Baseline Restored]."
+        elif resp.status_code == 401:
+            return False, "[ALERT] Red Team API authentication failed (401 Unauthorized: missing or invalid X-Red-Team-Token)."
+        else:
+            try:
+                err_data = resp.json()
+                msg = err_data.get("message", resp.text)
+            except Exception:
+                msg = resp.text
+            return False, f"[ALERT] Red Team API clear failed ({resp.status_code}): {msg}"
+    except requests.exceptions.ConnectionError:
+        return False, f"[ALERT] Cannot connect to Red Team API at {TWIN_API_URL} (Connection refused)."
+    except requests.exceptions.Timeout:
+        return False, f"[ALERT] Connection to Red Team API timed out at {TWIN_API_URL}."
     except Exception as e:
-        return False, f"Failed to clear attacks: {e}"
-
-    return False, "Failed to clear attacks."
+        return False, f"[ALERT] Red Team API error: {e}"
 
 
 # ==============================================================================
@@ -669,15 +681,6 @@ st.markdown("<hr style='border: 0; border-top: 1px solid rgba(255,255,255,0.08);
 # ==============================================================================
 st.sidebar.markdown("<h3 style='font-family: JetBrains Mono; color: #00e5ff; letter-spacing: 0.05em;'>RED TEAM THREAT MATRIX</h3>", unsafe_allow_html=True)
 st.sidebar.caption("Dynamically inject adversary capabilities to validate Layer 2 (City Brain) and Layer 3 (Guardian) resilience.")
-
-# Manual Simulation Clock Step
-if not daemon_online:
-    st.sidebar.markdown("---")
-    st.sidebar.markdown("<b style='font-family: JetBrains Mono; font-size: 0.8rem; color: #94a3b8;'>SIMULATION CLOCK CONTROLS</b>", unsafe_allow_html=True)
-    if st.sidebar.button("PULSE 10 TICKS (+1.0s)", use_container_width=True):
-        count = advance_simulation_ticks(10)
-        st.sidebar.success(f"Generated {count * 42} sensor frames across 42 devices.")
-        st.rerun()
 
 # ------------------------------------------------------------------------------
 # Hackathon Pitch Demo Presets (One-Click Scenarios)
@@ -1285,7 +1288,5 @@ st.caption(
 
 # Live auto-refresh interval execution
 if auto_refresh and not is_testing:
-    if not daemon_online:
-        advance_simulation_ticks(1)
     time.sleep(1.0)
     st.rerun()

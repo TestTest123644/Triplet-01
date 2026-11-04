@@ -66,7 +66,7 @@ docker compose logs -f twin_layer
 | :--- | :--- | :--- | :--- |
 | **Apache Kafka** | `localhost:19092` | `kafka:9092` | Outbound telemetry stream (`twin.sensors`) |
 | **MCP Command Server** | `http://localhost:8000/sse` | `http://twin_layer:8000/sse` | JSON-RPC actuation and query endpoints |
-| **Twin REST API** | `http://localhost:8000/api/...`| `http://twin_layer:8000/api/...`| Internal control endpoints (attacks, health) |
+| **Red Team Adversary API** | `http://localhost:8100/api/...` | `http://twin_layer:8100/api/...` | Isolated control endpoints (attacks, status; requires X-Red-Team-Token) |
 | **3D Operations Console**| `http://localhost:8501` | `http://dashboard:8501` | Streamlit tactical dashboard |
 
 ---

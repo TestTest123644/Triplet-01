@@ -72,5 +72,6 @@ PYTHONPATH=src streamlit run dashboard.py
 
 ### Endpoints and Ports
 - **Kafka Telemetry:** `localhost:19092` (Topic: `twin.sensors`, 420 msgs/s)
-- **MCP Server & REST:** `http://localhost:8000/sse` (MCP JSON-RPC) and `http://localhost:8000/api/status`
+- **MCP Server:** `http://localhost:8000/sse` (MCP JSON-RPC only, strictly isolated from truth)
+- **Red Team Adversary API:** `http://localhost:8100/api/status` (Port 8100, protected by `X-Red-Team-Token`)
 - **Operations Console:** `http://localhost:8501`
