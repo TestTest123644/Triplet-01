@@ -130,30 +130,57 @@ class MCPAuthMiddleware:
         await self.app(scope, receive, send)
 
 
+class CatchValidationFailedMiddleware:
+    """Catches ValueError('Request validation failed') raised by connect_sse on rejected Host.
+
+    SseServerTransport sends the 421 HTTP response before raising this exception;
+    catching it prevents Starlette/uvicorn from logging an unhandled ASGI exception traceback.
+    """
+
+    def __init__(self, app: ASGIApp):
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        try:
+            await self.app(scope, receive, send)
+        except ValueError as exc:
+            if str(exc) == "Request validation failed":
+                return
+            raise
+
+
 def build_mcp_app() -> Starlette:
     """Build unified Starlette ASGI application exposing /sse, /messages/, and /mcp transports."""
     tokens = parse_auth_tokens()
     if not tokens:
         logger.warning("[ALERT] MCP authentication disabled: open access mode active (MCP_AUTH_TOKENS unset)")
 
-    raw_hosts = os.getenv("MCP_ALLOWED_HOSTS", "localhost,127.0.0.1,twin_layer")
-    allowed: List[str] = []
-    for h in raw_hosts.split(","):
-        h = h.strip()
-        if h:
-            allowed.extend([h, f"{h}:*"])
+    raw_hosts = os.getenv("MCP_ALLOWED_HOSTS", "").strip()
+    if not raw_hosts or raw_hosts == "*":
+        sec = TransportSecuritySettings(enable_dns_rebinding_protection=False)
+        logger.info("[NOMINAL] MCP DNS-rebinding / Host checking is disabled (open LAN access)")
+    else:
+        allowed: List[str] = []
+        for h in raw_hosts.split(","):
+            h = h.strip()
+            if h:
+                allowed.extend([h, f"{h}:*"])
+        sec = TransportSecuritySettings(
+            enable_dns_rebinding_protection=True,
+            allowed_hosts=allowed,
+        )
+        logger.info(f"[NOMINAL] MCP DNS-rebinding / Host checking is enabled: {allowed}")
 
-    sec = TransportSecuritySettings(
-        enable_dns_rebinding_protection=True,
-        allowed_hosts=allowed,
-    )
     sse_sub_app = mcp.sse_app(transport_security=sec)
     streamable_sub_app = mcp.streamable_http_app(transport_security=sec)
 
     combined = Starlette(
         routes=list(sse_sub_app.routes) + list(streamable_sub_app.routes),
         lifespan=streamable_sub_app.router.lifespan_context,
-        middleware=[Middleware(MCPAuthMiddleware)],
+        middleware=[
+            Middleware(CatchValidationFailedMiddleware),
+            Middleware(MCPAuthMiddleware),
+        ],
     )
     return combined
 

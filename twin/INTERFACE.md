@@ -450,13 +450,13 @@ All tools return errors adhering to this exact JSON structure:
 
 ### Authentication & Transports
 - **Authentication:** Controlled by environment variable `MCP_AUTH_TOKENS="brain:<token>,guardian:<token>"`.
-  - When unset: open access mode is enabled; Twin logs `[ALERT]` on startup; tool caller identity recorded as `"anonymous"`.
+  - When unset: open access mode is enabled; Twin logs `[ALERT]` on startup; tool caller identity recorded as `"anonymous"`. It is strongly recommended to set `MCP_AUTH_TOKENS` whenever the Twin is reachable on a LAN.
   - When set: every HTTP request (`/sse`, `/messages/`, `/mcp`) requires header `Authorization: Bearer <token>`. Unauthorized requests return HTTP 401 with code `UNAUTHORIZED`.
   - Caller identity (`"brain"` or `"guardian"`) is verified in constant time and logged in truth journals.
 - **Transports:**
   - SSE transport served at `/sse` (messages at `/messages/`).
   - Streamable HTTP transport served at `/mcp`.
-  - Host/DNS rebinding protection allows hosts listed in `MCP_ALLOWED_HOSTS` (defaults to `"localhost,127.0.0.1,twin_layer"`).
+  - Host/DNS rebinding protection: `MCP_ALLOWED_HOSTS` is unset (default) or `"*"`: DNS-rebinding protection is OFF (open LAN access). When set to a comma-separated list of hosts, protection is ON with that list.
 
 ---
 
@@ -474,5 +474,5 @@ The following partner-visible behaviour changes apply to the Twin Layer:
 9. The root `docker-compose.yml` network is now named `city_network` (it was `twin_network`). This matters only for partners who attach their own containers to it.
 10. `get_reading` for an unknown or expired id returns `{"status":"error","code":"READING_NOT_FOUND",...}` instead of `null`.
 11. `get_device_state` and `get_command_result` return structured errors (`DEVICE_NOT_FOUND`, `COMMAND_NOT_FOUND`) instead of `null`. `get_device_key` still returns `null` for unknown ids.
-12. Quarantining or isolating an active rogue id stops that id's messages from the next tick.
+12. Quarantining or isolating a rogue id blocks it at the network (repeat calls return ok); release_device or reinstate_device unblocks it.
 13. `reinstate_device` and `release_device` both return isolated or quarantined devices to `ok`.

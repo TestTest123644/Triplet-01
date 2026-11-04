@@ -93,6 +93,7 @@ def build_red_team_app(sim: CitySimulator, token: str, streamer: Optional[Any] =
             "tick_count": sim.clock.tick_count,
             "total_devices": len(sim.devices),
             "active_attacks_count": len(sim.active_attacks),
+            "blocked_frames": dict(getattr(sim, "blocked_rogue_frames", {})),
         }
         if streamer is not None:
             stream_stats = streamer.stats()
@@ -168,9 +169,18 @@ def build_red_team_app(sim: CitySimulator, token: str, streamer: Optional[Any] =
             return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
 
     async def api_active_attacks(request: Request) -> JSONResponse:
+        active = []
+        blocked_frames_map = getattr(sim, "blocked_rogue_frames", {})
+        for atk in sim.active_attacks.values():
+            atk_copy = dict(atk)
+            if atk.get("capability") == "rogue":
+                r_id = atk.get("params", {}).get("rogue_device_id", "rg-01")
+                atk_copy["blocked_frames"] = blocked_frames_map.get(r_id, 0)
+            active.append(atk_copy)
         return JSONResponse({
             "status": "ok",
-            "active_attacks": list(sim.active_attacks.values()),
+            "active_attacks": active,
+            "blocked_frames": dict(blocked_frames_map),
         })
 
     app = Starlette(

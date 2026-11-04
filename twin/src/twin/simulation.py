@@ -186,6 +186,8 @@ class CitySimulator:
         self._rogue_keys: Dict[str, Tuple[str, str]] = {}
         self._rogue_seqs: Dict[str, int] = {}
         self._clamped_attacks: set[str] = set()
+        self.blocked_rogue_ids: set[str] = set()
+        self.blocked_rogue_frames: Dict[str, int] = {}
 
         self._generate_device_inventory()
 
@@ -540,6 +542,7 @@ class CitySimulator:
             r_dev_id = rogue_info.get("params", {}).get("rogue_device_id")
             if r_dev_id:
                 self._rogue_keys.pop(r_dev_id, None)
+                self.blocked_rogue_ids.discard(r_dev_id)
                 # NOTE: _rogue_seqs is preserved across clear_attack to prevent reading_id collision on re-injection
 
         self._clamped_attacks.discard(attack_id)
@@ -583,6 +586,8 @@ class CitySimulator:
         self._rogue_keys.clear()
         # NOTE: _rogue_seqs is preserved across clear_all_attacks to prevent reading_id collision
         self._clamped_attacks.clear()
+        self.blocked_rogue_ids.clear()
+        self.blocked_rogue_frames.clear()
         for d in self.devices.values():
             d.active_attack = None
             d.drift_offset = 0.0
@@ -719,36 +724,60 @@ class CitySimulator:
                     f"[ALERT] Attack {atk_id} broadcast value {raw_rogue_val} clamped to "
                     f"{rogue_val} within wire limits [{WIRE_VALUE_MIN}, {WIRE_VALUE_MAX}]"
                 )
-            rogue_dict = {
-                "reading_id": rogue_reading_id,
-                "device_id": rogue_dev_id,
-                "device_type": "traffic_camera",
-                "ts": sim_time,
-                "seq": seq,
-                "value": rogue_val,
-                "unit": "veh/min",
-                "location": rogue_params.get("zone_id", "zone-1"),
-                "status": "ok",
-            }
-            broadcast_readings.append(rogue_dict)
-            self._add_reading_to_cache(rogue_reading_id, rogue_dict)
 
-            truth_records.append(
-                TruthReadingRecord(
-                    reading_id=rogue_reading_id,
-                    device_id=rogue_dev_id,
-                    ts=sim_time,
-                    seq=seq,
-                    true_value=0.0,
-                    broadcast_value=rogue_val,
-                    unit="veh/min",
-                    status="ok",
-                    sig=None,
-                    attack_type="rogue",
-                    is_attacked=True,
-                    run_id=self.run_id,
+            if rogue_dev_id in self.blocked_rogue_ids:
+                self.blocked_rogue_frames[rogue_dev_id] = (
+                    self.blocked_rogue_frames.get(rogue_dev_id, 0) + 1
                 )
-            )
+                truth_records.append(
+                    TruthReadingRecord(
+                        reading_id=rogue_reading_id,
+                        device_id=rogue_dev_id,
+                        ts=sim_time,
+                        seq=seq,
+                        true_value=0.0,
+                        broadcast_value=rogue_val,
+                        unit="veh/min",
+                        status="quarantined",
+                        sig=None,
+                        wire_sig=None,
+                        wire_bytes=None,
+                        attack_type="rogue",
+                        is_attacked=True,
+                        run_id=self.run_id,
+                    )
+                )
+            else:
+                rogue_dict = {
+                    "reading_id": rogue_reading_id,
+                    "device_id": rogue_dev_id,
+                    "device_type": "traffic_camera",
+                    "ts": sim_time,
+                    "seq": seq,
+                    "value": rogue_val,
+                    "unit": "veh/min",
+                    "location": rogue_params.get("zone_id", "zone-1"),
+                    "status": "ok",
+                }
+                broadcast_readings.append(rogue_dict)
+                self._add_reading_to_cache(rogue_reading_id, rogue_dict)
+
+                truth_records.append(
+                    TruthReadingRecord(
+                        reading_id=rogue_reading_id,
+                        device_id=rogue_dev_id,
+                        ts=sim_time,
+                        seq=seq,
+                        true_value=0.0,
+                        broadcast_value=rogue_val,
+                        unit="veh/min",
+                        status="ok",
+                        sig=None,
+                        attack_type="rogue",
+                        is_attacked=True,
+                        run_id=self.run_id,
+                    )
+                )
 
         # Batch record ground truth to SQLite ledger
         try:
@@ -1315,20 +1344,39 @@ class CitySimulator:
             self.ledger.log_containment(self.run_id, self.get_sim_time(), caller, tool_name, device_id, from_status, new_status)
             return {"status": "ok", "device_id": device_id, "new_status": new_status}
 
-        # 2. Active rogue device (quarantine or isolate)
-        if new_status in ("quarantined", "isolated"):
-            matching_atk_id = None
-            for atk_id, rogue_info in list(self.rogue_attacks.items()):
-                r_dev = rogue_info.get("params", {}).get("rogue_device_id")
-                if r_dev == device_id:
-                    matching_atk_id = atk_id
-                    break
-
-            if matching_atk_id:
-                # Revoke network authority: stops emitting rogue readings from next tick
-                self.clear_attack(matching_atk_id)
-                self.ledger.log_containment(self.run_id, self.get_sim_time(), caller, tool_name, device_id, "ok", new_status)
-                return {"status": "ok", "device_id": device_id, "blocked": True, "new_status": new_status}
+        # 2. Rogue device (active or already blocked)
+        is_active_rogue = any(
+            atk.get("params", {}).get("rogue_device_id") == device_id
+            for atk in self.rogue_attacks.values()
+        )
+        is_blocked_rogue = device_id in self.blocked_rogue_ids
+        if is_active_rogue or is_blocked_rogue:
+            if new_status in ("quarantined", "isolated"):
+                if is_blocked_rogue:
+                    self.ledger.log_containment(
+                        self.run_id, self.get_sim_time(), caller, tool_name, device_id, new_status, new_status
+                    )
+                    return {"status": "ok", "device_id": device_id, "blocked": True, "note": "already blocked"}
+                else:
+                    self.blocked_rogue_ids.add(device_id)
+                    if device_id not in self.blocked_rogue_frames:
+                        self.blocked_rogue_frames[device_id] = 0
+                    self.ledger.log_containment(
+                        self.run_id, self.get_sim_time(), caller, tool_name, device_id, "ok", new_status
+                    )
+                    return {"status": "ok", "device_id": device_id, "blocked": True}
+            elif new_status == "ok":
+                if is_blocked_rogue:
+                    self.blocked_rogue_ids.remove(device_id)
+                    self.ledger.log_containment(
+                        self.run_id, self.get_sim_time(), caller, tool_name, device_id, "quarantined", "ok"
+                    )
+                    return {"status": "ok", "device_id": device_id, "unblocked": True}
+                else:
+                    self.ledger.log_containment(
+                        self.run_id, self.get_sim_time(), caller, tool_name, device_id, "ok", "ok"
+                    )
+                    return {"status": "ok", "device_id": device_id, "note": "device already ok"}
 
         return {
             "status": "error",

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import socket
 import tempfile
@@ -38,6 +39,7 @@ from twin.mcp_server import (
     set_valve,
     switch_grid,
 )
+from twin.red_team_api import build_red_team_app
 from twin.simulation import CitySimulator
 
 
@@ -325,9 +327,10 @@ class TestContainment:
         assert res_act3["status"] == "error"
         assert res_act3["code"] == "DEVICE_CONTAINED"
 
-    def test_active_rogue_quarantine_revokes_authority(self, sim_env: CitySimulator):
-        # Inject rogue attack (max rogue_id length is 6)
-        sim_env.inject_attack(
+    @pytest.mark.asyncio
+    async def test_active_rogue_quarantine_repeatable_and_network_blocklist(self, sim_env: CitySimulator):
+        # 1. Inject rogue attack (max rogue_id length is 6)
+        atk_id = sim_env.inject_attack(
             capability="rogue",
             params={"rogue_device_id": "rg-99", "zone_id": "zone-1", "frequency_hz": 10},
         )
@@ -336,22 +339,83 @@ class TestContainment:
             for atk in sim_env.rogue_attacks.values()
         )
 
-        # Tick 1: rogue device emits reading
+        # Tick 1: rogue device emits reading on wire
         readings = sim_env.tick()
         rogue_emitted = [r for r in readings if r["device_id"] == "rg-99"]
         assert len(rogue_emitted) == 1
 
-        # Quarantine active rogue
-        res_q = quarantine_device("rg-99")
-        assert res_q["status"] == "ok"
-        assert res_q["device_id"] == "rg-99"
-        assert res_q.get("blocked") is True
-        assert res_q["new_status"] == "quarantined"
+        # 2. First quarantine
+        res_q1 = quarantine_device("rg-99")
+        assert res_q1["status"] == "ok"
+        assert res_q1["device_id"] == "rg-99"
+        assert res_q1.get("blocked") is True
+        assert "note" not in res_q1
 
-        # Tick 2: rogue readings are no longer emitted!
-        readings_after = sim_env.tick()
-        rogue_after = [r for r in readings_after if r["device_id"] == "rg-99"]
-        assert len(rogue_after) == 0
+        # 3. Repeat quarantine (repeatable, returns ok + note: "already blocked")
+        res_q2 = quarantine_device("rg-99")
+        assert res_q2["status"] == "ok"
+        assert res_q2["device_id"] == "rg-99"
+        assert res_q2.get("blocked") is True
+        assert res_q2.get("note") == "already blocked"
+
+        # 4. Ticks 2 and 3: no wire frames while blocked, but truth rows continue with wire_sig NULL
+        readings_b1 = sim_env.tick()
+        assert not any(r["device_id"] == "rg-99" for r in readings_b1)
+        readings_b2 = sim_env.tick()
+        assert not any(r["device_id"] == "rg-99" for r in readings_b2)
+
+        # Truth rows check
+        with sim_env.ledger._get_connection(read_only=True) as conn:
+            cur = conn.execute(
+                "SELECT seq, status, wire_sig, is_attacked, attack_type FROM readings_truth WHERE device_id = 'rg-99' ORDER BY seq"
+            )
+            rows = [dict(r) for r in cur.fetchall()]
+        assert len(rows) == 3
+        # Tick 1 was emitted (status ok)
+        assert rows[0]["status"] == "ok"
+        assert rows[0]["seq"] == 1
+        # Ticks 2 and 3 were blocked by network: status quarantined, wire_sig NULL, seq kept counting
+        assert rows[1]["status"] == "quarantined"
+        assert rows[1]["wire_sig"] is None
+        assert rows[1]["seq"] == 2
+        assert rows[2]["status"] == "quarantined"
+        assert rows[2]["wire_sig"] is None
+        assert rows[2]["seq"] == 3
+
+        # 5. Red Team API inspection: attack stays active with blocked_frames rising
+        red_team_app = build_red_team_app(sim_env, token="rt-secret")
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=red_team_app), base_url="http://test") as client:
+            res_active = await client.get("/api/attack/active", headers={"X-Red-Team-Token": "rt-secret"})
+            assert res_active.status_code == 200
+            active_data = res_active.json()
+            assert len(active_data["active_attacks"]) == 1
+            assert active_data["active_attacks"][0]["attack_id"] == atk_id
+            assert active_data["active_attacks"][0]["blocked_frames"] == 2
+
+            res_status = await client.get("/api/status", headers={"X-Red-Team-Token": "rt-secret"})
+            assert res_status.status_code == 200
+            status_data = res_status.json()
+            assert status_data["blocked_frames"]["rg-99"] == 2
+
+        # 6. Release device unblocks it and emission resumes
+        res_rel = release_device("rg-99")
+        assert res_rel["status"] == "ok"
+        assert res_rel["device_id"] == "rg-99"
+        assert res_rel.get("unblocked") is True
+
+        readings_after_rel = sim_env.tick()
+        rogue_resumed = [r for r in readings_after_rel if r["device_id"] == "rg-99"]
+        assert len(rogue_resumed) == 1
+        assert rogue_resumed[0]["seq"] == 4
+
+        # 7. Containment log has all rows
+        conts = sim_env.ledger.get_recent_containment_log(10)
+        rg_conts = [c for c in conts if c["target"] == "rg-99"]
+        assert len(rg_conts) == 3
+        # In DESC order (newest first): release, quarantine 2, quarantine 1
+        assert rg_conts[0]["tool"] == "release_device"
+        assert rg_conts[1]["tool"] == "quarantine_device"
+        assert rg_conts[2]["tool"] == "quarantine_device"
 
     def test_reinstate_and_release_lenient(self, sim_env: CitySimulator):
         # 1. Device already ok
@@ -507,3 +571,94 @@ class TestEndToEndAuthAndTransports:
             server.should_exit = True
             await server_task
             sim.close()
+
+    @pytest.mark.asyncio
+    async def test_lan_access_default_and_rejected_host(self, tmp_path, monkeypatch, caplog):
+        """Regression test for LAN access (Phase 5.1):
+
+        - Default config (MCP_ALLOWED_HOSTS unset) accepts Host '192.168.1.50:8000' over /sse and /mcp.
+        - With MCP_ALLOWED_HOSTS='localhost', the same Host gets 421 and caplog has no ERROR record.
+        """
+        db_path1 = str(tmp_path / "lan_test1.db")
+        keystore_path1 = str(tmp_path / "lan_keys1.json")
+        monkeypatch.setenv("GROUND_TRUTH_DB_PATH", db_path1)
+        monkeypatch.setenv("KEYSTORE_PATH", keystore_path1)
+
+        # Part 1: Default config (MCP_ALLOWED_HOSTS unset) accepts LAN Host "192.168.1.50:8000"
+        monkeypatch.delenv("MCP_ALLOWED_HOSTS", raising=False)
+        monkeypatch.delenv("MCP_AUTH_TOKENS", raising=False)
+
+        ledger1 = GroundTruthLedger(db_path1)
+        sim1 = CitySimulator(seed=111, ledger=ledger1, keystore_path=keystore_path1)
+        set_active_simulator(sim1)
+
+        port1 = find_free_port()
+        app1 = build_mcp_app()
+        cfg1 = uvicorn.Config(app=app1, host="127.0.0.1", port=port1, log_level="error")
+        svr1 = uvicorn.Server(cfg1)
+        t1 = asyncio.create_task(svr1.serve())
+        await asyncio.sleep(0.4)
+
+        base_url1 = f"http://127.0.0.1:{port1}"
+        lan_headers = {"Host": "192.168.1.50:8000"}
+
+        try:
+            # Over SSE: 200 and a tool call works
+            async with sse_client(f"{base_url1}/sse", headers=lan_headers) as (r, w):
+                async with ClientSession(r, w) as session:
+                    await session.initialize()
+                    res = await session.call_tool("list_devices", {})
+                    assert not res.is_error
+                    assert len(res.structured_content.get("result", [])) == 42
+
+            # Over /mcp (Streamable HTTP): tool call works
+            async with httpx.AsyncClient(headers=lan_headers) as http_client:
+                async with streamable_http_client(f"{base_url1}/mcp", http_client=http_client) as (r, w):
+                    async with ClientSession(r, w) as session:
+                        await session.initialize()
+                        res = await session.call_tool("list_devices", {})
+                        assert not res.is_error
+                        assert len(res.structured_content.get("result", [])) == 42
+        finally:
+            svr1.should_exit = True
+            await t1
+            sim1.close()
+
+        # Part 2: With MCP_ALLOWED_HOSTS="localhost", Host "192.168.1.50:8000" gets 421 and no ERROR log
+        monkeypatch.setenv("MCP_ALLOWED_HOSTS", "localhost")
+        port2 = find_free_port()
+        db_path2 = str(tmp_path / "lan_test2.db")
+        keystore_path2 = str(tmp_path / "lan_keys2.json")
+        ledger2 = GroundTruthLedger(db_path2)
+        sim2 = CitySimulator(seed=222, ledger=ledger2, keystore_path=keystore_path2)
+        set_active_simulator(sim2)
+
+        app2 = build_mcp_app()
+        cfg2 = uvicorn.Config(app=app2, host="127.0.0.1", port=port2, log_level="error")
+        svr2 = uvicorn.Server(cfg2)
+        t2 = asyncio.create_task(svr2.serve())
+        await asyncio.sleep(0.4)
+
+        base_url2 = f"http://127.0.0.1:{port2}"
+        caplog.clear()
+
+        try:
+            async with httpx.AsyncClient(headers=lan_headers) as client:
+                # SSE gets 421
+                async with client.stream("GET", f"{base_url2}/sse") as res_sse:
+                    assert res_sse.status_code == 421
+                    body_sse = await res_sse.aread()
+                    assert b"Invalid Host header" in body_sse
+
+                # MCP gets 421
+                res_mcp = await client.post(f"{base_url2}/mcp", json={})
+                assert res_mcp.status_code == 421
+                assert "Invalid Host header" in res_mcp.text
+
+            # caplog must have no ERROR records
+            error_records = [r for r in caplog.records if r.levelno >= logging.ERROR]
+            assert len(error_records) == 0
+        finally:
+            svr2.should_exit = True
+            await t2
+            sim2.close()
