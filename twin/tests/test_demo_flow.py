@@ -220,6 +220,22 @@ def test_full_presentation_walkthrough(presentation_fixture):
     # -------------------------------------------------------------------------
     # STEP 8: Mock City Brain Autonomous Threshold Actuation
     # -------------------------------------------------------------------------
+    brain.evaluate_reading({
+        "reading_id": "r-z2-tc1-hist",
+        "device_id": "z2-tc1",
+        "device_type": "traffic_camera",
+        "value": 100.0,
+        "location": "zone-2",
+        "status": "ok",
+    })
+    brain.evaluate_reading({
+        "reading_id": "r-z2-tc1-drop",
+        "device_id": "z2-tc1",
+        "device_type": "traffic_camera",
+        "value": 10.0,
+        "location": "zone-2",
+        "status": "ok",
+    })
     surge_telemetry = {
         "reading_id": "r-surge-02",
         "device_id": "z2-ec1",

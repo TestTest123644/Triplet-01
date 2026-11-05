@@ -108,12 +108,29 @@ def test_mock_brain_actuation(test_env):
     sim: CitySimulator = test_env["sim"]
     brain: MockCityBrain = test_env["brain"]
 
+    # Feed camera baseline and drop to corroborate emergency call in zone-1 (< 50% of 5-min mean)
+    brain.evaluate_reading({
+        "reading_id": "r-z1-tc1-hist",
+        "device_id": "z1-tc1",
+        "device_type": "traffic_camera",
+        "value": 100.0,
+        "location": "zone-1",
+        "status": "ok",
+    })
+    brain.evaluate_reading({
+        "reading_id": "r-z1-tc1-drop",
+        "device_id": "z1-tc1",
+        "device_type": "traffic_camera",
+        "value": 10.0,
+        "location": "zone-1",
+        "status": "ok",
+    })
     # Simulate emergency surge payload
     emg_payload = {
         "reading_id": "r-z1-ec1-test",
         "device_id": "z1-ec1",
         "device_type": "emergency_call",
-        "value": 12.0,  # exceeds 5.0 threshold
+        "value": 12.0,  # exceeds 6.0 threshold
         "location": "zone-1",
         "status": "ok",
     }

@@ -75,12 +75,18 @@ class McpCaller:
         await self.close()
 
     async def close(self) -> None:
-        """Close MCP client session."""
+        """Close MCP client session.
+
+        NOTE: AnyIO cancel scopes require that multiple SSE client sessions opened
+        within the same asyncio task MUST be closed in reverse order of opening (LIFO).
+        If closed out of order, anyio may raise RuntimeError: Cancel scope stack corrupted.
+        This method catches such exceptions to prevent crashing teardown.
+        """
         if self._exit_stack:
             try:
                 await self._exit_stack.aclose()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"Exception during McpCaller.close() (note anyio LIFO rule): {e}")
             self._session = None
             self._exit_stack = None
 

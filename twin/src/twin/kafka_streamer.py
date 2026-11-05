@@ -142,6 +142,7 @@ class KafkaStreamer:
         self._delay_buffers: Dict[str, collections.deque[Tuple[int, TwinSensorReading, bytes]]] = (
             collections.defaultdict(lambda: collections.deque(maxlen=600))
         )
+        self.last_emitted_backlog: List[Tuple[TwinSensorReading, bytes]] = []
 
         # Operational health state tracking
         self._error_history: collections.deque[float] = collections.deque(maxlen=1000)
@@ -358,7 +359,16 @@ class KafkaStreamer:
         # Store in history for future replay
         self._frame_history[dev_id].append(serialized_bytes)
 
+        # Emit the fresh non-delayed frame first
         self._emit_to_wire(reading.device_id.encode("utf-8"), serialized_bytes)
+
+        # If device has a backlog of delayed frames, release backlog one frame per tick after fresh frame
+        self.last_emitted_backlog = []
+        if dev_id in self._delay_buffers and len(self._delay_buffers[dev_id]) > 0:
+            _, backlog_reading, backlog_bytes = self._delay_buffers[dev_id].popleft()
+            self._emit_to_wire(dev_id.encode("utf-8"), backlog_bytes)
+            self.last_emitted_backlog.append((backlog_reading, backlog_bytes))
+
         return reading, serialized_bytes
 
     def get_kafka_state(self) -> str:

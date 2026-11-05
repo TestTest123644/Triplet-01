@@ -801,7 +801,8 @@ class CitySimulator:
                 if ev.zone_id == dev.zone_id:
                     if ev.type == "fire":
                         ramp = min(1.0, ev.elapsed_sim_seconds / 120.0)
-                        incident_terms += 150.0 * ramp
+                        intensity = float(ev.params.get("intensity", ev.intensity or 1.0))
+                        incident_terms += 150.0 * ramp * intensity
                     elif ev.type == "air_hazard":
                         cam_plans = [
                             d.actuator_state.get("signal_plan", "normal")
@@ -907,6 +908,15 @@ class CitySimulator:
                 raise ValueError(f"Unknown zone '{target_zone_id}'")
 
         params_dict = dict(params or {})
+
+        # Validate link_mode if capability is link
+        if capability == "link":
+            link_mode = params_dict.get("link_mode", "corrupt_bytes")
+            valid_link_modes = {"drop", "corrupt_sig", "corrupt_bytes", "replay", "delay"}
+            if link_mode not in valid_link_modes:
+                raise ValueError(
+                    f"Unknown link_mode '{link_mode}'. Must be one of: {', '.join(sorted(valid_link_modes))}"
+                )
 
         # Reject non-finite numeric params (NaN/inf) with ValueError
         def _check_finite(obj: Any) -> None:
@@ -1023,16 +1033,12 @@ class CitySimulator:
             d.active_attacks = [a for a in d.active_attacks if a.get("attack_id") != attack_id]
             if not any(a.get("capability") == "sensor_fault" for a in d.active_attacks):
                 d.drift_offset = 0.0
-            if hasattr(self, "streamer") and self.streamer is not None:
-                self.streamer.flush_delayed(target_dev)
         elif target_zone:
             for d in self.devices.values():
                 if d.zone_id == target_zone:
                     d.active_attacks = [a for a in d.active_attacks if a.get("attack_id") != attack_id]
                     if not any(a.get("capability") == "sensor_fault" for a in d.active_attacks):
                         d.drift_offset = 0.0
-                    if hasattr(self, "streamer") and self.streamer is not None:
-                        self.streamer.flush_delayed(d.device_id)
 
         # Update end time in SQLite ledger
         self.ledger.record_attack(
@@ -1065,8 +1071,6 @@ class CitySimulator:
         for d in self.devices.values():
             d.active_attacks.clear()
             d.drift_offset = 0.0
-        if hasattr(self, "streamer") and self.streamer is not None:
-            self.streamer.flush_delayed()
         self.ledger.deactivate_all_attacks(end_sim_time=self.get_sim_time())
 
     def tick(self) -> List[Dict[str, Any]]:

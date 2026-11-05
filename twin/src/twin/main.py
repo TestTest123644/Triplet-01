@@ -81,6 +81,10 @@ async def run_simulation_stream_loop(
                 if res is not None:
                     reading, raw_bytes = res
                     wire_records.append((reading.reading_id, reading.sig, len(raw_bytes)))
+                if streamer.last_emitted_backlog:
+                    for b_reading, b_bytes in streamer.last_emitted_backlog:
+                        wire_records.append((b_reading.reading_id, b_reading.sig, len(b_bytes)))
+                    streamer.last_emitted_backlog.clear()
             except Exception as e:
                 logger.error(f"Error streaming reading {raw.get('reading_id')}: {e}")
 

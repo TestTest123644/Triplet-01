@@ -17,6 +17,7 @@ Source of truth is INTERFACE.md and context.md.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import base64
 import collections
 from datetime import datetime, timezone
@@ -92,8 +93,10 @@ class MockGuardian:
         # Tracking state for Guardian rules
         self.sig_failures: Dict[str, List[float]] = collections.defaultdict(list)
         self.replay_delay_events: Dict[str, List[float]] = collections.defaultdict(list)
-        self.seen_reading_ids: set[str] = set()
+        self.seen_reading_ids: collections.OrderedDict[str, None] = collections.OrderedDict()
         self.last_device_seq: Dict[str, int] = {}
+        self.newest_stream_sim_sec: float = 0.0
+        self.late_events: Dict[str, List[float]] = collections.defaultdict(list)
 
         # Water sensor discrepancy tracking (paired water sensors per zone)
         self.latest_water_readings: Dict[str, float] = {}
@@ -123,21 +126,53 @@ class MockGuardian:
             except Exception as e:
                 logger.error(f"Error writing to log file {self.log_file}: {e}")
 
-    async def get_public_key(self, device_id: str) -> Optional[str]:
-        """Fetch and cache public key via MCP 'get_device_key' tool."""
-        if device_id not in self.key_cache:
-            res = await self.mcp.call_tool_async("get_device_key", {"device_id": device_id})
-            if isinstance(res, dict):
-                val = res.get("result")
-                if isinstance(val, str) and val.strip():
-                    self.key_cache[device_id] = val.strip().strip('"')
-                else:
-                    self.key_cache[device_id] = None
-            elif isinstance(res, str) and res.strip():
-                self.key_cache[device_id] = res.strip().strip('"')
-            else:
-                self.key_cache[device_id] = None
-        return self.key_cache.get(device_id)
+    async def _safe_call_tool(self, tool_name: str, args: Dict[str, Any]) -> Tuple[bool, Any]:
+        """Safely invoke MCP tool with exception handling. Never crashes loop."""
+        try:
+            res = await self.mcp.call_tool_async(tool_name, args)
+            return True, res
+        except Exception as e:
+            logger.error(f"MCP tool call failed ({tool_name}, {args}): {e}")
+            return False, None
+
+    async def get_public_key(self, device_id: str) -> Tuple[bool, Optional[str]]:
+        """Fetch and cache public key via MCP 'get_device_key'.
+
+        Returns (is_known, public_key_b64).
+        - Explicit null from server -> (False, None): device is unknown (rogue).
+        - Transport error / exception -> (True, None): transient error, do not mark unknown.
+        - Valid key -> (True, key_str): registered device.
+        """
+        if device_id in self.key_cache:
+            cached = self.key_cache[device_id]
+            return (False, None) if cached is None else (True, cached)
+
+        success, res = await self._safe_call_tool("get_device_key", {"device_id": device_id})
+        if not success:
+            logger.warning(f"Transport error fetching key for {device_id}; skipping check for this tick")
+            return (True, None)
+
+        if isinstance(res, dict) and res.get("status") == "error":
+            logger.warning(f"Error response from get_device_key for {device_id}: {res}")
+            return (True, None)
+
+        val = None
+        if isinstance(res, dict):
+            val = res.get("result")
+        elif isinstance(res, str):
+            val = res
+
+        if val is None or val == "null" or val == '""':
+            self.key_cache[device_id] = None
+            return (False, None)
+
+        key_str = str(val).strip().strip('"')
+        if not key_str:
+            self.key_cache[device_id] = None
+            return (False, None)
+
+        self.key_cache[device_id] = key_str
+        return (True, key_str)
 
     async def process_reading_async(self, payload_input: Union[bytes, Dict[str, Any]]) -> Dict[str, Any]:
         """Ingest single telemetry reading, evaluate all Guardian rules, and actuate containment."""
@@ -160,45 +195,79 @@ class MockGuardian:
 
         sim_sec = _parse_sim_seconds(sim_ts) if sim_ts else time.time()
 
-        # 1. Unknown device_id (rogue device detection)
-        pub_key = await self.get_public_key(device_id)
-        if not pub_key:
-            if device_id not in self.quarantined_devices:
-                self.quarantined_devices.append(device_id)
-                await self.mcp.call_tool_async("quarantine_device", {"device_id": device_id})
+        # Once a device is contained (isolated or quarantined), stop issuing new containment actions/rollbacks for it
+        if device_id in self.quarantined_devices or device_id in self.isolated_devices:
+            return {
+                "action": "device_already_contained",
+                "device_id": device_id,
+                "reading_id": reading_id,
+                "status": "quarantined" if device_id in self.quarantined_devices else "isolated",
+            }
+
+        if sim_sec > self.newest_stream_sim_sec:
+            self.newest_stream_sim_sec = sim_sec
+
+        # 1. Late-frame rule: frame ts is > 2 sim-s older than newest stream ts -> flag late; 3 in 10 sim-s -> isolate
+        if self.newest_stream_sim_sec - sim_sec > 2.0:
+            window = [t for t in self.late_events[device_id] if sim_sec - t <= 10.0]
+            window.append(sim_sec)
+            self.late_events[device_id] = window
+
+            if len(window) >= 3 and device_id not in self.isolated_devices:
+                self.isolated_devices.append(device_id)
+                await self._safe_call_tool("isolate_device", {"device_id": device_id})
+                if reading_id:
+                    self.rolled_back_readings.append(reading_id)
+                    await self._safe_call_tool("rollback_reading", {"reading_id": reading_id})
+                self._log_event(sim_ts, "isolate_device", {"device_id": device_id, "reason": "3 late frames (>2s old) within 10 sim-s"})
+                return {"action": "late_frame_detected", "device_id": device_id, "reading_id": reading_id, "status": "isolated"}
+
             if reading_id:
                 self.rolled_back_readings.append(reading_id)
-                await self.mcp.call_tool_async("rollback_reading", {"reading_id": reading_id})
+                await self._safe_call_tool("rollback_reading", {"reading_id": reading_id})
+            return {"action": "late_frame_detected", "device_id": device_id, "reading_id": reading_id, "status": "flagged"}
+
+        # 2. Unknown device_id (rogue device detection: only explicit null from get_device_key)
+        is_known, pub_key = await self.get_public_key(device_id)
+        if not is_known:
+            if device_id not in self.quarantined_devices:
+                self.quarantined_devices.append(device_id)
+                await self._safe_call_tool("quarantine_device", {"device_id": device_id})
+            if reading_id:
+                self.rolled_back_readings.append(reading_id)
+                await self._safe_call_tool("rollback_reading", {"reading_id": reading_id})
             self._log_event(sim_ts, "quarantine_device", {"device_id": device_id, "reason": "unknown device key"})
             return {"action": "rogue_device_detected", "device_id": device_id, "reading_id": reading_id, "status": "quarantined"}
 
-        # 2. Cryptographic Ed25519 signature verification
+        if not pub_key:
+            # Transport error fetching key; skip signature check for this tick without quarantining registered device
+            return {"action": "key_fetch_retry", "device_id": device_id, "reading_id": reading_id, "status": "pending"}
+
+        # 3. Cryptographic Ed25519 signature verification
         is_valid = verify_twin_reading(payload, pub_key)
         if not is_valid:
-            # Flag failure & rollback
             if reading_id:
                 self.rolled_back_readings.append(reading_id)
-                await self.mcp.call_tool_async("rollback_reading", {"reading_id": reading_id})
+                await self._safe_call_tool("rollback_reading", {"reading_id": reading_id})
 
-            # Track failures within 10 sim-s window
             window = [t for t in self.sig_failures[device_id] if sim_sec - t <= 10.0]
             window.append(sim_sec)
             self.sig_failures[device_id] = window
 
             if len(window) >= 3 and device_id not in self.quarantined_devices:
                 self.quarantined_devices.append(device_id)
-                await self.mcp.call_tool_async("quarantine_device", {"device_id": device_id})
+                await self._safe_call_tool("quarantine_device", {"device_id": device_id})
                 self._log_event(sim_ts, "quarantine_device", {"device_id": device_id, "reason": "3 signature failures within 10 sim-s"})
 
             return {"action": "signature_verification_failed", "device_id": device_id, "reading_id": reading_id, "status": "quarantined" if device_id in self.quarantined_devices else "flagged"}
 
-        # 3. Duplicate reading_id or seq regression > 0 (replay / delay)
+        # 4. Duplicate reading_id or seq regression > 0 (replay / delay)
         last_seq = self.last_device_seq.get(device_id)
         is_replay_or_delay = (reading_id in self.seen_reading_ids) or (last_seq is not None and seq <= last_seq)
         if is_replay_or_delay:
             if reading_id:
                 self.rolled_back_readings.append(reading_id)
-                await self.mcp.call_tool_async("rollback_reading", {"reading_id": reading_id})
+                await self._safe_call_tool("rollback_reading", {"reading_id": reading_id})
 
             window = [t for t in self.replay_delay_events[device_id] if sim_sec - t <= 10.0]
             window.append(sim_sec)
@@ -206,15 +275,18 @@ class MockGuardian:
 
             if len(window) >= 3 and device_id not in self.isolated_devices:
                 self.isolated_devices.append(device_id)
-                await self.mcp.call_tool_async("isolate_device", {"device_id": device_id})
+                await self._safe_call_tool("isolate_device", {"device_id": device_id})
                 self._log_event(sim_ts, "isolate_device", {"device_id": device_id, "reason": "3 replay/delay events within 10 sim-s"})
 
             return {"action": "replay_delay_detected", "device_id": device_id, "reading_id": reading_id, "status": "isolated" if device_id in self.isolated_devices else "flagged"}
 
-        self.seen_reading_ids.add(reading_id)
+        # Bounded LRU memory for seen reading ids (max 5,000)
+        self.seen_reading_ids[reading_id] = None
+        if len(self.seen_reading_ids) > 5000:
+            self.seen_reading_ids.popitem(last=False)
         self.last_device_seq[device_id] = seq
 
-        # 4. Paired water sensors (zN-wl1 vs zN-wl2) differing by > 2.0 m for 20 readings
+        # 5. Paired water sensors (zN-wl1 vs zN-wl2) differing by > 2.0 m for 20 readings
         if device_type == "water_level":
             self.latest_water_readings[device_id] = val
             self.water_histories[device_id].append(val)
@@ -232,7 +304,6 @@ class MockGuardian:
                 if diff > 2.0:
                     self.water_divergence_counts[zone_id] += 1
                     if self.water_divergence_counts[zone_id] >= 20:
-                        # Determine outlier: further from its own 60s median
                         hist1 = self.water_histories[device_id]
                         hist2 = self.water_histories[other_dev_id]
                         med1 = statistics.median(hist1) if hist1 else val
@@ -243,20 +314,20 @@ class MockGuardian:
 
                         if outlier_id not in self.isolated_devices:
                             self.isolated_devices.append(outlier_id)
-                            await self.mcp.call_tool_async(
+                            await self._safe_call_tool(
                                 "isolate_device",
                                 {"device_id": outlier_id}
                             )
                             if reading_id:
                                 self.rolled_back_readings.append(reading_id)
-                                await self.mcp.call_tool_async("rollback_reading", {"reading_id": reading_id})
+                                await self._safe_call_tool("rollback_reading", {"reading_id": reading_id})
                             self._log_event(sim_ts, "isolate_device", {"device_id": outlier_id, "reason": "paired water divergence > 2.0m for 20 readings"})
                         self.water_divergence_counts[zone_id] = 0
                 else:
                     self.water_divergence_counts[zone_id] = 0
 
-        # 5. Value constant to 2 decimals for 50 readings on a noisy type
-        noisy_types = {"traffic_camera", "water_level", "power_load", "air_quality"}
+        # 6. Stuck sensor: value constant to 2 decimals for 50 readings on a noisy type (water excluded)
+        noisy_types = {"traffic_camera", "power_load", "air_quality"}
         if device_type in noisy_types:
             r_val = round(val, 2)
             if device_id in self.stuck_tracker:
@@ -266,10 +337,10 @@ class MockGuardian:
                     self.stuck_tracker[device_id] = (r_val, count)
                     if count >= 50 and device_id not in self.isolated_devices:
                         self.isolated_devices.append(device_id)
-                        await self.mcp.call_tool_async("isolate_device", {"device_id": device_id})
+                        await self._safe_call_tool("isolate_device", {"device_id": device_id})
                         if reading_id:
                             self.rolled_back_readings.append(reading_id)
-                            await self.mcp.call_tool_async("rollback_reading", {"reading_id": reading_id})
+                            await self._safe_call_tool("rollback_reading", {"reading_id": reading_id})
                         self._log_event(sim_ts, "isolate_device", {"device_id": device_id, "reason": "sensor stuck at constant value for 50 readings"})
                 else:
                     self.stuck_tracker[device_id] = (r_val, 1)
@@ -293,7 +364,7 @@ class MockGuardian:
                     await self.process_reading_async(reading)
                 else:
                     await asyncio.sleep(0.01)
-        except (KeyboardInterrupt, SystemExit):
+        except (KeyboardInterrupt, SystemExit, asyncio.CancelledError):
             logger.info("[GUARDIAN] Shutting down live sentinel.")
         finally:
             await self.mcp.close()
@@ -317,11 +388,16 @@ def main():
         log_file=args.log_file,
     )
     if args.live:
-        import asyncio
-        asyncio.run(guardian.run_live())
+        try:
+            asyncio.run(guardian.run_live())
+        except (KeyboardInterrupt, SystemExit):
+            pass
     else:
         print("[MOCK GUARDIAN] Ready in passive test mode.")
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except (KeyboardInterrupt, SystemExit):
+        sys.exit(0)

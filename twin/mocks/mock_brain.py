@@ -19,6 +19,7 @@ Source of truth is INTERFACE.md and context.md.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import collections
 from datetime import datetime, timezone
 import json
@@ -33,6 +34,14 @@ from mocks.mcp_client import McpCaller, run_sync
 from mocks.reading_source import KafkaSource, QueueSource, ReadingSource
 
 logger = logging.getLogger("mock_brain")
+
+
+def _parse_sim_seconds(ts_str: str) -> float:
+    """Parse RFC 3339 UTC simulation timestamp into seconds."""
+    s = ts_str.strip()
+    if s.endswith("Z"):
+        s = s[:-1] + "+00:00"
+    return datetime.fromisoformat(s).timestamp()
 
 
 class MockCityBrain:
@@ -66,13 +75,39 @@ class MockCityBrain:
         # Operational hysteresis state
         self.water_levels: Dict[str, Tuple[float, float]] = {}  # dev_id -> (current, prev)
         self.valve_states: Dict[str, str] = {}  # zone_id -> "open" | "half"
-        self.camera_histories: Dict[str, collections.deque[float]] = collections.defaultdict(
-            lambda: collections.deque(maxlen=300)
-        )
-        self.latest_camera_vals: Dict[str, float] = {}  # zone_id -> latest val
+        self.camera_histories: Dict[str, List[Tuple[float, float]]] = collections.defaultdict(list)
+        self.latest_camera_vals: Dict[str, float] = {}  # dev_id/zone_id -> latest val
         self.dispatched_medical: Set[str] = set()
         self.dispatched_fire: Set[str] = set()
         self.grid_states: Dict[str, str] = {}  # dev_id -> "shed" | "grid_a"
+
+        # Zone to camera mapping initialized with standard schema
+        self.zone_cameras: Dict[str, List[str]] = collections.defaultdict(list)
+        for z in range(1, 7):
+            self.zone_cameras[f"zone-{z}"] = [f"z{z}-tc1", f"z{z}-tc2"]
+
+    async def _safe_call_tool(self, tool_name: str, args: Dict[str, Any]) -> Tuple[bool, Any]:
+        """Safely invoke MCP tool with exception handling. Never crashes loop."""
+        try:
+            res = await self.mcp.call_tool_async(tool_name, args)
+            return True, res
+        except Exception as e:
+            logger.error(f"MCP tool call failed ({tool_name}, {args}): {e}")
+            return False, None
+
+    async def refresh_zone_cameras(self) -> None:
+        """Discover camera device ids per zone from MCP list_devices."""
+        success, devs = await self._safe_call_tool("list_devices", {})
+        if success and isinstance(devs, list):
+            zc = collections.defaultdict(list)
+            for d in devs:
+                if isinstance(d, dict) and d.get("device_type") == "traffic_camera":
+                    zid = d.get("zone_id")
+                    did = d.get("device_id")
+                    if zid and did:
+                        zc[zid].append(did)
+            if zc:
+                self.zone_cameras = zc
 
     def _log_event(self, sim_ts: str, event: str, details: Dict[str, Any]) -> None:
         """Log JSON line to stdout and log file."""
@@ -133,58 +168,75 @@ class MockCityBrain:
                 current_valve = self.valve_states.get(zone_id, "half")
 
                 if both_high and rising and current_valve != "open":
-                    res1 = await self.mcp.call_tool_async(
+                    succ1, res1 = await self._safe_call_tool(
                         "set_valve",
                         {"device_id": wl1_id, "target_state": "open", "idempotency_key": f"act-valve-{wl1_id}-open-{sim_ts}"}
                     )
-                    res2 = await self.mcp.call_tool_async(
+                    succ2, res2 = await self._safe_call_tool(
                         "set_valve",
                         {"device_id": wl2_id, "target_state": "open", "idempotency_key": f"act-valve-{wl2_id}-open-{sim_ts}"}
                     )
-                    self.valve_states[zone_id] = "open"
-                    self.valve_commands_sent += 2
-                    act1 = {"type": "set_valve", "device_id": wl1_id, "target_state": "open", "result": res1}
-                    act2 = {"type": "set_valve", "device_id": wl2_id, "target_state": "open", "result": res2}
-                    self.actuations_log.extend([act1, act2])
-                    actions_taken.extend([act1, act2])
-                    self._log_event(sim_ts, "set_valve", {"zone_id": zone_id, "target_state": "open", "val1": val1, "val2": val2})
+                    if succ1 or succ2:
+                        self.valve_states[zone_id] = "open"
+                        self.valve_commands_sent += 2
+                        act1 = {"type": "set_valve", "device_id": wl1_id, "target_state": "open", "result": res1}
+                        act2 = {"type": "set_valve", "device_id": wl2_id, "target_state": "open", "result": res2}
+                        self.actuations_log.extend([act1, act2])
+                        actions_taken.extend([act1, act2])
+                        self._log_event(sim_ts, "set_valve", {"zone_id": zone_id, "target_state": "open", "val1": val1, "val2": val2})
 
                 elif val1 < 4.0 and val2 < 4.0 and current_valve == "open":
-                    res1 = await self.mcp.call_tool_async(
+                    succ1, res1 = await self._safe_call_tool(
                         "set_valve",
                         {"device_id": wl1_id, "target_state": "half", "idempotency_key": f"act-valve-{wl1_id}-half-{sim_ts}"}
                     )
-                    res2 = await self.mcp.call_tool_async(
+                    succ2, res2 = await self._safe_call_tool(
                         "set_valve",
                         {"device_id": wl2_id, "target_state": "half", "idempotency_key": f"act-valve-{wl2_id}-half-{sim_ts}"}
                     )
-                    self.valve_states[zone_id] = "half"
-                    self.valve_commands_sent += 2
-                    act1 = {"type": "set_valve", "device_id": wl1_id, "target_state": "half", "result": res1}
-                    act2 = {"type": "set_valve", "device_id": wl2_id, "target_state": "half", "result": res2}
-                    self.actuations_log.extend([act1, act2])
-                    actions_taken.extend([act1, act2])
-                    self._log_event(sim_ts, "set_valve", {"zone_id": zone_id, "target_state": "half", "val1": val1, "val2": val2})
+                    if succ1 or succ2:
+                        self.valve_states[zone_id] = "half"
+                        self.valve_commands_sent += 2
+                        act1 = {"type": "set_valve", "device_id": wl1_id, "target_state": "half", "result": res1}
+                        act2 = {"type": "set_valve", "device_id": wl2_id, "target_state": "half", "result": res2}
+                        self.actuations_log.extend([act1, act2])
+                        actions_taken.extend([act1, act2])
+                        self._log_event(sim_ts, "set_valve", {"zone_id": zone_id, "target_state": "half", "val1": val1, "val2": val2})
 
-        # 2. Traffic Camera: Record rolling history
+        # 2. Traffic Camera: Record rolling history using 5-SIM-minute sliding window
         elif dtype == "traffic_camera":
-            self.camera_histories[device_id].append(val)
+            sim_sec = _parse_sim_seconds(sim_ts) if sim_ts else time.time()
+            self.camera_histories[device_id].append((sim_sec, val))
+            # Prune entries older than 5 sim-minutes (300 sim-seconds)
+            self.camera_histories[device_id] = [
+                (t, v) for t, v in self.camera_histories[device_id] if sim_sec - t <= 300.0
+            ]
+            self.latest_camera_vals[device_id] = val
             self.latest_camera_vals[zone_id] = val
 
-        # 3. Emergency Surge: emergency_call >= 6 together with a zone camera < 50% of its 5-min mean
+        # 3. Emergency Surge: emergency_call >= 6 together with camera evidence in zone (< 50% of 5-min mean)
         elif dtype == "emergency_call":
             if val >= 6.0:
-                cam_hist = self.camera_histories.get(f"{zone_id}-tc1") or self.camera_histories.get(f"{zone_id}-tc2")
-                cam_mean = statistics.mean(cam_hist) if cam_hist and len(cam_hist) >= 5 else 45.0
-                cam_val = self.latest_camera_vals.get(zone_id, cam_mean)
+                sim_sec = _parse_sim_seconds(sim_ts) if sim_ts else time.time()
+                z_num = zone_id.split("-")[-1]
+                cam_ids = self.zone_cameras.get(zone_id, [f"z{z_num}-tc1", f"z{z_num}-tc2"])
+                has_camera_evidence = False
+                for cid in cam_ids:
+                    hist_entries = [v for t, v in self.camera_histories.get(cid, []) if sim_sec - t <= 300.0]
+                    if hist_entries:
+                        cam_mean = statistics.mean(hist_entries)
+                        latest_val = self.latest_camera_vals.get(cid)
+                        if latest_val is not None and cam_mean > 0 and latest_val < 0.5 * cam_mean:
+                            has_camera_evidence = True
+                            break
 
-                # Accident congestion check: camera flow dropped below 50% of recent mean (or zero baseline)
-                if cam_val < 0.5 * cam_mean or len(cam_hist or []) < 5:
-                    if zone_id not in self.dispatched_medical:
-                        res = await self.mcp.call_tool_async(
-                            "dispatch",
-                            {"incident_type": "medical_emergency", "zone_id": zone_id, "idempotency_key": f"act-disp-med-{zone_id}-{sim_ts}"}
-                        )
+                # Never dispatch without camera evidence (no "history too short" shortcut)
+                if has_camera_evidence and zone_id not in self.dispatched_medical:
+                    succ, res = await self._safe_call_tool(
+                        "dispatch",
+                        {"incident_type": "medical_emergency", "zone_id": zone_id, "idempotency_key": f"act-disp-med-{zone_id}-{sim_ts}"}
+                    )
+                    if succ:
                         self.dispatched_medical.add(zone_id)
                         self.dispatches_sent += 1
                         act = {"type": "dispatch", "incident_type": "medical_emergency", "zone_id": zone_id, "result": res}
@@ -198,16 +250,17 @@ class MockCityBrain:
         elif dtype == "air_quality":
             if val > 150.0:
                 if zone_id not in self.dispatched_fire:
-                    res = await self.mcp.call_tool_async(
+                    succ, res = await self._safe_call_tool(
                         "dispatch",
                         {"incident_type": "fire", "zone_id": zone_id, "idempotency_key": f"act-disp-fire-{zone_id}-{sim_ts}"}
                     )
-                    self.dispatched_fire.add(zone_id)
-                    self.dispatches_sent += 1
-                    act = {"type": "dispatch", "incident_type": "fire", "zone_id": zone_id, "result": res}
-                    self.actuations_log.append(act)
-                    actions_taken.append(act)
-                    self._log_event(sim_ts, "dispatch", {"incident_type": "fire", "zone_id": zone_id})
+                    if succ:
+                        self.dispatched_fire.add(zone_id)
+                        self.dispatches_sent += 1
+                        act = {"type": "dispatch", "incident_type": "fire", "zone_id": zone_id, "result": res}
+                        self.actuations_log.append(act)
+                        actions_taken.append(act)
+                        self._log_event(sim_ts, "dispatch", {"incident_type": "fire", "zone_id": zone_id})
             elif val < 100.0:
                 self.dispatched_fire.discard(zone_id)
 
@@ -215,27 +268,29 @@ class MockCityBrain:
         elif dtype == "power_load":
             current_grid = self.grid_states.get(device_id, "grid_a")
             if val > 108.0 and current_grid != "shed":
-                res = await self.mcp.call_tool_async(
+                succ, res = await self._safe_call_tool(
                     "switch_grid",
                     {"device_id": device_id, "target_state": "shed", "idempotency_key": f"act-grid-shed-{device_id}-{sim_ts}"}
                 )
-                self.grid_states[device_id] = "shed"
-                self.grid_switches_sent += 1
-                act = {"type": "switch_grid", "device_id": device_id, "target_state": "shed", "result": res}
-                self.actuations_log.append(act)
-                actions_taken.append(act)
-                self._log_event(sim_ts, "switch_grid", {"device_id": device_id, "target_state": "shed", "value": val})
+                if succ:
+                    self.grid_states[device_id] = "shed"
+                    self.grid_switches_sent += 1
+                    act = {"type": "switch_grid", "device_id": device_id, "target_state": "shed", "result": res}
+                    self.actuations_log.append(act)
+                    actions_taken.append(act)
+                    self._log_event(sim_ts, "switch_grid", {"device_id": device_id, "target_state": "shed", "value": val})
             elif val < 90.0 and current_grid == "shed":
-                res = await self.mcp.call_tool_async(
+                succ, res = await self._safe_call_tool(
                     "switch_grid",
                     {"device_id": device_id, "target_state": "grid_a", "idempotency_key": f"act-grid-grida-{device_id}-{sim_ts}"}
                 )
-                self.grid_states[device_id] = "grid_a"
-                self.grid_switches_sent += 1
-                act = {"type": "switch_grid", "device_id": device_id, "target_state": "grid_a", "result": res}
-                self.actuations_log.append(act)
-                actions_taken.append(act)
-                self._log_event(sim_ts, "switch_grid", {"device_id": device_id, "target_state": "grid_a", "value": val})
+                if succ:
+                    self.grid_states[device_id] = "grid_a"
+                    self.grid_switches_sent += 1
+                    act = {"type": "switch_grid", "device_id": device_id, "target_state": "grid_a", "result": res}
+                    self.actuations_log.append(act)
+                    actions_taken.append(act)
+                    self._log_event(sim_ts, "switch_grid", {"device_id": device_id, "target_state": "grid_a", "value": val})
 
         return actions_taken
 
@@ -247,13 +302,14 @@ class MockCityBrain:
         """Run continuous live decision loop."""
         logger.info(f"[BRAIN] Running live decision engine. Writing to {self.log_file}")
         try:
+            await self.refresh_zone_cameras()
             while True:
                 reading = self.reading_source.get_reading(timeout=1.0)
                 if reading is not None:
                     await self.evaluate_reading_async(reading)
                 else:
                     await asyncio.sleep(0.01)
-        except (KeyboardInterrupt, SystemExit):
+        except (KeyboardInterrupt, SystemExit, asyncio.CancelledError):
             logger.info("[BRAIN] Shutting down live engine.")
         finally:
             await self.mcp.close()
@@ -277,11 +333,16 @@ def main():
         log_file=args.log_file,
     )
     if args.live:
-        import asyncio
-        asyncio.run(brain.run_live())
+        try:
+            asyncio.run(brain.run_live())
+        except (KeyboardInterrupt, SystemExit):
+            pass
     else:
         print("[MOCK CITY BRAIN] Ready in passive test mode.")
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except (KeyboardInterrupt, SystemExit):
+        sys.exit(0)

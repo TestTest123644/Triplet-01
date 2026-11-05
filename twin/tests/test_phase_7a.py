@@ -14,10 +14,12 @@ Covers:
 """
 
 import asyncio
+import contextlib
 from datetime import datetime, timezone
 import json
 import os
 import subprocess
+import sys
 import threading
 import time
 from typing import Any, Dict, List
@@ -221,42 +223,70 @@ def test_6b_attack_stacking(tmp_path):
 # ==============================================================================
 # Ephemeral Twin Fixture for 6.c and 6.d
 # ==============================================================================
+@contextlib.contextmanager
+def running_mcp_server(sim: CitySimulator):
+    """Start an in-process MCP server on an ephemeral port with a fresh MCP app and session manager."""
+    set_active_simulator(sim)
+    app = build_mcp_app()
+    config = uvicorn.Config(app, host="127.0.0.1", port=0, log_level="warning")
+    server = uvicorn.Server(config)
+
+    thread_exc: List[BaseException] = []
+
+    def _runner():
+        try:
+            server.run()
+        except BaseException as exc:
+            thread_exc.append(exc)
+
+    thread = threading.Thread(target=_runner, daemon=True)
+    thread.start()
+
+    deadline = time.time() + 10.0
+    while not server.started and thread.is_alive() and time.time() < deadline:
+        time.sleep(0.01)
+
+    if not server.started:
+        server.should_exit = True
+        thread.join(timeout=1.0)
+        if thread_exc:
+            raise RuntimeError(f"MCP server thread died during startup: {thread_exc[0]}") from thread_exc[0]
+        if not thread.is_alive():
+            raise RuntimeError("MCP server thread exited before starting without capturing an exception.")
+        raise TimeoutError("Timed out after 10s waiting for MCP server to start.")
+
+    port = server.servers[0].sockets[0].getsockname()[1]
+    mcp_url = f"http://127.0.0.1:{port}"
+
+    try:
+        yield {"server": server, "thread": thread, "port": port, "mcp_url": mcp_url}
+    finally:
+        server.should_exit = True
+        thread.join(timeout=5.0)
+        if thread.is_alive():
+            raise RuntimeError("MCP server thread did not stop within 5s after should_exit=True")
+
+
 @pytest.fixture
 def ephemeral_twin(tmp_path):
     """Fixture providing an in-process Twin with MCP on an ephemeral port and Red Team Starlette app."""
     db_path = str(tmp_path / "ephemeral_twin.db")
     ledger = GroundTruthLedger(db_path=db_path)
     sim = CitySimulator(seed=303, ledger=ledger, sim_speed=10.0)
-    set_active_simulator(sim)
-
     token = "test-red-team-token-7a"
     red_team_app = build_red_team_app(sim, token=token)
-    mcp_app = build_mcp_app()
 
-    config = uvicorn.Config(mcp_app, host="127.0.0.1", port=0, log_level="warning")
-    server = uvicorn.Server(config)
-    server_thread = threading.Thread(target=server.run, daemon=True)
-    server_thread.start()
-
-    while not server.started:
-        time.sleep(0.01)
-
-    port = server.servers[0].sockets[0].getsockname()[1]
-    mcp_url = f"http://127.0.0.1:{port}"
-
-    yield {
-        "sim": sim,
-        "ledger": ledger,
-        "db_path": db_path,
-        "port": port,
-        "mcp_url": mcp_url,
-        "red_team_app": red_team_app,
-        "red_team_token": token,
-        "server": server,
-    }
-
-    server.should_exit = True
-    server_thread.join(timeout=2.0)
+    with running_mcp_server(sim) as s_info:
+        yield {
+            "sim": sim,
+            "ledger": ledger,
+            "db_path": db_path,
+            "port": s_info["port"],
+            "mcp_url": s_info["mcp_url"],
+            "red_team_app": red_team_app,
+            "red_team_token": token,
+            "server": s_info["server"],
+        }
 
 
 # ==============================================================================
@@ -342,18 +372,182 @@ def test_6c_journal_api(ephemeral_twin):
     for fe in filtered_entries:
         assert fe["sim_ts"] >= mid_ts
 
+    # 7. Check stable "key" per entry
+    for e in entries:
+        assert "key" in e
+        prefix = e["key"].split(":")[0]
+        assert prefix in ("command", "containment", "event_start", "event_resolved", "attack_inject", "attack_clear")
+
+    # 8. Invalid since_sim_ts -> 400 INVALID_ARGUMENT
+    inv_res = rt_client.get("/api/journal?since_sim_ts=not-rfc3339", headers=auth_header)
+    assert inv_res.status_code == 400
+    assert inv_res.json()["code"] == "INVALID_ARGUMENT"
+
+    # 9. Unknown link_mode -> 400 INVALID_ATTACK
+    bad_atk = rt_client.post(
+        "/api/attack/inject",
+        headers=auth_header,
+        json={"capability": "link", "target_device_id": "z1-tc1", "params": {"link_mode": "foo"}},
+    )
+    assert bad_atk.status_code == 400
+    assert bad_atk.json()["code"] == "INVALID_ATTACK"
+
 
 # ==============================================================================
-# 6.d Mocks end-to-end
+# Helper for feeding simulation stream to mocks without state staging
 # ==============================================================================
-def test_6d_mocks_end_to_end(ephemeral_twin):
-    """6.d: mocks end to end: in-process Twin with MCP on ephemeral port & QueueSource streamer:
-    - Rogue device gets quarantined.
-    - corrupt_bytes device gets quarantined.
-    - device_physical spoof on z2-wl1 gets isolated without false valve actuation.
-    - rain_storm x3 in zone-2 triggers Brain valve opening, keeping level < 8 m.
-    - Assert outcomes through GET /api/journal.
+async def stream_and_process_tick(sim, streamer, queue_source, guardian, brain=None):
+    for r in sim.tick():
+        dev_id = r["device_id"]
+        dev_key = sim.signing_key_for(dev_id)
+        if dev_key:
+            res = streamer.stream_reading(r, dev_key)
+            if res:
+                queue_source.put(res[1])
+            if streamer.last_emitted_backlog:
+                for _, b in streamer.last_emitted_backlog:
+                    queue_source.put(b)
+                streamer.last_emitted_backlog.clear()
+
+    while True:
+        item = queue_source.get_reading(timeout=0.001)
+        if not item:
+            break
+        await guardian.process_reading_async(item)
+        if brain is not None:
+            await brain.evaluate_reading_async(item)
+
+
+# ==============================================================================
+# 9a: False-positive guard
+# ==============================================================================
+def test_9a_false_positive_guard(tmp_path):
+    """9a: False-positive guard: clean run (1 sim-min @ SIM_SPEED 1, 30 sim-min @ SIM_SPEED 60) -> 0 containment, 0 commands."""
+    db_path = str(tmp_path / "fp_guard.db")
+    ledger = GroundTruthLedger(db_path=db_path)
+    sim = CitySimulator(seed=101, ledger=ledger, sim_speed=1.0)
+
+    token = "test-token-9a"
+    red_team_app = build_red_team_app(sim, token=token)
+
+    with running_mcp_server(sim) as s_info:
+        mcp_url = s_info["mcp_url"]
+        queue_source = QueueSource()
+        streamer = KafkaStreamer(mock_mode=True)
+        guardian = MockGuardian(reading_source=queue_source, mcp_url=mcp_url)
+        brain = MockCityBrain(reading_source=queue_source, mcp_url=mcp_url)
+
+        async def run():
+            await guardian.mcp.connect()
+            await brain.mcp.connect()
+            await brain.refresh_zone_cameras()
+
+            # Part 1: 1 sim-min @ SIM_SPEED 1.0 (600 ticks = 60s)
+            for _ in range(600):
+                await stream_and_process_tick(sim, streamer, queue_source, guardian, brain)
+
+            # Part 2: 30 sim-min @ SIM_SPEED 60.0 (300 ticks = 1800s)
+            sim.clock.sim_speed = 60.0
+            for _ in range(300):
+                await stream_and_process_tick(sim, streamer, queue_source, guardian, brain)
+
+            await brain.mcp.close()
+            await guardian.mcp.close()
+
+        asyncio.run(run())
+
+    # Verify through journal
+    rt_client = TestClient(red_team_app)
+    j_res = rt_client.get("/api/journal?limit=1000", headers={"X-Red-Team-Token": token})
+    assert j_res.status_code == 200
+    journal = j_res.json()["journal"]
+
+    containments = [e for e in journal if e["source"] == "containment"]
+    commands = [e for e in journal if e["source"] == "command"]
+
+    assert len(containments) == 0, f"Expected 0 containment rows, found {len(containments)}"
+    assert len(commands) == 0, f"Expected 0 commands, found {len(commands)}"
+
+
+# ==============================================================================
+# 9b: Storm x3 in zone-2 mitigation
+# ==============================================================================
+def test_9b_storm_valve_mitigation(tmp_path):
+    """9b: Storm x3 in zone-2 from natural start (3.5 m), SIM_SPEED 60, 30 sim-min:
+    without Brain -> level > 8 m; with Brain -> set_valve open journaled and max level < 8 m.
     """
+    # --- Variant 1: Without Brain ---
+    db1 = str(tmp_path / "storm_no_brain.db")
+    sim1 = CitySimulator(seed=404, ledger=GroundTruthLedger(db_path=db1), sim_speed=60.0)
+    sim1.inject_event(type="rain_storm", zone_id="zone-2", intensity=3.0, duration_s=1800.0)
+    max_level_no_brain = 0.0
+    for _ in range(300):
+        sim1.tick()
+        lvl = max(sim1.devices["z2-wl1"].current_value, sim1.devices["z2-wl2"].current_value)
+        if lvl > max_level_no_brain:
+            max_level_no_brain = lvl
+
+    assert max_level_no_brain > 8.0, f"Expected unmitigated storm level > 8.0m, got {max_level_no_brain}"
+
+    # --- Variant 2: With Brain ---
+    db2 = str(tmp_path / "storm_with_brain.db")
+    sim2 = CitySimulator(seed=404, ledger=GroundTruthLedger(db_path=db2), sim_speed=60.0)
+    token = "test-token-9b"
+    red_team_app = build_red_team_app(sim2, token=token)
+
+    with running_mcp_server(sim2) as s_info:
+        mcp_url = s_info["mcp_url"]
+        queue_source = QueueSource()
+        streamer = KafkaStreamer(mock_mode=True)
+        brain = MockCityBrain(reading_source=queue_source, mcp_url=mcp_url)
+
+        sim2.inject_event(type="rain_storm", zone_id="zone-2", intensity=3.0, duration_s=1800.0)
+        max_level_with_brain = 0.0
+
+        async def run():
+            await brain.mcp.connect()
+            await brain.refresh_zone_cameras()
+            nonlocal max_level_with_brain
+            for _ in range(300):
+                for r in sim2.tick():
+                    res = streamer.stream_reading(r, sim2.devices[r["device_id"]].private_key)
+                    if res:
+                        queue_source.put(res[1])
+                while True:
+                    item = queue_source.get_reading(timeout=0.001)
+                    if not item:
+                        break
+                    await brain.evaluate_reading_async(item)
+
+                lvl = max(sim2.devices["z2-wl1"].current_value, sim2.devices["z2-wl2"].current_value)
+                if lvl > max_level_with_brain:
+                    max_level_with_brain = lvl
+
+            await brain.mcp.close()
+
+        asyncio.run(run())
+
+    assert max_level_with_brain < 8.0, f"Expected mitigated storm level < 8.0m, got {max_level_with_brain}"
+
+    # Check that set_valve open was journaled
+    rt_client = TestClient(red_team_app)
+    j_res = rt_client.get("/api/journal?limit=100", headers={"X-Red-Team-Token": token})
+    assert j_res.status_code == 200
+    valve_cmds = [
+        e for e in j_res.json()["journal"]
+        if e["source"] == "command"
+        and e["detail"]["tool"] == "set_valve"
+        and e["detail"]["args"].get("target_state") == "open"
+        and e["detail"]["executed"] is True
+    ]
+    assert len(valve_cmds) >= 2, f"Expected set_valve open journaled, got {valve_cmds}"
+
+
+# ==============================================================================
+# 9c: Fake flood
+# ==============================================================================
+def test_9c_fake_flood_paired_water(ephemeral_twin):
+    """9c: Fake flood (device_physical z2-wl1 = 9.5): z2-wl1 isolated, z2-wl2 NOT isolated, no set_valve, no dispatch."""
     sim = ephemeral_twin["sim"]
     mcp_url = ephemeral_twin["mcp_url"]
     token = ephemeral_twin["red_team_token"]
@@ -362,166 +556,274 @@ def test_6d_mocks_end_to_end(ephemeral_twin):
 
     queue_source = QueueSource()
     streamer = KafkaStreamer(mock_mode=True)
-
     guardian = MockGuardian(reading_source=queue_source, mcp_url=mcp_url)
     brain = MockCityBrain(reading_source=queue_source, mcp_url=mcp_url)
 
-    async def run_scenario():
+    async def run():
         await guardian.mcp.connect()
         await brain.mcp.connect()
+        await brain.refresh_zone_cameras()
 
-        async def drain_and_evaluate():
-            while True:
-                reading = queue_source.get_reading(timeout=0.01)
-                if reading is None:
-                    break
-                await guardian.process_reading_async(reading)
-                # Brain evaluates readings that are not contained
-                dev_status = sim.devices.get(reading.get("device_id", "")).status if reading.get("device_id") in sim.devices else "ok"
-                if dev_status not in ("quarantined", "isolated"):
-                    await brain.evaluate_reading_async(reading)
-
-        # Baseline: 5 ticks
-        for _ in range(5):
-            for r in sim.tick():
-                _, b = streamer.stream_reading(r, sim.devices[r["device_id"]].private_key)
-                if b:
-                    queue_source.put(b)
-            await drain_and_evaluate()
-
-        # -------------------------------------------------------------
-        # Scenario 1: Rogue device -> quarantined
-        # -------------------------------------------------------------
-        att_rogue = sim.inject_attack(
-            capability="rogue",
-            params={"rogue_device_id": "rg-01", "location": "zone-1", "device_type": "traffic_camera"},
-        )
-        for _ in range(2):
-            for r in sim.tick():
-                dev_key = sim.devices[r["device_id"]].private_key if r["device_id"] in sim.devices else sim._rogue_keys.get(r["device_id"], (None, None))[0]
-                _, b = streamer.stream_reading(r, dev_key)
-                if b:
-                    queue_source.put(b)
-            await drain_and_evaluate()
-        sim.clear_attack(att_rogue)
-
-        # -------------------------------------------------------------
-        # Scenario 2: corrupt_bytes device -> quarantined after 3 failures
-        # -------------------------------------------------------------
-        att_corrupt = sim.inject_attack(
-            capability="link",
-            target_device_id="z1-tc1",
-            params={"link_mode": "corrupt_bytes"},
-        )
-        for _ in range(3):
-            for r in sim.tick():
-                _, b = streamer.stream_reading(r, sim.devices[r["device_id"]].private_key)
-                if b:
-                    queue_source.put(b)
-            await drain_and_evaluate()
-        sim.clear_attack(att_corrupt)
-
-        # -------------------------------------------------------------
-        # Scenario 3: device_physical spoof on z2-wl1 -> isolated without Brain opening valve
-        # -------------------------------------------------------------
-        # Tick 10 baseline ticks so water history has pre-attack depth
+        # Baseline: 10 ticks
         for _ in range(10):
-            for r in sim.tick():
-                _, b = streamer.stream_reading(r, sim.devices[r["device_id"]].private_key)
-                if b:
-                    queue_source.put(b)
-            await drain_and_evaluate()
+            await stream_and_process_tick(sim, streamer, queue_source, guardian, brain)
 
-        # Inject physical spoof on z2-wl1 alone (9.5m while z2-wl2 remains normal ~3.5m)
-        att_spoof = sim.inject_attack(
-            capability="device_physical",
-            target_device_id="z2-wl1",
-            params={"spoofed_value": 9.5},
-        )
+        # Inject physical spoof on z2-wl1
+        sim.inject_attack(capability="device_physical", target_device_id="z2-wl1", params={"spoofed_value": 9.5})
         for _ in range(25):
-            for r in sim.tick():
-                _, b = streamer.stream_reading(r, sim.devices[r["device_id"]].private_key)
-                if b:
-                    queue_source.put(b)
-            await drain_and_evaluate()
-        sim.clear_attack(att_spoof)
+            await stream_and_process_tick(sim, streamer, queue_source, guardian, brain)
 
-        # -------------------------------------------------------------
-        # Scenario 4: rain_storm x3 in zone-2 -> Brain opens valve, level stays < 8m
-        # -------------------------------------------------------------
-        # Reset zone-2 water sensors to 6.98m so storm causes crossing > 7.0m in few ticks
-        sim.devices["z2-wl1"].status = "ok"
-        sim.devices["z2-wl2"].status = "ok"
-        sim.devices["z2-wl1"].current_value = 6.98
-        sim.devices["z2-wl2"].current_value = 6.98
-        guardian.isolated_devices.clear()
-        brain.water_levels.clear()
+        await brain.mcp.close()
+        await guardian.mcp.close()
 
-        ev_rain = sim.inject_event(type="rain_storm", zone_id="zone-2", intensity=3.0, duration_s=600.0)
-        for _ in range(20):
-            for r in sim.tick():
-                _, b = streamer.stream_reading(r, sim.devices[r["device_id"]].private_key)
-                if b:
-                    queue_source.put(b)
-            await drain_and_evaluate()
+    asyncio.run(run())
 
-        # Close clients cleanly
-        try:
+    # Verify through journal
+    j_res = rt_client.get("/api/journal?limit=500", headers=auth_header)
+    assert j_res.status_code == 200
+    journal = j_res.json()["journal"]
+
+    containments = [e for e in journal if e["source"] == "containment"]
+    commands = [e for e in journal if e["source"] == "command"]
+
+    # z2-wl1 isolated, z2-wl2 NOT isolated
+    isolated_targets = {
+        c["detail"]["target"] for c in containments
+        if c["detail"]["tool"] == "isolate_device" and c["detail"]["to_status"] == "isolated"
+    }
+    assert "z2-wl1" in isolated_targets
+    assert "z2-wl2" not in isolated_targets
+
+    # No set_valve, no dispatch
+    valve_cmds = [c for c in commands if c["detail"]["tool"] == "set_valve"]
+    dispatch_cmds = [c for c in commands if c["detail"]["tool"] == "dispatch"]
+    assert len(valve_cmds) == 0, f"Expected 0 set_valve commands, found {valve_cmds}"
+    assert len(dispatch_cmds) == 0, f"Expected 0 dispatch commands, found {dispatch_cmds}"
+
+
+# ==============================================================================
+# 9d: Replay and delay on z3-tc1
+# ==============================================================================
+def test_9d_replay_and_delay_containment(tmp_path):
+    """9d: Replay and delay on z3-tc1: each ends with z3-tc1 isolated and no other device contained; <= 5 rollback rows per device."""
+    # Part 1: Replay
+    db1 = str(tmp_path / "replay_test.db")
+    sim1 = CitySimulator(seed=601, ledger=GroundTruthLedger(db_path=db1), sim_speed=1.0)
+    qs1 = QueueSource()
+    streamer1 = KafkaStreamer(mock_mode=True)
+
+    with running_mcp_server(sim1) as s_info1:
+        guardian1 = MockGuardian(reading_source=qs1, mcp_url=s_info1["mcp_url"])
+
+        async def run_replay():
+            await guardian1.mcp.connect()
+            for _ in range(15):
+                await stream_and_process_tick(sim1, streamer1, qs1, guardian1)
+            sim1.inject_attack(capability="link", target_device_id="z3-tc1", params={"link_mode": "replay", "replay_offset": 5})
+            for _ in range(5):
+                await stream_and_process_tick(sim1, streamer1, qs1, guardian1)
+            await guardian1.mcp.close()
+
+        asyncio.run(run_replay())
+
+    assert guardian1.isolated_devices == ["z3-tc1"], f"Expected ['z3-tc1'] isolated, got {guardian1.isolated_devices}"
+    assert len(guardian1.rolled_back_readings) <= 5, f"Expected <= 5 rollbacks, got {len(guardian1.rolled_back_readings)}"
+
+    # Part 2: Delay
+    db2 = str(tmp_path / "delay_test.db")
+    sim2 = CitySimulator(seed=602, ledger=GroundTruthLedger(db_path=db2), sim_speed=1.0)
+    qs2 = QueueSource()
+    streamer2 = KafkaStreamer(mock_mode=True)
+
+    with running_mcp_server(sim2) as s_info2:
+        guardian2 = MockGuardian(reading_source=qs2, mcp_url=s_info2["mcp_url"])
+
+        async def run_delay():
+            await guardian2.mcp.connect()
+            for _ in range(10):
+                await stream_and_process_tick(sim2, streamer2, qs2, guardian2)
+            sim2.inject_attack(capability="link", target_device_id="z3-tc1", params={"link_mode": "delay", "delay_ticks": 25})
+            for _ in range(35):
+                await stream_and_process_tick(sim2, streamer2, qs2, guardian2)
+            await guardian2.mcp.close()
+
+        asyncio.run(run_delay())
+
+    assert guardian2.isolated_devices == ["z3-tc1"], f"Expected ['z3-tc1'] isolated, got {guardian2.isolated_devices}"
+    assert len(guardian2.rolled_back_readings) <= 5, f"Expected <= 5 rollbacks, got {len(guardian2.rolled_back_readings)}"
+
+
+# ==============================================================================
+# 9e: Rogue and corrupt_bytes
+# ==============================================================================
+def test_9e_rogue_and_corrupt_bytes_quarantine(tmp_path):
+    """9e: Rogue and corrupt_bytes: quarantined, nothing else contained."""
+    db = str(tmp_path / "quarantine_test.db")
+    sim = CitySimulator(seed=701, ledger=GroundTruthLedger(db_path=db), sim_speed=1.0)
+    qs = QueueSource()
+    streamer = KafkaStreamer(mock_mode=True)
+
+    with running_mcp_server(sim) as s_info:
+        guardian = MockGuardian(reading_source=qs, mcp_url=s_info["mcp_url"])
+
+        async def run():
+            await guardian.mcp.connect()
+
+            # Rogue device
+            sim.inject_attack(capability="rogue", params={"rogue_device_id": "rg-01", "location": "zone-1", "device_type": "traffic_camera"})
+            for _ in range(3):
+                await stream_and_process_tick(sim, streamer, qs, guardian)
+            assert guardian.quarantined_devices == ["rg-01"]
+            assert len(guardian.isolated_devices) == 0
+
+            # Corrupt bytes on z1-tc1
+            sim.inject_attack(capability="link", target_device_id="z1-tc1", params={"link_mode": "corrupt_bytes"})
+            for _ in range(4):
+                await stream_and_process_tick(sim, streamer, qs, guardian)
+            assert set(guardian.quarantined_devices) == {"rg-01", "z1-tc1"}
+            assert len(guardian.isolated_devices) == 0
+
             await guardian.mcp.close()
-        except BaseException:
-            pass
+
+        asyncio.run(run())
+
+
+# ==============================================================================
+# 9f: Live subprocesses
+# ==============================================================================
+def test_9f_live_subprocesses():
+    """9f: python -m mocks.mock_guardian --live and python -m mocks.mock_brain --live run for 5 s as subprocesses with unreachable Kafka without traceback and exit cleanly on SIGINT."""
+    import signal
+    env = os.environ.copy()
+    env["PYTHONPATH"] = "twin:twin/src" + (":" + env["PYTHONPATH"] if "PYTHONPATH" in env else "")
+
+    for module in ("mocks.mock_guardian", "mocks.mock_brain"):
+        proc = subprocess.Popen(
+            [sys.executable, "-m", module, "--live", "--kafka-bootstrap", "127.0.0.1:19092"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=env,
+        )
         try:
+            time.sleep(5.0)
+            proc.send_signal(signal.SIGINT)
+            stdout, stderr = proc.communicate(timeout=10.0)
+        except Exception:
+            proc.kill()
+            proc.wait(timeout=2.0)
+            raise
+
+        assert proc.returncode in (0, -signal.SIGINT), f"{module} exited with unexpected code {proc.returncode}"
+        assert "Traceback (most recent call last)" not in stderr, f"{module} emitted unhandled traceback:\n{stderr}"
+
+
+# ==============================================================================
+# 9g: Incidents
+# ==============================================================================
+def test_9g_incident_engine_hysteresis_and_resolution(tmp_path):
+    """9g: Incidents (fire, grid_overload, traffic_accident): matching command appears once (hysteresis) and event ends resolved_by in journal; no dispatch in other zones."""
+    db = str(tmp_path / "incidents_test.db")
+    sim = CitySimulator(seed=801, ledger=GroundTruthLedger(db_path=db), sim_speed=60.0)
+    token = "test-token-9g"
+    red_team_app = build_red_team_app(sim, token=token)
+
+    with running_mcp_server(sim) as s_info:
+        mcp_url = s_info["mcp_url"]
+        qs = QueueSource()
+        streamer = KafkaStreamer(mock_mode=True)
+        brain = MockCityBrain(reading_source=qs, mcp_url=mcp_url)
+
+        ev_fire = None
+        ev_grid = None
+        ev_acc = None
+
+        async def run():
+            nonlocal ev_fire, ev_grid, ev_acc
+            await brain.mcp.connect()
+            await brain.refresh_zone_cameras()
+
+            # 1. Fire in zone-4 (intensity=2.0)
+            ev_fire = sim.inject_event(type="fire", zone_id="zone-4", intensity=2.0, duration_s=1200.0)
+            # Advance until AQI > 150 and dispatch countdown expires
+            for _ in range(70):
+                for r in sim.tick():
+                    res = streamer.stream_reading(r, sim.devices[r["device_id"]].private_key)
+                    if res: qs.put(res[1])
+                while True:
+                    item = qs.get_reading(timeout=0.001)
+                    if not item: break
+                    await brain.evaluate_reading_async(item)
+
+            # 2. Grid overload in zone-5 (intensity=1.5)
+            ev_grid = sim.inject_event(type="grid_overload", zone_id="zone-5", intensity=1.5, duration_s=600.0)
+            for _ in range(40):
+                for r in sim.tick():
+                    res = streamer.stream_reading(r, sim.devices[r["device_id"]].private_key)
+                    if res: qs.put(res[1])
+                while True:
+                    item = qs.get_reading(timeout=0.001)
+                    if not item: break
+                    await brain.evaluate_reading_async(item)
+
+            # 3. Traffic accident in zone-3
+            ev_acc = sim.inject_event(type="traffic_accident", zone_id="zone-3", device_id="z3-tc1", intensity=2.0, duration_s=600.0)
+            for _ in range(110):
+                for r in sim.tick():
+                    res = streamer.stream_reading(r, sim.devices[r["device_id"]].private_key)
+                    if res: qs.put(res[1])
+                while True:
+                    item = qs.get_reading(timeout=0.001)
+                    if not item: break
+                    await brain.evaluate_reading_async(item)
+
             await brain.mcp.close()
-        except BaseException:
-            pass
 
-    asyncio.run(run_scenario())
+        asyncio.run(run())
 
-    # -----------------------------------------------------------------
-    # Assert all outcomes through GET /api/journal (never internal state)
-    # -----------------------------------------------------------------
-    j_res = rt_client.get("/api/journal?limit=1000", headers=auth_header)
+    # Verify through journal
+    rt_client = TestClient(red_team_app)
+    j_res = rt_client.get("/api/journal?limit=1000", headers={"X-Red-Team-Token": token})
     assert j_res.status_code == 200
     journal = j_res.json()["journal"]
 
     commands = [e for e in journal if e["source"] == "command"]
-    containments = [e for e in journal if e["source"] == "containment"]
+    events_resolved = [e for e in journal if e["source"] == "event" and e["detail"]["action"] == "resolved"]
 
-    # 1. Rogue device quarantined
-    assert any(
-        c["detail"]["tool"] == "quarantine_device"
-        and c["detail"]["target"] == "rg-01"
-        and c["detail"]["to_status"] == "quarantined"
-        for c in containments
-    )
+    # Fire dispatch: exactly once for zone-4, none for other zones
+    fire_dispatches = [
+        c for c in commands
+        if c["detail"]["tool"] == "dispatch" and c["detail"]["args"].get("incident_type") == "fire"
+    ]
+    assert len(fire_dispatches) == 1, f"Expected exactly 1 fire dispatch, got {len(fire_dispatches)}"
+    assert fire_dispatches[0]["detail"]["args"].get("zone_id") == "zone-4"
 
-    # 2. corrupt_bytes device quarantined
-    assert any(
-        c["detail"]["tool"] == "quarantine_device"
-        and c["detail"]["target"] == "z1-tc1"
-        and c["detail"]["to_status"] == "quarantined"
-        for c in containments
-    )
+    # Grid overload switch_grid: exactly once shed for z5-pl1 (or zone-5)
+    shed_cmds = [
+        c for c in commands
+        if c["detail"]["tool"] == "switch_grid" and c["detail"]["args"].get("target_state") == "shed"
+    ]
+    assert len(shed_cmds) == 1, f"Expected exactly 1 grid shed command, got {len(shed_cmds)}"
+    assert "z5-" in shed_cmds[0]["detail"]["args"].get("device_id", "")
 
-    # 3. Spoofed z2-wl1 isolated
-    assert any(
-        c["detail"]["tool"] == "isolate_device"
-        and c["detail"]["target"] == "z2-wl1"
-        and c["detail"]["to_status"] == "isolated"
-        for c in containments
-    )
+    # Traffic accident dispatch: exactly once for zone-3, none for other zones
+    med_dispatches = [
+        c for c in commands
+        if c["detail"]["tool"] == "dispatch" and c["detail"]["args"].get("incident_type") == "medical_emergency"
+    ]
+    assert len(med_dispatches) == 1, f"Expected exactly 1 medical emergency dispatch, got {len(med_dispatches)}"
+    assert med_dispatches[0]["detail"]["args"].get("zone_id") == "zone-3"
 
-    # Brain did NOT open valves during spoof (only during rain_storm)
-    valve_cmds = [c for c in commands if c["detail"]["tool"] == "set_valve"]
-    assert len(valve_cmds) >= 2  # exactly z2-wl1 and z2-wl2 opened during rain_storm
-    for vc in valve_cmds:
-        assert vc["detail"]["args"].get("target_state") == "open"
-        assert vc["detail"]["args"].get("device_id") in ("z2-wl1", "z2-wl2")
-        assert vc["detail"]["executed"] is True
+    # All dispatches strictly in target zone (no dispatch in other zones)
+    all_dispatches = [c for c in commands if c["detail"]["tool"] == "dispatch"]
+    for d in all_dispatches:
+        assert d["detail"]["args"].get("zone_id") in ("zone-3", "zone-4")
 
-    # 4. Water level stayed < 8.0 m
-    assert sim.devices["z2-wl1"].current_value < 8.0
-    assert sim.devices["z2-wl2"].current_value < 8.0
+    # Events end resolved_by in journal
+    res_map = {e["detail"]["event_id"]: e["detail"]["resolved_by"] for e in events_resolved}
+    assert ev_fire in res_map and res_map[ev_fire].startswith("dispatch:"), f"Fire event resolution missing: {res_map}"
+    assert ev_grid in res_map and "switch_grid" in res_map[ev_grid], f"Grid event resolution missing: {res_map}"
+    assert ev_acc in res_map and res_map[ev_acc].startswith("dispatch:"), f"Accident event resolution missing: {res_map}"
 
 
 # ==============================================================================

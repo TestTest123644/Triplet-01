@@ -171,8 +171,12 @@ def build_mcp_app() -> Starlette:
         )
         logger.info(f"[NOMINAL] MCP DNS-rebinding / Host checking is enabled: {allowed}")
 
-    sse_sub_app = mcp.sse_app(transport_security=sec)
-    streamable_sub_app = mcp.streamable_http_app(transport_security=sec)
+    fresh_mcp = MCPServer("TwinLayerCommandServer")
+    fresh_mcp._tool_manager = mcp._tool_manager
+    fresh_mcp._custom_starlette_routes = mcp._custom_starlette_routes
+
+    sse_sub_app = fresh_mcp.sse_app(transport_security=sec)
+    streamable_sub_app = fresh_mcp.streamable_http_app(transport_security=sec)
 
     combined = Starlette(
         routes=list(sse_sub_app.routes) + list(streamable_sub_app.routes),

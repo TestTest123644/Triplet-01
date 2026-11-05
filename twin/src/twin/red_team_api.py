@@ -7,6 +7,8 @@ port (default: 8100). Every route is protected with header authentication
 
 from __future__ import annotations
 
+import asyncio
+from datetime import datetime
 import hmac
 import json
 import logging
@@ -83,6 +85,288 @@ class RedTeamAuthMiddleware(BaseHTTPMiddleware):
                 status_code=401,
             )
         return await call_next(request)
+
+
+def _validate_rfc3339(ts_str: str) -> bool:
+    """Validate that a string conforms to RFC 3339 format."""
+    try:
+        s = ts_str.strip()
+        if s.endswith("Z"):
+            s = s[:-1] + "+00:00"
+        datetime.fromisoformat(s)
+        return True
+    except Exception:
+        return False
+
+
+def _query_journal_sync(db_path: str, since_sim_ts: Optional[str], limit: int) -> List[Dict[str, Any]]:
+    """Synchronous read-only SQL query helper for journal API, executed in thread pool."""
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    conn.row_factory = sqlite3.Row
+    try:
+        entries: List[Dict[str, Any]] = []
+
+        if since_sim_ts:
+            # Query forward from since_sim_ts
+            # 1. commands_log
+            cur = conn.execute(
+                "SELECT id AS rowid, sim_ts, caller, tool, args_json, executed, refused_code "
+                "FROM commands_log WHERE sim_ts >= ? ORDER BY sim_ts ASC LIMIT ?",
+                (since_sim_ts, limit),
+            )
+            for r in cur.fetchall():
+                try:
+                    args = json.loads(r["args_json"]) if r["args_json"] else {}
+                except Exception:
+                    args = {}
+                entries.append({
+                    "key": f"command:{r['rowid']}",
+                    "sim_ts": r["sim_ts"],
+                    "source": "command",
+                    "detail": {
+                        "caller": r["caller"],
+                        "tool": r["tool"],
+                        "args": args,
+                        "executed": bool(r["executed"]),
+                        "refused_code": r["refused_code"],
+                    },
+                })
+
+            # 2. containment_log
+            cur = conn.execute(
+                "SELECT id AS rowid, sim_ts, caller, tool, target, from_status, to_status "
+                "FROM containment_log WHERE sim_ts >= ? ORDER BY sim_ts ASC LIMIT ?",
+                (since_sim_ts, limit),
+            )
+            for r in cur.fetchall():
+                entries.append({
+                    "key": f"containment:{r['rowid']}",
+                    "sim_ts": r["sim_ts"],
+                    "source": "containment",
+                    "detail": {
+                        "caller": r["caller"],
+                        "tool": r["tool"],
+                        "target": r["target"],
+                        "from_status": r["from_status"],
+                        "to_status": r["to_status"],
+                    },
+                })
+
+            # 3. physical_events
+            cur = conn.execute(
+                "SELECT event_id, type, zone_id, device_id, params_json, start_sim_ts, resolved_sim_ts, resolved_by "
+                "FROM physical_events WHERE start_sim_ts >= ? OR (resolved_sim_ts IS NOT NULL AND resolved_sim_ts >= ?) "
+                "ORDER BY start_sim_ts ASC LIMIT ?",
+                (since_sim_ts, since_sim_ts, limit),
+            )
+            for r in cur.fetchall():
+                try:
+                    params = json.loads(r["params_json"]) if r["params_json"] else {}
+                except Exception:
+                    params = {}
+                if r["start_sim_ts"] >= since_sim_ts:
+                    entries.append({
+                        "key": f"event_start:{r['event_id']}",
+                        "sim_ts": r["start_sim_ts"],
+                        "source": "event",
+                        "detail": {
+                            "event_id": r["event_id"],
+                            "action": "start",
+                            "type": r["type"],
+                            "zone_id": r["zone_id"],
+                            "device_id": r["device_id"],
+                            "params": params,
+                        },
+                    })
+                if r["resolved_sim_ts"] and r["resolved_sim_ts"] >= since_sim_ts:
+                    entries.append({
+                        "key": f"event_resolved:{r['event_id']}",
+                        "sim_ts": r["resolved_sim_ts"],
+                        "source": "event",
+                        "detail": {
+                            "event_id": r["event_id"],
+                            "action": "resolved",
+                            "type": r["type"],
+                            "zone_id": r["zone_id"],
+                            "resolved_by": r["resolved_by"],
+                        },
+                    })
+
+            # 4. attacks_injected
+            cur = conn.execute(
+                "SELECT attack_id, capability, target_device_id, target_zone_id, params_json, start_sim_time, end_sim_time, description "
+                "FROM attacks_injected WHERE start_sim_time >= ? OR (end_sim_time IS NOT NULL AND end_sim_time >= ?) "
+                "ORDER BY start_sim_time ASC LIMIT ?",
+                (since_sim_ts, since_sim_ts, limit),
+            )
+            for r in cur.fetchall():
+                try:
+                    params = json.loads(r["params_json"]) if r["params_json"] else {}
+                except Exception:
+                    params = {}
+                if r["start_sim_time"] >= since_sim_ts:
+                    entries.append({
+                        "key": f"attack_inject:{r['attack_id']}",
+                        "sim_ts": r["start_sim_time"],
+                        "source": "attack",
+                        "detail": {
+                            "attack_id": r["attack_id"],
+                            "action": "inject",
+                            "capability": r["capability"],
+                            "target_device_id": r["target_device_id"],
+                            "target_zone_id": r["target_zone_id"],
+                            "params": params,
+                            "description": r["description"],
+                        },
+                    })
+                if r["end_sim_time"] and r["end_sim_time"] >= since_sim_ts:
+                    entries.append({
+                        "key": f"attack_clear:{r['attack_id']}",
+                        "sim_ts": r["end_sim_time"],
+                        "source": "attack",
+                        "detail": {
+                            "attack_id": r["attack_id"],
+                            "action": "clear",
+                            "capability": r["capability"],
+                            "target_device_id": r["target_device_id"],
+                            "target_zone_id": r["target_zone_id"],
+                        },
+                    })
+
+            entries.sort(key=lambda x: x["sim_ts"])
+            return entries[:limit]
+
+        else:
+            # Without since_sim_ts: return LATEST limit entries (sorted ascending)
+            # 1. commands_log
+            cur = conn.execute(
+                "SELECT id AS rowid, sim_ts, caller, tool, args_json, executed, refused_code "
+                "FROM commands_log ORDER BY sim_ts DESC LIMIT ?",
+                (limit,),
+            )
+            for r in cur.fetchall():
+                try:
+                    args = json.loads(r["args_json"]) if r["args_json"] else {}
+                except Exception:
+                    args = {}
+                entries.append({
+                    "key": f"command:{r['rowid']}",
+                    "sim_ts": r["sim_ts"],
+                    "source": "command",
+                    "detail": {
+                        "caller": r["caller"],
+                        "tool": r["tool"],
+                        "args": args,
+                        "executed": bool(r["executed"]),
+                        "refused_code": r["refused_code"],
+                    },
+                })
+
+            # 2. containment_log
+            cur = conn.execute(
+                "SELECT id AS rowid, sim_ts, caller, tool, target, from_status, to_status "
+                "FROM containment_log ORDER BY sim_ts DESC LIMIT ?",
+                (limit,),
+            )
+            for r in cur.fetchall():
+                entries.append({
+                    "key": f"containment:{r['rowid']}",
+                    "sim_ts": r["sim_ts"],
+                    "source": "containment",
+                    "detail": {
+                        "caller": r["caller"],
+                        "tool": r["tool"],
+                        "target": r["target"],
+                        "from_status": r["from_status"],
+                        "to_status": r["to_status"],
+                    },
+                })
+
+            # 3. physical_events
+            cur = conn.execute(
+                "SELECT event_id, type, zone_id, device_id, params_json, start_sim_ts, resolved_sim_ts, resolved_by "
+                "FROM physical_events ORDER BY start_sim_ts DESC LIMIT ?",
+                (limit,),
+            )
+            for r in cur.fetchall():
+                try:
+                    params = json.loads(r["params_json"]) if r["params_json"] else {}
+                except Exception:
+                    params = {}
+                entries.append({
+                    "key": f"event_start:{r['event_id']}",
+                    "sim_ts": r["start_sim_ts"],
+                    "source": "event",
+                    "detail": {
+                        "event_id": r["event_id"],
+                        "action": "start",
+                        "type": r["type"],
+                        "zone_id": r["zone_id"],
+                        "device_id": r["device_id"],
+                        "params": params,
+                    },
+                })
+                if r["resolved_sim_ts"]:
+                    entries.append({
+                        "key": f"event_resolved:{r['event_id']}",
+                        "sim_ts": r["resolved_sim_ts"],
+                        "source": "event",
+                        "detail": {
+                            "event_id": r["event_id"],
+                            "action": "resolved",
+                            "type": r["type"],
+                            "zone_id": r["zone_id"],
+                            "resolved_by": r["resolved_by"],
+                        },
+                    })
+
+            # 4. attacks_injected
+            cur = conn.execute(
+                "SELECT attack_id, capability, target_device_id, target_zone_id, params_json, start_sim_time, end_sim_time, description "
+                "FROM attacks_injected ORDER BY start_sim_time DESC LIMIT ?",
+                (limit,),
+            )
+            for r in cur.fetchall():
+                try:
+                    params = json.loads(r["params_json"]) if r["params_json"] else {}
+                except Exception:
+                    params = {}
+                entries.append({
+                    "key": f"attack_inject:{r['attack_id']}",
+                    "sim_ts": r["start_sim_time"],
+                    "source": "attack",
+                    "detail": {
+                        "attack_id": r["attack_id"],
+                        "action": "inject",
+                        "capability": r["capability"],
+                        "target_device_id": r["target_device_id"],
+                        "target_zone_id": r["target_zone_id"],
+                        "params": params,
+                        "description": r["description"],
+                    },
+                })
+                if r["end_sim_time"]:
+                    entries.append({
+                        "key": f"attack_clear:{r['attack_id']}",
+                        "sim_ts": r["end_sim_time"],
+                        "source": "attack",
+                        "detail": {
+                            "attack_id": r["attack_id"],
+                            "action": "clear",
+                            "capability": r["capability"],
+                            "target_device_id": r["target_device_id"],
+                            "target_zone_id": r["target_zone_id"],
+                        },
+                    })
+
+            # Sort descending to find the top latest limit entries
+            entries.sort(key=lambda x: x["sim_ts"], reverse=True)
+            latest_slice = entries[:limit]
+            # Return them sorted ascending
+            latest_slice.sort(key=lambda x: x["sim_ts"])
+            return latest_slice
+    finally:
+        conn.close()
 
 
 def build_red_team_app(sim: CitySimulator, token: str, streamer: Optional[Any] = None) -> Starlette:
@@ -305,132 +589,29 @@ def build_red_team_app(sim: CitySimulator, token: str, streamer: Optional[Any] =
 
     async def api_journal(request: Request) -> JSONResponse:
         since_sim_ts = request.query_params.get("since_sim_ts")
+        if since_sim_ts:
+            if not _validate_rfc3339(since_sim_ts):
+                return JSONResponse(
+                    {
+                        "status": "error",
+                        "code": "INVALID_ARGUMENT",
+                        "message": f"Invalid RFC 3339 timestamp format for 'since_sim_ts': {since_sim_ts}",
+                    },
+                    status_code=400,
+                )
+
         raw_limit = request.query_params.get("limit", "100")
         try:
             limit = min(1000, max(1, int(raw_limit)))
         except ValueError:
             limit = 100
 
-        # Read directly using an isolated read-only connection
+        # Read directly using an isolated read-only connection in a thread pool
         db_path = os.path.abspath(sim.ledger.db_path)
         if not os.path.exists(db_path):
             return JSONResponse({"status": "ok", "count": 0, "journal": []})
 
-        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
-        conn.row_factory = sqlite3.Row
-        try:
-            entries: List[Dict[str, Any]] = []
-
-            # 1. commands_log: caller, tool, args, executed, refused_code
-            cur = conn.execute("SELECT sim_ts, caller, tool, args_json, executed, refused_code FROM commands_log")
-            for r in cur.fetchall():
-                try:
-                    args = json.loads(r["args_json"]) if r["args_json"] else {}
-                except Exception:
-                    args = {}
-                entries.append({
-                    "sim_ts": r["sim_ts"],
-                    "source": "command",
-                    "detail": {
-                        "caller": r["caller"],
-                        "tool": r["tool"],
-                        "args": args,
-                        "executed": bool(r["executed"]),
-                        "refused_code": r["refused_code"],
-                    },
-                })
-
-            # 2. containment_log
-            cur = conn.execute("SELECT sim_ts, caller, tool, target, from_status, to_status FROM containment_log")
-            for r in cur.fetchall():
-                entries.append({
-                    "sim_ts": r["sim_ts"],
-                    "source": "containment",
-                    "detail": {
-                        "caller": r["caller"],
-                        "tool": r["tool"],
-                        "target": r["target"],
-                        "from_status": r["from_status"],
-                        "to_status": r["to_status"],
-                    },
-                })
-
-            # 3. physical_events: start and resolution as separate entries
-            cur = conn.execute("SELECT event_id, type, zone_id, device_id, params_json, start_sim_ts, resolved_sim_ts, resolved_by FROM physical_events")
-            for r in cur.fetchall():
-                try:
-                    params = json.loads(r["params_json"]) if r["params_json"] else {}
-                except Exception:
-                    params = {}
-                entries.append({
-                    "sim_ts": r["start_sim_ts"],
-                    "source": "event",
-                    "detail": {
-                        "event_id": r["event_id"],
-                        "action": "start",
-                        "type": r["type"],
-                        "zone_id": r["zone_id"],
-                        "device_id": r["device_id"],
-                        "params": params,
-                    },
-                })
-                if r["resolved_sim_ts"]:
-                    entries.append({
-                        "sim_ts": r["resolved_sim_ts"],
-                        "source": "event",
-                        "detail": {
-                            "event_id": r["event_id"],
-                            "action": "resolved",
-                            "type": r["type"],
-                            "zone_id": r["zone_id"],
-                            "resolved_by": r["resolved_by"],
-                        },
-                    })
-
-            # 4. attacks_injected: inject and clear as separate entries
-            cur = conn.execute("SELECT attack_id, capability, target_device_id, target_zone_id, params_json, start_sim_time, end_sim_time, description FROM attacks_injected")
-            for r in cur.fetchall():
-                try:
-                    params = json.loads(r["params_json"]) if r["params_json"] else {}
-                except Exception:
-                    params = {}
-                entries.append({
-                    "sim_ts": r["start_sim_time"],
-                    "source": "attack",
-                    "detail": {
-                        "attack_id": r["attack_id"],
-                        "action": "inject",
-                        "capability": r["capability"],
-                        "target_device_id": r["target_device_id"],
-                        "target_zone_id": r["target_zone_id"],
-                        "params": params,
-                        "description": r["description"],
-                    },
-                })
-                if r["end_sim_time"]:
-                    entries.append({
-                        "sim_ts": r["end_sim_time"],
-                        "source": "attack",
-                        "detail": {
-                            "attack_id": r["attack_id"],
-                            "action": "clear",
-                            "capability": r["capability"],
-                            "target_device_id": r["target_device_id"],
-                            "target_zone_id": r["target_zone_id"],
-                        },
-                    })
-        finally:
-            conn.close()
-
-        # Filter by since_sim_ts if provided
-        if since_sim_ts:
-            entries = [e for e in entries if e["sim_ts"] >= since_sim_ts]
-
-        # Sort by sim_ts ascending
-        entries.sort(key=lambda x: x["sim_ts"])
-
-        # Limit
-        truncated_entries = entries[:limit]
+        truncated_entries = await asyncio.to_thread(_query_journal_sync, db_path, since_sim_ts, limit)
 
         return JSONResponse({
             "status": "ok",
