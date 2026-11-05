@@ -331,7 +331,7 @@ class KafkaStreamer:
 
         # 2.e: Delay mode: hold frames for delay_ticks and release later
         if is_delay:
-            delay_ticks = min(600, max(1, int(raw_reading.get("_delay_ticks", 20))))
+            delay_ticks = min(600, max(1, int(raw_reading.get("_delay_ticks", 50))))
             queue = self._delay_buffers[dev_id]
 
             # Decrement ticks for all existing items and pick the oldest due frame if ready

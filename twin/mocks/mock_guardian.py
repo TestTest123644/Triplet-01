@@ -91,6 +91,10 @@ class MockGuardian:
         self.rolled_back_readings: List[str] = []
 
         # Tracking state for Guardian rules
+        self.last_device_reading_id: Dict[str, str] = {}
+        self.device_ts_history: Dict[str, collections.deque[float]] = collections.defaultdict(
+            lambda: collections.deque(maxlen=20)
+        )
         self.sig_failures: Dict[str, List[float]] = collections.defaultdict(list)
         self.replay_delay_events: Dict[str, List[float]] = collections.defaultdict(list)
         self.seen_reading_ids: collections.OrderedDict[str, None] = collections.OrderedDict()
@@ -195,6 +199,9 @@ class MockGuardian:
 
         sim_sec = _parse_sim_seconds(sim_ts) if sim_ts else time.time()
 
+        if device_id and reading_id:
+            self.last_device_reading_id[device_id] = reading_id
+
         # Once a device is contained (isolated or quarantined), stop issuing new containment actions/rollbacks for it
         if device_id in self.quarantined_devices or device_id in self.isolated_devices:
             return {
@@ -207,9 +214,30 @@ class MockGuardian:
         if sim_sec > self.newest_stream_sim_sec:
             self.newest_stream_sim_sec = sim_sec
 
-        # 1. Late-frame rule: frame ts is > 2 sim-s older than newest stream ts -> flag late; 3 in 10 sim-s -> isolate
-        if self.newest_stream_sim_sec - sim_sec > 2.0:
-            window = [t for t in self.late_events[device_id] if sim_sec - t <= 10.0]
+        # Estimate device's ts_step from recent frames (ts span over last 20 frames / 19)
+        def _calc_step(h: collections.deque[float]) -> float:
+            if len(h) >= 20:
+                return (h[-1] - h[0]) / 19.0
+            if len(h) >= 2 and h[-1] > h[0]:
+                return (h[-1] - h[0]) / (len(h) - 1)
+            return 0.0
+
+        ts_hist = self.device_ts_history[device_id]
+        ts_step = _calc_step(ts_hist)
+        if ts_step <= 0.0:
+            other_steps = [_calc_step(h) for h in self.device_ts_history.values()]
+            valid = [s for s in other_steps if s > 0.0]
+            if valid:
+                ts_step = statistics.median(valid)
+            else:
+                ts_step = 0.0
+
+        late_threshold = max(2.0, 5.0 * ts_step)
+        late_window = max(10.0, 5.0 * late_threshold)
+
+        # 1. Late-frame rule: frame ts is > late_threshold older than newest stream ts -> flag late; 3 in late_window -> isolate
+        if (self.newest_stream_sim_sec - sim_sec) > late_threshold:
+            window = [t for t in self.late_events[device_id] if sim_sec - t <= late_window]
             window.append(sim_sec)
             self.late_events[device_id] = window
 
@@ -219,13 +247,15 @@ class MockGuardian:
                 if reading_id:
                     self.rolled_back_readings.append(reading_id)
                     await self._safe_call_tool("rollback_reading", {"reading_id": reading_id})
-                self._log_event(sim_ts, "isolate_device", {"device_id": device_id, "reason": "3 late frames (>2s old) within 10 sim-s"})
+                self._log_event(sim_ts, "isolate_device", {"device_id": device_id, "reason": f"3 late frames (>{late_threshold:.1f}s old) within {late_window:.1f} sim-s"})
                 return {"action": "late_frame_detected", "device_id": device_id, "reading_id": reading_id, "status": "isolated"}
 
             if reading_id:
                 self.rolled_back_readings.append(reading_id)
                 await self._safe_call_tool("rollback_reading", {"reading_id": reading_id})
             return {"action": "late_frame_detected", "device_id": device_id, "reading_id": reading_id, "status": "flagged"}
+
+        ts_hist.append(sim_sec)
 
         # 2. Unknown device_id (rogue device detection: only explicit null from get_device_key)
         is_known, pub_key = await self.get_public_key(device_id)
@@ -318,9 +348,10 @@ class MockGuardian:
                                 "isolate_device",
                                 {"device_id": outlier_id}
                             )
-                            if reading_id:
-                                self.rolled_back_readings.append(reading_id)
-                                await self._safe_call_tool("rollback_reading", {"reading_id": reading_id})
+                            outlier_reading_id = self.last_device_reading_id.get(outlier_id)
+                            if outlier_reading_id:
+                                self.rolled_back_readings.append(outlier_reading_id)
+                                await self._safe_call_tool("rollback_reading", {"reading_id": outlier_reading_id})
                             self._log_event(sim_ts, "isolate_device", {"device_id": outlier_id, "reason": "paired water divergence > 2.0m for 20 readings"})
                         self.water_divergence_counts[zone_id] = 0
                 else:

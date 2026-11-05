@@ -1132,7 +1132,7 @@ class CitySimulator:
             replay_reading = False
             delay_reading = False
             replay_offset = 10
-            delay_ticks = 20
+            delay_ticks = 50
             applied_link_mode: Optional[str] = None
 
             # 1.c: Fixed adversary execution order per tick
@@ -1174,7 +1174,7 @@ class CitySimulator:
                         replay_offset = int(params.get("replay_offset", 10))
                     elif applied_link_mode == "delay":
                         delay_reading = True
-                        delay_ticks = min(600, max(1, int(params.get("delay_ticks", 20))))
+                        delay_ticks = min(600, max(1, int(params.get("delay_ticks", 50))))
 
             # 1.a: Clamp every broadcast value into [WIRE_VALUE_MIN, WIRE_VALUE_MAX]
             clamped_val = max(WIRE_VALUE_MIN, min(WIRE_VALUE_MAX, float(broadcast_val)))

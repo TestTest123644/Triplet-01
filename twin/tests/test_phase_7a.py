@@ -600,6 +600,16 @@ def test_9c_fake_flood_paired_water(ephemeral_twin):
     assert len(valve_cmds) == 0, f"Expected 0 set_valve commands, found {valve_cmds}"
     assert len(dispatch_cmds) == 0, f"Expected 0 dispatch commands, found {dispatch_cmds}"
 
+    # Every rollback target must belong to the anomalous device z2-wl1
+    rollback_containments = [c for c in containments if c["detail"]["tool"] == "rollback_reading"]
+    assert len(rollback_containments) > 0, "Expected at least 1 rollback_reading containment"
+    for r in rollback_containments:
+        rid = r["detail"]["target"]
+        assert rid.startswith("r-z2-wl1-"), f"Expected rollback reading to start with 'r-z2-wl1-', got {rid}"
+    assert len(guardian.rolled_back_readings) > 0, "Expected at least 1 guardian rolled back reading"
+    for rid in guardian.rolled_back_readings:
+        assert rid.startswith("r-z2-wl1-"), f"Expected guardian rolled_back_readings to start with 'r-z2-wl1-', got {rid}"
+
 
 # ==============================================================================
 # 9d: Replay and delay on z3-tc1
@@ -629,8 +639,8 @@ def test_9d_replay_and_delay_containment(tmp_path):
     assert guardian1.isolated_devices == ["z3-tc1"], f"Expected ['z3-tc1'] isolated, got {guardian1.isolated_devices}"
     assert len(guardian1.rolled_back_readings) <= 5, f"Expected <= 5 rollbacks, got {len(guardian1.rolled_back_readings)}"
 
-    # Part 2: Delay
-    db2 = str(tmp_path / "delay_test.db")
+    # Part 2: Default Delay at SIM_SPEED 1 (no delay_ticks param, attack never cleared)
+    db2 = str(tmp_path / "delay_test_speed1.db")
     sim2 = CitySimulator(seed=602, ledger=GroundTruthLedger(db_path=db2), sim_speed=1.0)
     qs2 = QueueSource()
     streamer2 = KafkaStreamer(mock_mode=True)
@@ -638,19 +648,44 @@ def test_9d_replay_and_delay_containment(tmp_path):
     with running_mcp_server(sim2) as s_info2:
         guardian2 = MockGuardian(reading_source=qs2, mcp_url=s_info2["mcp_url"])
 
-        async def run_delay():
+        async def run_delay_speed1():
             await guardian2.mcp.connect()
             for _ in range(10):
                 await stream_and_process_tick(sim2, streamer2, qs2, guardian2)
-            sim2.inject_attack(capability="link", target_device_id="z3-tc1", params={"link_mode": "delay", "delay_ticks": 25})
-            for _ in range(35):
+            # Default delay (no delay_ticks param) -> default 50 ticks
+            sim2.inject_attack(capability="link", target_device_id="z3-tc1", params={"link_mode": "delay"})
+            for _ in range(80):
                 await stream_and_process_tick(sim2, streamer2, qs2, guardian2)
             await guardian2.mcp.close()
 
-        asyncio.run(run_delay())
+        asyncio.run(run_delay_speed1())
 
     assert guardian2.isolated_devices == ["z3-tc1"], f"Expected ['z3-tc1'] isolated, got {guardian2.isolated_devices}"
     assert len(guardian2.rolled_back_readings) <= 5, f"Expected <= 5 rollbacks, got {len(guardian2.rolled_back_readings)}"
+
+    # Part 3: Default Delay at SIM_SPEED 60 (no delay_ticks param, attack never cleared)
+    db3 = str(tmp_path / "delay_test_speed60.db")
+    sim3 = CitySimulator(seed=603, ledger=GroundTruthLedger(db_path=db3), sim_speed=60.0)
+    qs3 = QueueSource()
+    streamer3 = KafkaStreamer(mock_mode=True)
+
+    with running_mcp_server(sim3) as s_info3:
+        guardian3 = MockGuardian(reading_source=qs3, mcp_url=s_info3["mcp_url"])
+
+        async def run_delay_speed60():
+            await guardian3.mcp.connect()
+            for _ in range(10):
+                await stream_and_process_tick(sim3, streamer3, qs3, guardian3)
+            # Default delay (no delay_ticks param) -> default 50 ticks
+            sim3.inject_attack(capability="link", target_device_id="z3-tc1", params={"link_mode": "delay"})
+            for _ in range(80):
+                await stream_and_process_tick(sim3, streamer3, qs3, guardian3)
+            await guardian3.mcp.close()
+
+        asyncio.run(run_delay_speed60())
+
+    assert guardian3.isolated_devices == ["z3-tc1"], f"Expected ['z3-tc1'] isolated, got {guardian3.isolated_devices}"
+    assert len(guardian3.rolled_back_readings) <= 5, f"Expected <= 5 rollbacks, got {len(guardian3.rolled_back_readings)}"
 
 
 # ==============================================================================
@@ -824,6 +859,70 @@ def test_9g_incident_engine_hysteresis_and_resolution(tmp_path):
     assert ev_fire in res_map and res_map[ev_fire].startswith("dispatch:"), f"Fire event resolution missing: {res_map}"
     assert ev_grid in res_map and "switch_grid" in res_map[ev_grid], f"Grid event resolution missing: {res_map}"
     assert ev_acc in res_map and res_map[ev_acc].startswith("dispatch:"), f"Accident event resolution missing: {res_map}"
+
+
+# ==============================================================================
+# 9h: Clean stream skew tolerance at SIM_SPEED 60
+# ==============================================================================
+def test_9h_clean_stream_skew_tolerance(tmp_path):
+    """Clean stream at SIM_SPEED 60, where each tick's frames arrive interleaved with up to 3 ticks of cross-device skew, produces zero late flags."""
+    db = str(tmp_path / "skew_test.db")
+    sim = CitySimulator(seed=901, ledger=GroundTruthLedger(db_path=db), sim_speed=60.0)
+    qs = QueueSource()
+    streamer = KafkaStreamer(mock_mode=True)
+
+    with running_mcp_server(sim) as s_info:
+        guardian = MockGuardian(reading_source=qs, mcp_url=s_info["mcp_url"])
+
+        async def run():
+            await guardian.mcp.connect()
+
+            import random
+            skew_rng = random.Random(42)
+            # Assign persistent partition skew between 0 and 3 ticks per device
+            device_skew = {d: skew_rng.randint(0, 3) for d in sim.devices}
+            skew_queue: List[Tuple[int, bytes]] = []
+
+            for current_tick in range(50):
+                # Tick simulation and buffer with device partition skew
+                for r in sim.tick():
+                    dev_id = r["device_id"]
+                    dev_key = sim.signing_key_for(dev_id)
+                    res = streamer.stream_reading(r, dev_key)
+                    if res:
+                        skew_ticks = device_skew[dev_id]
+                        skew_queue.append((current_tick + skew_ticks, res[1]))
+
+                ready = [item for item in skew_queue if item[0] <= current_tick]
+                skew_queue[:] = [item for item in skew_queue if item[0] > current_tick]
+                skew_rng.shuffle(ready)
+                for _, b in ready:
+                    qs.put(b)
+
+                while True:
+                    item = qs.get_reading(timeout=0.001)
+                    if not item:
+                        break
+                    await guardian.process_reading_async(item)
+
+            # Flush remaining queued frames
+            skew_queue.sort(key=lambda x: x[0])
+            for _, b in skew_queue:
+                qs.put(b)
+            while True:
+                item = qs.get_reading(timeout=0.001)
+                if not item:
+                    break
+                await guardian.process_reading_async(item)
+
+            await guardian.mcp.close()
+
+        asyncio.run(run())
+
+    late_count = sum(len(v) for v in guardian.late_events.values())
+    assert late_count == 0, f"Expected 0 late flags, got {late_count} ({guardian.late_events})"
+    assert len(guardian.isolated_devices) == 0, f"Expected 0 isolated devices, got {guardian.isolated_devices}"
+    assert len(guardian.quarantined_devices) == 0, f"Expected 0 quarantined devices, got {guardian.quarantined_devices}"
 
 
 # ==============================================================================
