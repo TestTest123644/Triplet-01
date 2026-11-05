@@ -12,6 +12,7 @@ import json
 import logging
 import math
 import os
+import re
 import time
 from typing import Any, Dict, List, Literal, Optional, Tuple, Union
 from pydantic import BaseModel, Field, ValidationError, field_validator
@@ -84,6 +85,23 @@ def serialize_reading(reading: TwinSensorReading) -> bytes:
     return json_str.encode("utf-8")
 
 
+def tamper_value_bytes(serialized_bytes: bytes) -> bytes:
+    """Tamper one digit of 'value' field in serialized bytes while keeping JSON valid and identical length."""
+    m = re.search(rb'"value":(-?[0-9]+(?:\.[0-9]+)?)', serialized_bytes)
+    if not m:
+        return serialized_bytes
+    val_start, val_end = m.span(1)
+    val_bytes = bytearray(serialized_bytes[val_start:val_end])
+    # Find last digit in value span and change it (digit + 1 mod 10)
+    for i in range(len(val_bytes) - 1, -1, -1):
+        b = val_bytes[i]
+        if ord(b"0") <= b <= ord(b"9"):
+            new_digit = ord(b"0") + ((b - ord(b"0") + 1) % 10)
+            val_bytes[i] = new_digit
+            break
+    return serialized_bytes[:val_start] + bytes(val_bytes) + serialized_bytes[val_end:]
+
+
 class KafkaStreamer:
     """Outbound Kafka producer streaming signed telemetry envelopes under 300 bytes."""
 
@@ -115,6 +133,15 @@ class KafkaStreamer:
 
         self._oversize_alerted_devices: set[str] = set()
         self._rate_history: collections.deque[Tuple[float, int]] = collections.deque(maxlen=1000)
+
+        # 2.d: Frame history for replay (bounded at 50 frames per device)
+        self._frame_history: Dict[str, collections.deque[bytes]] = collections.defaultdict(
+            lambda: collections.deque(maxlen=50)
+        )
+        # 2.e: Delay buffers for held frames (bounded at 600 frames per device)
+        self._delay_buffers: Dict[str, collections.deque[Tuple[int, TwinSensorReading, bytes]]] = (
+            collections.defaultdict(lambda: collections.deque(maxlen=600))
+        )
 
         # Operational health state tracking
         self._error_history: collections.deque[float] = collections.deque(maxlen=1000)
@@ -207,18 +234,92 @@ class KafkaStreamer:
             raise ValueError(f"Invalid reading payload: {e}") from e
         return reading
 
+    def _emit_to_wire(self, key_bytes: bytes, payload_bytes: bytes) -> None:
+        """Emit payload to real Kafka producer or fallback sink."""
+        if self.producer is not None:
+            try:
+                self.producer.produce(
+                    topic=self.topic,
+                    key=key_bytes,
+                    value=payload_bytes,
+                    on_delivery=self._on_delivery,
+                )
+                self.produced += 1
+                self.producer.poll(0)
+            except BufferError:
+                self._record_error()
+                self.producer.poll(0)
+                try:
+                    self.producer.produce(
+                        topic=self.topic,
+                        key=key_bytes,
+                        value=payload_bytes,
+                        on_delivery=self._on_delivery,
+                    )
+                    self.produced += 1
+                    self.producer.poll(0)
+                except Exception:
+                    self._sink_payload(payload_bytes)
+            except Exception:
+                self._record_error()
+                self._sink_payload(payload_bytes)
+        else:
+            self._sink_payload(payload_bytes)
+
+        self.sent_count += 1
+        now = time.monotonic()
+        if not self._rate_history or now - self._rate_history[-1][0] >= 0.2:
+            self._rate_history.append((now, self.produced + self.sunk))
+
+    def flush_delayed(
+        self, device_id: Optional[str] = None
+    ) -> List[Tuple[TwinSensorReading, bytes]]:
+        """Flush held delayed frames in FIFO order to the wire. Bounded."""
+        flushed: List[Tuple[TwinSensorReading, bytes]] = []
+        dev_ids = [device_id] if device_id else list(self._delay_buffers.keys())
+        for did in dev_ids:
+            q = self._delay_buffers.get(did)
+            if not q:
+                continue
+            while len(q) > 0:
+                _, reading, raw_bytes = q.popleft()
+                self._emit_to_wire(did.encode("utf-8"), raw_bytes)
+                flushed.append((reading, raw_bytes))
+        return flushed
+
     def stream_reading(
         self, raw_reading: Dict[str, Any], private_key_b64: str
     ) -> Optional[Tuple[TwinSensorReading, bytes]]:
         """Validate, sign, serialize, verify size limit (<300 bytes), and emit to Kafka."""
+        dev_id = str(raw_reading.get("device_id", ""))
+        link_mode = raw_reading.get("_link_mode")
+        is_replay = bool(raw_reading.get("_replay") or link_mode == "replay")
+        is_corrupt_bytes = bool(raw_reading.get("_corrupt_bytes") or link_mode == "corrupt_bytes")
+        is_delay = bool(raw_reading.get("_delay") or link_mode == "delay")
+
+        # 2.d: Replay mode: re-emit the exact bytes previously sent for that device
+        if is_replay:
+            offset = int(raw_reading.get("_replay_offset", 10))
+            history = self._frame_history[dev_id]
+            if len(history) > 0:
+                idx = max(0, len(history) - 1 - offset)
+                replayed_bytes = history[idx]
+                replayed_reading = TwinSensorReading.model_validate_json(replayed_bytes)
+                self._emit_to_wire(dev_id.encode("utf-8"), replayed_bytes)
+                return replayed_reading, replayed_bytes
+
+        # Standard sign and build
         reading = self.sign_and_build_reading(raw_reading, private_key_b64)
         serialized_bytes = serialize_reading(reading)
+
+        # 2.c: Corrupt bytes mode: tamper one digit of serialized value in-transit
+        if is_corrupt_bytes:
+            serialized_bytes = tamper_value_bytes(serialized_bytes)
 
         # Enforce the strict 300-byte constraint
         payload_size = len(serialized_bytes)
         if payload_size > self.MAX_PAYLOAD_BYTES:
             self.rejected_oversize += 1
-            dev_id = reading.device_id
             if dev_id not in self._oversize_alerted_devices:
                 self._oversize_alerted_devices.add(dev_id)
                 logger.warning(
@@ -227,42 +328,37 @@ class KafkaStreamer:
                 )
             return None
 
-        if self.producer is not None:
-            try:
-                self.producer.produce(
-                    topic=self.topic,
-                    key=reading.device_id.encode("utf-8"),
-                    value=serialized_bytes,
-                    on_delivery=self._on_delivery,
-                )
-                self.produced += 1
-                # Poll to serve delivery callbacks without blocking
-                self.producer.poll(0)
-            except BufferError:
-                self._record_error()
-                self.producer.poll(0)
-                try:
-                    self.producer.produce(
-                        topic=self.topic,
-                        key=reading.device_id.encode("utf-8"),
-                        value=serialized_bytes,
-                        on_delivery=self._on_delivery,
-                    )
-                    self.produced += 1
-                    self.producer.poll(0)
-                except Exception:
-                    self._sink_payload(serialized_bytes)
-            except Exception:
-                self._record_error()
-                self._sink_payload(serialized_bytes)
-        else:
-            self._sink_payload(serialized_bytes)
+        # 2.e: Delay mode: hold frames for delay_ticks and release later
+        if is_delay:
+            delay_ticks = min(600, max(1, int(raw_reading.get("_delay_ticks", 20))))
+            queue = self._delay_buffers[dev_id]
 
-        self.sent_count += 1
-        now = time.monotonic()
-        if not self._rate_history or now - self._rate_history[-1][0] >= 0.2:
-            self._rate_history.append((now, self.produced + self.sunk))
+            # Decrement ticks for all existing items and pick the oldest due frame if ready
+            due_frame = None
+            if len(queue) > 0:
+                new_q: collections.deque[Tuple[int, TwinSensorReading, bytes]] = collections.deque(maxlen=600)
+                for ticks_left, r_model, r_bytes in queue:
+                    t = ticks_left - 1
+                    if t <= 0 and due_frame is None:
+                        due_frame = (r_model, r_bytes)
+                    else:
+                        new_q.append((max(0, t), r_model, r_bytes))
+                self._delay_buffers[dev_id] = new_q
 
+            # Hold current frame
+            self._delay_buffers[dev_id].append((delay_ticks, reading, serialized_bytes))
+            self._frame_history[dev_id].append(serialized_bytes)
+
+            if due_frame is not None:
+                due_reading, due_bytes = due_frame
+                self._emit_to_wire(dev_id.encode("utf-8"), due_bytes)
+                return due_reading, due_bytes
+            return None
+
+        # Store in history for future replay
+        self._frame_history[dev_id].append(serialized_bytes)
+
+        self._emit_to_wire(reading.device_id.encode("utf-8"), serialized_bytes)
         return reading, serialized_bytes
 
     def get_kafka_state(self) -> str:

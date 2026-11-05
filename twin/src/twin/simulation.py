@@ -183,8 +183,24 @@ class DeviceState:
     last_broadcast_reading: Optional[Dict[str, Any]] = None
     actuator_state: Dict[str, Any] = field(default_factory=dict)
     reported_actuator_state: Dict[str, Any] = field(default_factory=dict)
-    active_attack: Optional[Dict[str, Any]] = None
+    active_attacks: List[Dict[str, Any]] = field(default_factory=list)
     camera_variety: float = 1.0
+
+    @property
+    def active_attack(self) -> Optional[Dict[str, Any]]:
+        return self.active_attacks[0] if self.active_attacks else None
+
+    @active_attack.setter
+    def active_attack(self, val: Optional[Dict[str, Any]]) -> None:
+        if val is None:
+            self.active_attacks.clear()
+        else:
+            self.active_attacks = [val]
+
+
+class AttackConflictError(Exception):
+    """Raised when an adversary capability is already active on a device or its zone."""
+    pass
 
 
 class CitySimulator:
@@ -584,10 +600,12 @@ class CitySimulator:
         self.ledger.resolve_physical_event(event_id, now_ts, "cleared")
         return True
 
-    def clear_all_events(self) -> None:
-        """Clear all active physical incidents."""
+    def clear_all_events(self) -> int:
+        """Clear all active physical incidents. Returns number cleared."""
+        count = len(self.active_events)
         for ev_id in list(self.active_events.keys()):
             self.clear_event(ev_id)
+        return count
 
     def get_active_events(self) -> List[Dict[str, Any]]:
         """Return list of active physical incidents (NEVER exposed to MCP)."""
@@ -739,7 +757,7 @@ class CitySimulator:
                     if ev.blackout:
                         target_power *= 0.10
                     else:
-                        target_power *= 1.35
+                        target_power = max(target_power * 1.35, 118.0)
                     break
 
             tau = 120.0
@@ -877,9 +895,20 @@ class CitySimulator:
         if capability not in valid_caps:
             raise ValueError(f"Invalid adversary capability: {capability}. Must be one of {valid_caps}")
 
+        # 1.d: Target validation -> 400 INVALID_ATTACK
+        if capability != "rogue":
+            if not target_device_id and not target_zone_id:
+                raise ValueError("Non-rogue capability requires either target_device_id or target_zone_id")
+            if target_device_id and target_zone_id:
+                raise ValueError("Cannot specify both target_device_id and target_zone_id")
+            if target_device_id and target_device_id not in self.devices:
+                raise ValueError(f"Target device '{target_device_id}' does not exist")
+            if target_zone_id and target_zone_id not in {z["zone_id"] for z in self.ZONES}:
+                raise ValueError(f"Unknown zone '{target_zone_id}'")
+
         params_dict = dict(params or {})
 
-        # 1.b: Reject non-finite numeric params (NaN/inf) with ValueError
+        # Reject non-finite numeric params (NaN/inf) with ValueError
         def _check_finite(obj: Any) -> None:
             if isinstance(obj, float):
                 if not math.isfinite(obj):
@@ -892,6 +921,21 @@ class CitySimulator:
                     _check_finite(v)
 
         _check_finite(params_dict)
+
+        # 1.a: Conflict checking -> 409 ATTACK_CONFLICT (at most one active attack per (device, capability))
+        if target_device_id and target_device_id in self.devices:
+            dev = self.devices[target_device_id]
+            if any(a.get("capability") == capability for a in dev.active_attacks):
+                raise AttackConflictError(
+                    f"Device '{target_device_id}' already has an active attack with capability '{capability}'"
+                )
+        elif target_zone_id:
+            for d in self.devices.values():
+                if d.zone_id == target_zone_id:
+                    if any(a.get("capability") == capability for a in d.active_attacks):
+                        raise AttackConflictError(
+                            f"Device '{d.device_id}' in zone '{target_zone_id}' already has an active attack with capability '{capability}'"
+                        )
 
         # 2.a, 2.c: Handle rogue device ID validation and throwaway Ed25519 keypair
         if capability == "rogue":
@@ -946,11 +990,11 @@ class CitySimulator:
         if capability == "rogue":
             self.rogue_attacks[attack_id] = attack_info
         elif target_device_id and target_device_id in self.devices:
-            self.devices[target_device_id].active_attack = attack_info
+            self.devices[target_device_id].active_attacks.append(attack_info)
         elif target_zone_id:
             for d in self.devices.values():
                 if d.zone_id == target_zone_id:
-                    d.active_attack = attack_info
+                    d.active_attacks.append(attack_info)
 
         return attack_id
 
@@ -975,14 +1019,20 @@ class CitySimulator:
         target_zone = attack_info.get("target_zone_id")
 
         if target_dev and target_dev in self.devices:
-            if self.devices[target_dev].active_attack and self.devices[target_dev].active_attack.get("attack_id") == attack_id:
-                self.devices[target_dev].active_attack = None
-                self.devices[target_dev].drift_offset = 0.0
+            d = self.devices[target_dev]
+            d.active_attacks = [a for a in d.active_attacks if a.get("attack_id") != attack_id]
+            if not any(a.get("capability") == "sensor_fault" for a in d.active_attacks):
+                d.drift_offset = 0.0
+            if hasattr(self, "streamer") and self.streamer is not None:
+                self.streamer.flush_delayed(target_dev)
         elif target_zone:
             for d in self.devices.values():
-                if d.zone_id == target_zone and d.active_attack and d.active_attack.get("attack_id") == attack_id:
-                    d.active_attack = None
-                    d.drift_offset = 0.0
+                if d.zone_id == target_zone:
+                    d.active_attacks = [a for a in d.active_attacks if a.get("attack_id") != attack_id]
+                    if not any(a.get("capability") == "sensor_fault" for a in d.active_attacks):
+                        d.drift_offset = 0.0
+                    if hasattr(self, "streamer") and self.streamer is not None:
+                        self.streamer.flush_delayed(d.device_id)
 
         # Update end time in SQLite ledger
         self.ledger.record_attack(
@@ -1013,8 +1063,10 @@ class CitySimulator:
         self.blocked_rogue_ids.clear()
         self.blocked_rogue_frames.clear()
         for d in self.devices.values():
-            d.active_attack = None
+            d.active_attacks.clear()
             d.drift_offset = 0.0
+        if hasattr(self, "streamer") and self.streamer is not None:
+            self.streamer.flush_delayed()
         self.ledger.deactivate_all_attacks(end_sim_time=self.get_sim_time())
 
     def tick(self) -> List[Dict[str, Any]]:
@@ -1066,27 +1118,27 @@ class CitySimulator:
         for dev, true_val in physics_results:
             reading_id = f"r-{dev.device_id}-{dev.seq}"
             broadcast_val = true_val
-            is_attacked = False
-            attack_type: Optional[str] = None
+            is_attacked = len(dev.active_attacks) > 0
+            caps = [a["capability"] for a in dev.active_attacks]
+            attack_type: Optional[str] = caps[0] if len(caps) == 1 else ("+".join(caps) if caps else None)
+
             corrupt_sig = False
+            corrupt_bytes = False
             drop_reading = False
             replay_reading = False
+            delay_reading = False
+            replay_offset = 10
+            delay_ticks = 20
+            applied_link_mode: Optional[str] = None
 
-            # Dynamic Adversary Capability Processing
-            if dev.active_attack:
-                attack_info = dev.active_attack
-                capability = attack_info.get("capability")
-                params = attack_info.get("params", {})
-                attack_type = capability
-                is_attacked = True
-
-                if capability == "device_physical":
-                    # Sensor perception physically corrupted
-                    broadcast_val = params.get("spoofed_value", round(true_val * 2.5, 2))
-                elif capability == "device_key":
-                    # Attacker holds key, sends arbitrary forged reading
-                    broadcast_val = params.get("spoofed_value", round(true_val + 50.0, 2))
-                elif capability == "sensor_fault":
+            # 1.c: Fixed adversary execution order per tick
+            # 1. Sensor layer: device_physical, sensor_fault
+            for a in dev.active_attacks:
+                cap = a.get("capability")
+                params = a.get("params", {})
+                if cap == "device_physical":
+                    broadcast_val = params.get("spoofed_value", round(broadcast_val * 2.5, 2))
+                elif cap == "sensor_fault":
                     fault_mode = params.get("fault_mode", "drift")
                     if fault_mode == "stuck":
                         broadcast_val = params.get("stuck_value", 42.0)
@@ -1094,24 +1146,37 @@ class CitySimulator:
                         broadcast_val = 0.0
                     else:  # drift
                         dev.drift_offset += params.get("drift_rate", 0.5) * self.clock.step_seconds
-                        broadcast_val = round(true_val + dev.drift_offset, 2)
-                elif capability == "actuator":
-                    # Physical truth reflects non-execution
-                    pass
-                elif capability == "link":
-                    link_mode = params.get("link_mode", "corrupt_bytes")
-                    if link_mode == "drop":
+                        broadcast_val = round(broadcast_val + dev.drift_offset, 2)
+
+            # 2. Key layer: device_key
+            for a in dev.active_attacks:
+                if a.get("capability") == "device_key":
+                    params = a.get("params", {})
+                    broadcast_val = params.get("spoofed_value", round(broadcast_val + 50.0, 2))
+
+            # 3. Link layer: link
+            for a in dev.active_attacks:
+                if a.get("capability") == "link":
+                    params = a.get("params", {})
+                    applied_link_mode = params.get("link_mode", "corrupt_bytes")
+                    if applied_link_mode == "drop":
                         drop_reading = True
-                    elif link_mode == "corrupt_bytes":
+                    elif applied_link_mode == "corrupt_sig":
                         corrupt_sig = True
-                    elif link_mode == "replay" and dev.last_broadcast_reading:
+                    elif applied_link_mode == "corrupt_bytes":
+                        corrupt_bytes = True
+                    elif applied_link_mode == "replay":
                         replay_reading = True
+                        replay_offset = int(params.get("replay_offset", 10))
+                    elif applied_link_mode == "delay":
+                        delay_reading = True
+                        delay_ticks = min(600, max(1, int(params.get("delay_ticks", 20))))
 
             # 1.a: Clamp every broadcast value into [WIRE_VALUE_MIN, WIRE_VALUE_MAX]
             clamped_val = max(WIRE_VALUE_MIN, min(WIRE_VALUE_MAX, float(broadcast_val)))
             if clamped_val != broadcast_val:
-                if is_attacked and dev.active_attack:
-                    atk_id = dev.active_attack.get("attack_id")
+                if is_attacked and dev.active_attacks:
+                    atk_id = dev.active_attacks[0].get("attack_id")
                     if atk_id and atk_id not in self._clamped_attacks:
                         self._clamped_attacks.add(atk_id)
                         logger.warning(
@@ -1137,29 +1202,36 @@ class CitySimulator:
                     attack_type=attack_type,
                     is_attacked=is_attacked,
                     run_id=self.run_id,
+                    link_mode=applied_link_mode,
                 )
             )
 
             if not drop_reading:
-                if replay_reading and dev.last_broadcast_reading:
-                    reading_dict = dict(dev.last_broadcast_reading)
-                    dev.last_broadcast_value = reading_dict["value"]
-                else:
-                    reading_dict = {
-                        "reading_id": reading_id,
-                        "device_id": dev.device_id,
-                        "device_type": dev.device_type,
-                        "ts": sim_time,
-                        "seq": dev.seq,
-                        "value": broadcast_val,
-                        "unit": dev.unit,
-                        "location": dev.zone_id,
-                        "status": dev.status,
-                    }
-                    if corrupt_sig:
-                        reading_dict["_corrupt_sig"] = True
-                    dev.last_broadcast_value = broadcast_val
+                reading_dict = {
+                    "reading_id": reading_id,
+                    "device_id": dev.device_id,
+                    "device_type": dev.device_type,
+                    "ts": sim_time,
+                    "seq": dev.seq,
+                    "value": broadcast_val,
+                    "unit": dev.unit,
+                    "location": dev.zone_id,
+                    "status": dev.status,
+                }
+                if corrupt_sig:
+                    reading_dict["_corrupt_sig"] = True
+                if corrupt_bytes:
+                    reading_dict["_corrupt_bytes"] = True
+                if replay_reading:
+                    reading_dict["_replay"] = True
+                    reading_dict["_replay_offset"] = replay_offset
+                if delay_reading:
+                    reading_dict["_delay"] = True
+                    reading_dict["_delay_ticks"] = delay_ticks
+                if applied_link_mode:
+                    reading_dict["_link_mode"] = applied_link_mode
 
+                dev.last_broadcast_value = broadcast_val
                 broadcast_readings.append(reading_dict)
                 self._add_reading_to_cache(reading_id, reading_dict)
                 dev.last_broadcast_reading = reading_dict
@@ -1545,7 +1617,7 @@ class CitySimulator:
 
         # 7. Execution & Actuator attack
         dev.reported_actuator_state["signal_plan"] = target_state
-        actuator_attack = (dev.active_attack and dev.active_attack.get("capability") == "actuator")
+        actuator_attack = any(a.get("capability") == "actuator" for a in dev.active_attacks)
         if actuator_attack:
             executed = False
             refused_code = "ACTUATOR_ATTACK"
@@ -1662,7 +1734,7 @@ class CitySimulator:
         # 7. Execution & Actuator attack
         dev.reported_actuator_state["valve_position"] = target_state
         dev.reported_actuator_state["valve_ratio"] = ratio
-        actuator_attack = (dev.active_attack and dev.active_attack.get("capability") == "actuator")
+        actuator_attack = any(a.get("capability") == "actuator" for a in dev.active_attacks)
         if actuator_attack:
             executed = False
             refused_code = "ACTUATOR_ATTACK"
@@ -1765,7 +1837,7 @@ class CitySimulator:
 
         # 7. Execution & Actuator attack
         dev.reported_actuator_state["grid_state"] = target_state
-        actuator_attack = (dev.active_attack and dev.active_attack.get("capability") == "actuator")
+        actuator_attack = any(a.get("capability") == "actuator" for a in dev.active_attacks)
         if actuator_attack:
             executed = False
             refused_code = "ACTUATOR_ATTACK"

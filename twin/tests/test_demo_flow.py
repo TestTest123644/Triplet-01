@@ -56,8 +56,16 @@ def presentation_fixture():
         sim = CitySimulator(seed=2026, ledger=ledger)
         set_active_simulator(sim)
         streamer = KafkaStreamer(mock_mode=True)
-        guardian = MockGuardian()
-        brain = MockCityBrain()
+
+        def _call_tool(tool_name: str, args: dict):
+            import twin.mcp_server as srv
+            fn = getattr(srv, tool_name, None)
+            if fn:
+                return fn(**args)
+            raise ValueError(f"Unknown tool: {tool_name}")
+
+        guardian = MockGuardian(call_tool_fn=_call_tool)
+        brain = MockCityBrain(call_tool_fn=_call_tool)
         yield {
             "tmpdir": tmpdir,
             "db_path": db_path,
@@ -144,7 +152,7 @@ def test_full_presentation_walkthrough(presentation_fixture):
     p3_id = sim.inject_attack(
         capability="link",
         target_device_id="z2-wl1",
-        params={"link_mode": "corrupt_bytes"},
+        params={"link_mode": "corrupt_sig"},
         description="Demo: Link Layer Signature Corruption on Harbor Water Sensor",
     )
     p3_readings = sim.tick()
@@ -153,8 +161,9 @@ def test_full_presentation_walkthrough(presentation_fixture):
     p3_dev = sim.devices["z2-wl1"]
     _, p3_bytes = streamer.stream_reading(p3_raw, p3_dev.private_key)
 
-    # Guardian intercepts broken signature and quarantines
-    p3_res = guardian.process_reading(p3_bytes)
+    # Guardian intercepts broken signature and quarantines after 3 failures
+    for _ in range(3):
+        p3_res = guardian.process_reading(p3_bytes)
     assert p3_res["action"] == "signature_verification_failed"
     assert "z2-wl1" in guardian.quarantined_devices
     assert sim.devices["z2-wl1"].status == "quarantined"
@@ -200,7 +209,6 @@ def test_full_presentation_walkthrough(presentation_fixture):
     p6_id = sim.inject_attack(
         capability="actuator",
         target_device_id="z1-wl1",
-        target_zone_id="zone-1",
         params={"suppress_actuation": True},
         description="Demo: Actuator silent command suppression on flood valve",
     )

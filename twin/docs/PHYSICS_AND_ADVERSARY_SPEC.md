@@ -99,7 +99,7 @@ The digital twin models 42 IoT devices across 5 municipal categories:
 - **Actuation Impact (`switch_grid`):**
   - Grid state factors: `grid_a` ($1.0$), `grid_b` ($0.85$), `island` ($0.60$), `shed` ($0.40$), `standby` ($0.20$).
 - **Incident Impact (`grid_overload`):**
-  - Target demand multiplied by $1.35$.
+  - Target demand is set to $\max(P^*(t) \cdot 1.35, 118.0\text{ MW})$, ensuring the overload is visible and exceeds the $114.0\text{ MW}$ threshold at any hour of day or night.
   - If true power exceeds $114.0\text{ MW}$ continuously for 60 simulation seconds, **blackout** triggers: power target drops to $10\%$ of normal target and emergency calls surge ($+4.0$).
 - **Dynamics:** Time constant $\tau = 120\text{ s}$, noise $\sigma = 0.3\sqrt{\Delta t}\text{ MW}$. Steady-state spread $\sigma\sqrt{\tau/2} \approx 2.32\text{ MW}$.
 
@@ -145,7 +145,7 @@ Physical incidents represent real municipal emergencies, distinct from adversary
 | **`rain_storm`** | Zone | Upstream inflow $Q_{\text{in}}$ multiplied by intensity ($1.0 - 5.0$, default $3.0$). | Defaults to `duration_s = 1800` (30 min) when omitted; naturally expires. |
 | **`traffic_accident`** | Device (Camera) | Camera target multiplied by $\times 0.3$ ramped over 60 s; zone $\lambda + 6.0$. | Lasts until resolved by `dispatch` matching `traffic_accident`, `medical_emergency`, or `medical_surge` after 300 s response time (or cleared). |
 | **`fire`** | Zone | AQI target $+150$ ramped over 120 s; zone $\lambda + 8.0$. | Lasts until resolved by `dispatch` matching `fire` after 180 s response time (or cleared). |
-| **`grid_overload`** | Zone (Power) | Power target $\times 1.35$. Continuous load $> 114\text{ MW}$ for 60 s causes blackout (target $\times 0.10$, $\lambda + 4.0$). | Pre-blackout: resolved immediately by `switch_grid` to `grid_b`, `shed`, or `standby`. Post-blackout: resolved by `dispatch("blackout")` after 240 s. Lasts until resolved or cleared. |
+| **`grid_overload`** | Zone (Power) | Power target $\max(P^* \cdot 1.35, 118\text{ MW})$. Continuous load $> 114\text{ MW}$ for 60 s causes blackout (target $\times 0.10$, $\lambda + 4.0$). | Pre-blackout: resolved immediately by `switch_grid` to `grid_b`, `shed`, or `standby`. Post-blackout: resolved by `dispatch("blackout")` after 240 s. Lasts until resolved or cleared. |
 | **`air_hazard`** | Zone | AQI target $+100$, mitigated by `red_restriction` or `all_red` signal plans. | Defaults to `duration_s = 1800` (30 min) when omitted; naturally expires. |
 
 ### Zero-Trust Isolation of Physical Incidents

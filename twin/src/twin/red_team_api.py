@@ -8,10 +8,12 @@ port (default: 8100). Every route is protected with header authentication
 from __future__ import annotations
 
 import hmac
+import json
 import logging
 import os
 import secrets
-from typing import Any, Optional
+import sqlite3
+from typing import Any, Dict, List, Optional
 
 from starlette.applications import Starlette
 from starlette.middleware import Middleware
@@ -19,7 +21,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
-from twin.simulation import CitySimulator
+from twin.simulation import AttackConflictError, CitySimulator
 
 logger = logging.getLogger("twin.red_team_api")
 
@@ -90,6 +92,7 @@ def build_red_team_app(sim: CitySimulator, token: str, streamer: Optional[Any] =
         data = {
             "status": "ok",
             "sim_time": sim.get_sim_time(),
+            "sim_speed": getattr(sim.clock, "sim_speed", 1.0),
             "tick_count": sim.clock.tick_count,
             "total_devices": len(sim.devices),
             "active_attacks_count": len(sim.active_attacks),
@@ -142,6 +145,15 @@ def build_red_team_app(sim: CitySimulator, token: str, streamer: Optional[Any] =
                 "target_device_id": target_device_id,
                 "sim_time": sim.get_sim_time(),
             })
+        except AttackConflictError as e:
+            return JSONResponse(
+                {
+                    "status": "error",
+                    "code": "ATTACK_CONFLICT",
+                    "message": str(e),
+                },
+                status_code=409,
+            )
         except ValueError as e:
             return JSONResponse(
                 {
@@ -291,6 +303,141 @@ def build_red_team_app(sim: CitySimulator, token: str, streamer: Optional[Any] =
             "active_events": sim.get_active_events(),
         })
 
+    async def api_journal(request: Request) -> JSONResponse:
+        since_sim_ts = request.query_params.get("since_sim_ts")
+        raw_limit = request.query_params.get("limit", "100")
+        try:
+            limit = min(1000, max(1, int(raw_limit)))
+        except ValueError:
+            limit = 100
+
+        # Read directly using an isolated read-only connection
+        db_path = os.path.abspath(sim.ledger.db_path)
+        if not os.path.exists(db_path):
+            return JSONResponse({"status": "ok", "count": 0, "journal": []})
+
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        conn.row_factory = sqlite3.Row
+        try:
+            entries: List[Dict[str, Any]] = []
+
+            # 1. commands_log: caller, tool, args, executed, refused_code
+            cur = conn.execute("SELECT sim_ts, caller, tool, args_json, executed, refused_code FROM commands_log")
+            for r in cur.fetchall():
+                try:
+                    args = json.loads(r["args_json"]) if r["args_json"] else {}
+                except Exception:
+                    args = {}
+                entries.append({
+                    "sim_ts": r["sim_ts"],
+                    "source": "command",
+                    "detail": {
+                        "caller": r["caller"],
+                        "tool": r["tool"],
+                        "args": args,
+                        "executed": bool(r["executed"]),
+                        "refused_code": r["refused_code"],
+                    },
+                })
+
+            # 2. containment_log
+            cur = conn.execute("SELECT sim_ts, caller, tool, target, from_status, to_status FROM containment_log")
+            for r in cur.fetchall():
+                entries.append({
+                    "sim_ts": r["sim_ts"],
+                    "source": "containment",
+                    "detail": {
+                        "caller": r["caller"],
+                        "tool": r["tool"],
+                        "target": r["target"],
+                        "from_status": r["from_status"],
+                        "to_status": r["to_status"],
+                    },
+                })
+
+            # 3. physical_events: start and resolution as separate entries
+            cur = conn.execute("SELECT event_id, type, zone_id, device_id, params_json, start_sim_ts, resolved_sim_ts, resolved_by FROM physical_events")
+            for r in cur.fetchall():
+                try:
+                    params = json.loads(r["params_json"]) if r["params_json"] else {}
+                except Exception:
+                    params = {}
+                entries.append({
+                    "sim_ts": r["start_sim_ts"],
+                    "source": "event",
+                    "detail": {
+                        "event_id": r["event_id"],
+                        "action": "start",
+                        "type": r["type"],
+                        "zone_id": r["zone_id"],
+                        "device_id": r["device_id"],
+                        "params": params,
+                    },
+                })
+                if r["resolved_sim_ts"]:
+                    entries.append({
+                        "sim_ts": r["resolved_sim_ts"],
+                        "source": "event",
+                        "detail": {
+                            "event_id": r["event_id"],
+                            "action": "resolved",
+                            "type": r["type"],
+                            "zone_id": r["zone_id"],
+                            "resolved_by": r["resolved_by"],
+                        },
+                    })
+
+            # 4. attacks_injected: inject and clear as separate entries
+            cur = conn.execute("SELECT attack_id, capability, target_device_id, target_zone_id, params_json, start_sim_time, end_sim_time, description FROM attacks_injected")
+            for r in cur.fetchall():
+                try:
+                    params = json.loads(r["params_json"]) if r["params_json"] else {}
+                except Exception:
+                    params = {}
+                entries.append({
+                    "sim_ts": r["start_sim_time"],
+                    "source": "attack",
+                    "detail": {
+                        "attack_id": r["attack_id"],
+                        "action": "inject",
+                        "capability": r["capability"],
+                        "target_device_id": r["target_device_id"],
+                        "target_zone_id": r["target_zone_id"],
+                        "params": params,
+                        "description": r["description"],
+                    },
+                })
+                if r["end_sim_time"]:
+                    entries.append({
+                        "sim_ts": r["end_sim_time"],
+                        "source": "attack",
+                        "detail": {
+                            "attack_id": r["attack_id"],
+                            "action": "clear",
+                            "capability": r["capability"],
+                            "target_device_id": r["target_device_id"],
+                            "target_zone_id": r["target_zone_id"],
+                        },
+                    })
+        finally:
+            conn.close()
+
+        # Filter by since_sim_ts if provided
+        if since_sim_ts:
+            entries = [e for e in entries if e["sim_ts"] >= since_sim_ts]
+
+        # Sort by sim_ts ascending
+        entries.sort(key=lambda x: x["sim_ts"])
+
+        # Limit
+        truncated_entries = entries[:limit]
+
+        return JSONResponse({
+            "status": "ok",
+            "count": len(truncated_entries),
+            "journal": truncated_entries,
+        })
+
     app = Starlette(
         middleware=[Middleware(RedTeamAuthMiddleware, token=token)],
     )
@@ -301,6 +448,7 @@ def build_red_team_app(sim: CitySimulator, token: str, streamer: Optional[Any] =
     app.add_route("/api/event/inject", api_inject_event, methods=["POST"])
     app.add_route("/api/event/clear", api_clear_event, methods=["POST"])
     app.add_route("/api/event/active", api_active_events, methods=["GET"])
+    app.add_route("/api/journal", api_journal, methods=["GET"])
 
     return app
 

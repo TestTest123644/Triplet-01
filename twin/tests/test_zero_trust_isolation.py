@@ -79,10 +79,9 @@ def test_actuator_attack_commanded_vs_physics(tmp_path):
     init_valve = sim.devices[water_dev].actuator_state["valve_position"]
     assert init_valve == "half"
 
-    # Inject actuator attack on z1-wl1 and zone-1
+    # Inject actuator attack on zone-1
     sim.inject_attack(
         capability="actuator",
-        target_device_id=water_dev,
         target_zone_id="zone-1",
     )
 
@@ -125,7 +124,7 @@ def test_no_underscore_keys_leaked_under_link_attack(tmp_path):
     sim.inject_attack(
         capability="link",
         target_device_id=target_dev,
-        params={"link_mode": "corrupt_bytes"},
+        params={"link_mode": "corrupt_sig"},
     )
 
     readings = sim.tick()

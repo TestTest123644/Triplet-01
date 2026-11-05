@@ -299,7 +299,26 @@ def test_10e_incident_engine_types_and_resolutions(scratch_ledger):
     fire_row = next(r for r in scratch_ledger.get_recent_physical_events() if r["event_id"] == ev_fire)
     assert fire_row["resolved_by"] == f"dispatch:{disp_fire['dispatch_id']}"
 
-    # 3. Grid Overload (pre-blackout resolution via switch_grid)
+    # 3. Grid Overload (visible at any hour, including night: target = max(P* x 1.35, 118 MW))
+    # Test night grid overload leading to blackout after 60s
+    sim_night = CitySimulator(seed=777, ledger=scratch_ledger, sim_speed=60.0)
+    # Set clock to 02:00 night hour (where P* baseline is ~27-33 MW)
+    sim_night.clock.sim_dt = datetime(2026, 10, 18, 2, 0, 0, tzinfo=timezone.utc)
+    ev_night_overload = sim_night.inject_event(type="grid_overload", zone_id="zone-3")
+    # Power reaches > 114 MW even at night due to 118 MW floor (ramping with tau=120s)
+    for _ in range(80):  # ramp to > 114 MW + 60s sustained overload
+        sim_night.tick()
+        if sim_night.active_events[ev_night_overload].blackout:
+            break
+    assert sim_night.active_events[ev_night_overload].blackout is True
+    # Resolve blackout via dispatch("blackout")
+    disp_blackout = sim_night.handle_dispatch(incident_type="blackout", zone_id="zone-3")
+    assert disp_blackout["status"] == "ok"
+    for _ in range(45):  # 270 sim-s > 240s
+        sim_night.tick()
+    assert ev_night_overload not in sim_night.active_events
+
+    # Pre-blackout resolution via switch_grid on original simulator
     ev_overload = sim.inject_event(type="grid_overload", zone_id="zone-3")
     res_grid = sim.handle_switch_grid("z3-pl1", "grid_b")
     assert res_grid["status"] == "ok"

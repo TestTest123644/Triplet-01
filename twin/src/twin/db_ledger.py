@@ -59,6 +59,7 @@ class TruthReadingRecord:
     run_id: Optional[str] = None
     wire_sig: Optional[str] = None
     wire_bytes: Optional[int] = None
+    link_mode: Optional[str] = None
 
 
 @dataclass
@@ -120,7 +121,8 @@ class GroundTruthLedger:
         created_at_wall_clock TEXT NOT NULL,
         run_id TEXT,
         wire_sig TEXT,
-        wire_bytes INTEGER
+        wire_bytes INTEGER,
+        link_mode TEXT
     );
 
     CREATE TABLE IF NOT EXISTS attacks_injected (
@@ -244,6 +246,8 @@ class GroundTruthLedger:
             self._writer_conn.execute("ALTER TABLE readings_truth ADD COLUMN wire_sig TEXT;")
         if "wire_bytes" not in cols:
             self._writer_conn.execute("ALTER TABLE readings_truth ADD COLUMN wire_bytes INTEGER;")
+        if "link_mode" not in cols:
+            self._writer_conn.execute("ALTER TABLE readings_truth ADD COLUMN link_mode TEXT;")
 
         # Migration: ensure attacks_injected columns exist
         cur = self._writer_conn.execute("PRAGMA table_info(attacks_injected);")
@@ -427,8 +431,8 @@ class GroundTruthLedger:
                 INSERT INTO readings_truth (
                     reading_id, device_id, ts, seq, true_value, broadcast_value,
                     unit, status, sig, attack_type, is_attacked, created_at_wall_clock,
-                    run_id, wire_sig, wire_bytes
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    run_id, wire_sig, wire_bytes, link_mode
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     record.reading_id,
@@ -446,6 +450,7 @@ class GroundTruthLedger:
                     record.run_id,
                     record.wire_sig,
                     record.wire_bytes,
+                    record.link_mode,
                 ),
             )
             self._writer_conn.commit()
@@ -469,6 +474,7 @@ class GroundTruthLedger:
                 rec.run_id,
                 rec.wire_sig,
                 rec.wire_bytes,
+                rec.link_mode,
             )
             for rec in records
         ]
@@ -479,8 +485,8 @@ class GroundTruthLedger:
                     INSERT INTO readings_truth (
                         reading_id, device_id, ts, seq, true_value, broadcast_value,
                         unit, status, sig, attack_type, is_attacked, created_at_wall_clock,
-                        run_id, wire_sig, wire_bytes
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        run_id, wire_sig, wire_bytes, link_mode
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     params,
                 )
