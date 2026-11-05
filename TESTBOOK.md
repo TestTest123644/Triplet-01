@@ -83,7 +83,7 @@ Each scenario verifies cyber-physical realism, adversarial resilience, and multi
 - **Expected Twin output:**
   - `z3-pl1` power load rises above 108 MW.
   - With Brain: Journal logs MCP command `switch_grid(device_id="z3-pl1", target_state="shed")`; power drops to nominal and incident resolves without blackout.
-  - Without Brain (`--no-brain`): Overload exceeds 15 sim-seconds tolerance; Twin engine triggers zone-3 blackout event and logs automated blackout emergency dispatch.
+  - Without Brain (`--no-brain`): Overload exceeds 60 sim-seconds tolerance; Twin engine escalates incident to blackout and journals `event_escalated:<event_id>` with `action: escalated, to: blackout`.
 - **Expected Guardian output:** Telemetry signatures valid; no containment (to confirm with partner team).
 - **Expected Brain output:** Identifies critical electrical overload > 108 MW; issues MCP `switch_grid(target_state="shed")` (to confirm with partner team).
 - **How to verify:** Run `python3 scenarios/t5_grid_overload.py --with-mocks`; verify `logs/t5-*.log` ends with `{"event":"result","pass":true}`.
@@ -159,16 +159,17 @@ Each scenario verifies cyber-physical realism, adversarial resilience, and multi
 - **ID:** T10
 - **Name:** Link-Layer Adversary Tampering Modes
 - **Layers involved:** Layer 1 (Twin), Layer 3 (Guardian)
-- **Description:** Evaluates link-level network tampering against traffic camera `z3-tc1` across four adversarial modes: payload corruption (`corrupt_bytes`), sequence regression (`replay`), latency distortion (`delay`), and packet annihilation (`drop`).
+- **Description:** Evaluates link-level network tampering against traffic camera `z3-tc1` across five adversarial modes: payload corruption (`corrupt_bytes`), signature corruption (`corrupt_sig`), duplicate reading IDs (`replay`), latency distortion (`delay`), and packet annihilation (`drop`).
 - **Trigger:** Red Team API `POST /api/event/inject` with `{"capability": "link", "target_device_id": "z3-tc1", "params": {"link_mode": "<mode>"}}`.
 - **Expected Twin output:**
   - `corrupt_bytes`: Wire payload contains corrupted bytes; Guardian quarantine recorded.
-  - `replay`: Repeating or regressing sequence numbers; Guardian isolation and rollback recorded.
-  - `delay`: Frames held for 50 ticks (> adaptive late threshold); Guardian isolation and rollback recorded.
+  - `corrupt_sig`: Signature mathematical verification fails; Guardian quarantine recorded.
+  - `replay`: Repeating reading IDs seen twice on wire; Guardian isolation recorded.
+  - `delay`: Frame timestamp lags stream head; Guardian isolation recorded.
   - `drop`: Zero wire frames received for `z3-tc1`.
 - **Expected Guardian output:** Quarantines or isolates `z3-tc1` according to violated protocol invariant (to confirm with partner team).
 - **Expected Brain output:** Ignores contained or missing camera without issuing false emergency dispatches (to confirm with partner team).
-- **How to verify:** Run `python3 scenarios/t10_link_tamper.py --mode corrupt_bytes --with-mocks`; verify `logs/t10-*.log` ends with `{"event":"result","pass":true}`.
+- **How to verify:** Run `python3 scenarios/t10_link_tamper.py --mode all --with-mocks`; verify `logs/t10-*.log` ends with `{"event":"result","pass":true}`.
 
 ---
 
@@ -182,7 +183,7 @@ Each scenario verifies cyber-physical realism, adversarial resilience, and multi
   - MCP tool call `set_valve(device_id="z2-wl1", target_state="open")` returns `{"status": "ok", "valve_position": "open"}`.
   - Ground-truth journal records command execution `executed: false` and `refused_code: "ACTUATOR_ATTACK"`.
   - MCP query `get_actuator_state("z2-wl1")` reports `valve_position: "open"` (actuator deceit).
-  - True physical water level continues rising because the valve remains half-open.
+  - True physical water level continues rising by >= 0.3 m over 5 sim-minutes because the valve remains half-open.
 - **Expected Guardian output:** Cross-correlates reported actuator state with physical water level response to flag deceit (to confirm with partner team).
 - **Expected Brain output:** Re-evaluates water level telemetry and diagnoses actuator discrepancy (to confirm with partner team).
 - **How to verify:** Run `python3 scenarios/t11_actuator_refusal.py --with-mocks`; verify `logs/t11-*.log` ends with `{"event":"result","pass":true}`.

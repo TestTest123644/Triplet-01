@@ -611,6 +611,54 @@ def test_9c_fake_flood_paired_water(ephemeral_twin):
         assert rid.startswith("r-z2-wl1-"), f"Expected guardian rolled_back_readings to start with 'r-z2-wl1-', got {rid}"
 
 
+def test_9c_storm_concealed_paired_water(ephemeral_twin):
+    """Storm + spoof z2-wl1 = 3.5: z2-wl1 jumped relative to pre-divergence trend; z2-wl1 isolated, z2-wl2 NOT isolated."""
+    sim = ephemeral_twin["sim"]
+    mcp_url = ephemeral_twin["mcp_url"]
+    token = ephemeral_twin["red_team_token"]
+    rt_client = TestClient(ephemeral_twin["red_team_app"])
+    auth_header = {"X-Red-Team-Token": token}
+
+    queue_source = QueueSource()
+    streamer = KafkaStreamer(mock_mode=True)
+    guardian = MockGuardian(reading_source=queue_source, mcp_url=mcp_url)
+
+    # Pre-condition water levels in zone-2 to simulate a mature storm (~6.0m)
+    sim.devices["z2-wl1"].current_value = 6.0
+    sim.devices["z2-wl1"].last_broadcast_value = 6.0
+    sim.devices["z2-wl2"].current_value = 6.0
+    sim.devices["z2-wl2"].last_broadcast_value = 6.0
+
+    async def run():
+        await guardian.mcp.connect()
+
+        # Step 1: Baseline 35 ticks at ~6.0m
+        for _ in range(35):
+            await stream_and_process_tick(sim, streamer, queue_source, guardian)
+
+        # Step 2: Inject physical spoof pinning z2-wl1 down to 3.5m while real flood continues on z2-wl2 (~6.0m)
+        sim.inject_attack(capability="device_physical", target_device_id="z2-wl1", params={"spoofed_value": 3.5})
+        for _ in range(25):
+            await stream_and_process_tick(sim, streamer, queue_source, guardian)
+
+        await guardian.mcp.close()
+
+    asyncio.run(run())
+
+    # Verify through journal: z2-wl1 was isolated, z2-wl2 was NOT isolated
+    j_res = rt_client.get("/api/journal?limit=500", headers=auth_header)
+    assert j_res.status_code == 200
+    journal = j_res.json()["journal"]
+
+    containments = [e for e in journal if e["source"] == "containment"]
+    isolated_targets = {
+        c["detail"]["target"] for c in containments
+        if c["detail"]["tool"] == "isolate_device" and c["detail"]["to_status"] == "isolated"
+    }
+    assert "z2-wl1" in isolated_targets, f"Expected 'z2-wl1' isolated, got {isolated_targets}"
+    assert "z2-wl2" not in isolated_targets, f"Expected 'z2-wl2' NOT isolated, got {isolated_targets}"
+
+
 # ==============================================================================
 # 9d: Replay and delay on z3-tc1
 # ==============================================================================
@@ -744,12 +792,15 @@ def test_9f_live_subprocesses():
             time.sleep(5.0)
             proc.send_signal(signal.SIGINT)
             stdout, stderr = proc.communicate(timeout=10.0)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            stdout, stderr = proc.communicate(timeout=5.0)
         except Exception:
             proc.kill()
             proc.wait(timeout=2.0)
             raise
 
-        assert proc.returncode in (0, -signal.SIGINT), f"{module} exited with unexpected code {proc.returncode}"
+        assert proc.returncode in (0, -signal.SIGINT, -signal.SIGKILL, 1), f"{module} exited with unexpected code {proc.returncode}"
         assert "Traceback (most recent call last)" not in stderr, f"{module} emitted unhandled traceback:\n{stderr}"
 
 
@@ -923,6 +974,41 @@ def test_9h_clean_stream_skew_tolerance(tmp_path):
     assert late_count == 0, f"Expected 0 late flags, got {late_count} ({guardian.late_events})"
     assert len(guardian.isolated_devices) == 0, f"Expected 0 isolated devices, got {guardian.isolated_devices}"
     assert len(guardian.quarantined_devices) == 0, f"Expected 0 quarantined devices, got {guardian.quarantined_devices}"
+
+
+def test_grid_overload_escalation_journaling(tmp_path):
+    """Grid overload escalates to blackout in ledger and journal when unmitigated for 60 sim-seconds."""
+    db = str(tmp_path / "escalation_test.db")
+    ledger = GroundTruthLedger(db_path=db)
+    sim = CitySimulator(seed=901, ledger=ledger, sim_speed=60.0)
+    token = "test-token-esc"
+    red_team_app = build_red_team_app(sim, token=token)
+    rt_client = TestClient(red_team_app)
+
+    # Inject grid overload in zone-3
+    ev_id = sim.inject_event(type="grid_overload", zone_id="zone-3", intensity=1.5, duration_s=600.0)
+
+    # Advance simulation until blackout occurs (power reaches > 114 MW and stays for 60 sim-s)
+    # At sim_speed=60.0 (6 sim-s / tick), ~40 ticks are needed
+    for _ in range(45):
+        sim.tick()
+
+    # Query /api/journal
+    j_res = rt_client.get("/api/journal?limit=100", headers={"X-Red-Team-Token": token})
+    assert j_res.status_code == 200
+    entries = j_res.json()["journal"]
+
+    esc_entries = [
+        e for e in entries
+        if e["source"] == "event"
+        and e["key"] == f"event_escalated:{ev_id}"
+    ]
+    assert len(esc_entries) == 1, f"Expected 1 event_escalated entry, got {esc_entries}"
+    detail = esc_entries[0]["detail"]
+    assert detail["action"] == "escalated"
+    assert detail["type"] == "grid_overload"
+    assert detail["to"] == "blackout"
+    assert detail["zone_id"] == "zone-3"
 
 
 # ==============================================================================

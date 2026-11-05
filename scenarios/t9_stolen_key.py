@@ -72,6 +72,15 @@ def run(ctx: ScenarioContext) -> bool:
     rollback_ok = any("z1-pl1" in str(r.get("detail", {}).get("target", "")) for r in rollbacks)
     ctx.record_check("spoofed_reading_rolled_back", rollback_ok, f"found {len(rollbacks)} rollbacks targeting z1-pl1")
 
+    # Physical range guard: Brain must ignore out-of-range 180 MW and not actuate z1-pl1
+    commands_on_z1_pl1 = [
+        e for e in journal
+        if e.get("source") == "command"
+        and e.get("detail", {}).get("args", {}).get("device_id") == "z1-pl1"
+        and (not ctx.start_sim_time or e.get("sim_ts", "") >= ctx.start_sim_time)
+    ]
+    ctx.record_check("no_brain_command_on_z1_pl1", len(commands_on_z1_pl1) == 0, f"commands count: {len(commands_on_z1_pl1)}")
+
     # False-positive guard: other devices not quarantined, no commands outside zone-1
     fp_ok, fp_msg = ctx.verify_false_positive_guard(allowed_devices={"z1-pl1"}, allowed_zones={"zone-1"})
     ctx.record_check("false_positive_guard", fp_ok, fp_msg)

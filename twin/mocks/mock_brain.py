@@ -44,6 +44,16 @@ def _parse_sim_seconds(ts_str: str) -> float:
     return datetime.fromisoformat(s).timestamp()
 
 
+# Centralized device physical range boundaries (spec table)
+PHYSICAL_RANGES: Dict[str, Tuple[float, float]] = {
+    "traffic_camera": (0.0, 200.0),
+    "water_level": (0.0, 12.0),
+    "power_load": (0.0, 120.0),
+    "air_quality": (0.0, 350.0),
+    "emergency_call": (0.0, 30.0),
+}
+
+
 class MockCityBrain:
     """Mock City Brain decision engine orchestrating smart city actuations via MCP."""
 
@@ -150,6 +160,22 @@ class MockCityBrain:
         if status in ("isolated", "quarantined"):
             return actions_taken
 
+        # Ignore readings outside physical sensor ranges (e.g. stolen key spoofing)
+        if dtype in PHYSICAL_RANGES:
+            min_r, max_r = PHYSICAL_RANGES[dtype]
+            if not (min_r <= val <= max_r):
+                self._log_event(
+                    sim_ts,
+                    "implausible_reading_ignored",
+                    {
+                        "device_id": device_id,
+                        "device_type": dtype,
+                        "value": val,
+                        "range": [min_r, max_r],
+                    },
+                )
+                return actions_taken
+
         # 1. Water Flood Defense: Act only when BOTH zone water sensors are > 7.0 m and rising
         if dtype == "water_level":
             prev_val = self.water_levels.get(device_id, (val, val))[0]
@@ -162,8 +188,8 @@ class MockCityBrain:
                 val1, prev1 = self.water_levels[wl1_id]
                 val2, prev2 = self.water_levels[wl2_id]
 
-                # Rising condition: current > 6.0 on both and rising
-                both_high = val1 > 6.0 and val2 > 6.0
+                # Rising condition: current > 7.0 on both and rising
+                both_high = val1 > 7.0 and val2 > 7.0
                 rising = (val1 >= prev1) or (val2 >= prev2)
                 current_valve = self.valve_states.get(zone_id, "half")
 

@@ -74,7 +74,7 @@ def run(ctx: ScenarioContext) -> bool:
     )
 
     # Physical verification: water level continues rising because truth valve remained half
-    print(f"[{ctx.scenario_id}] Verifying physical level keeps rising despite reported open...")
+    print(f"[{ctx.scenario_id}] Verifying physical level rises >= 0.3m over 5 sim-min despite reported open...")
     level_start = 0.0
     level_end = 0.0
     frames = ctx.wire.drain(max_seconds=1.0, max_items=100)
@@ -82,20 +82,43 @@ def run(ctx: ScenarioContext) -> bool:
         if p.get("device_id") == "z2-wl1":
             level_start = float(p.get("value", 0.0))
             break
+    if level_start <= 0.0:
+        dev_st = ctx.mcp.get_device_state("z2-wl1")
+        level_start = float(dev_st.get("current_value", 3.5))
 
-    ctx.sim_sleep(10.0)  # advance 10 sim-seconds
+    # Advance at least 5 sim-minutes (300 sim-seconds)
+    ctx.sim_sleep(300.0)
 
-    frames = ctx.wire.drain(max_seconds=1.0, max_items=100)
-    for _, p in frames:
-        if p.get("device_id") == "z2-wl1":
-            level_end = float(p.get("value", 0.0))
-            break
+    # Drain to head of wire stream to capture latest post-storm rise reading
+    if getattr(ctx.wire, "queue_source", None):
+        wq = getattr(ctx.wire.queue_source, "wire_q", None)
+        if wq:
+            while not wq.empty():
+                try:
+                    raw = wq.get_nowait()
+                    if isinstance(raw, bytes):
+                        p = json.loads(raw.decode("utf-8"))
+                        if p.get("device_id") == "z2-wl1":
+                            level_end = float(p.get("value", 0.0))
+                except Exception:
+                    break
 
-    level_rose = level_end >= level_start or level_end > 3.0
+    if level_end <= 0.0:
+        frames = ctx.wire.drain(max_seconds=2.0, max_items=2000)
+        for _, p in frames:
+            if p.get("device_id") == "z2-wl1":
+                level_end = float(p.get("value", 0.0))
+
+    if level_end <= 0.0:
+        dev_st = ctx.mcp.get_device_state("z2-wl1")
+        level_end = float(dev_st.get("current_value", level_start))
+
+    level_rise = level_end - level_start
+    level_rose = level_rise >= 0.30
     ctx.record_check(
-        "physical_water_level_continues_rising",
+        "physical_water_level_rise_ge_0_3m",
         level_rose,
-        f"level: {level_start:.2f}m -> {level_end:.2f}m (true valve stayed half)",
+        f"rise: {level_rise:.2f}m ({level_start:.2f}m -> {level_end:.2f}m, expected >= 0.30m over 5 sim-min)",
     )
 
     # False-positive guard: no commands outside zone-2, no containments

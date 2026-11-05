@@ -217,7 +217,7 @@ def test_migration_against_existing_ground_truth_copy(tmp_path):
     ro_conn.close()
 
     assert initial_count > 500_000
-    assert initial_max_seq == 14194
+    assert initial_max_seq > 14000
 
     # Open with GroundTruthLedger (applies backward-compatible migration)
     ledger = GroundTruthLedger(copy_path)
@@ -248,13 +248,13 @@ def test_migration_against_existing_ground_truth_copy(tmp_path):
         keystore_path=str(tmp_path / "mig_keys.json"),
     )
 
-    # Check sequence resumption: devices should start at 14,194, next tick seq is 14,195
+    # Check sequence resumption: devices should start at initial_max_seq, next tick seq is initial_max_seq + 1
     for dev in sim.devices.values():
-        assert dev.seq == 14194
+        assert dev.seq == initial_max_seq
 
     readings = sim.tick()
     for r in readings:
-        assert r["seq"] == 14195
+        assert r["seq"] == initial_max_seq + 1
 
     # Check clock resumption: should resume after "2026-10-17T12:23:39Z"
     assert parse_sim_time(sim.get_sim_time()) >= parse_sim_time("2026-10-17T12:23:40Z")

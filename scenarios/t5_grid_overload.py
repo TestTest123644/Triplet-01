@@ -28,13 +28,22 @@ def run(ctx: ScenarioContext) -> bool:
 
     if ctx.no_brain:
         print(f"[{ctx.scenario_id}] Running unmitigated overload (--no-brain); awaiting blackout cascade...")
+        # Overload escalates to blackout after 60 sim-seconds of continuous load > 114 MW
+        timeout_wall = max(15.0, 90.0 / max(0.1, ctx.sim_speed))
         blackout_entry = ctx.wait_for_journal(
             predicate=lambda e: (
                 e.get("source") == "event"
-                and e.get("detail", {}).get("type") == "blackout"
-                and e.get("detail", {}).get("zone_id") == "zone-3"
+                and (
+                    e.get("key") == f"event_escalated:{event_id}"
+                    or (
+                        e.get("detail", {}).get("action") == "escalated"
+                        and e.get("detail", {}).get("type") == "grid_overload"
+                        and e.get("detail", {}).get("to") == "blackout"
+                        and e.get("detail", {}).get("zone_id") == "zone-3"
+                    )
+                )
             ),
-            timeout=30.0,
+            timeout=timeout_wall,
         )
         ctx.record_check("unmitigated_blackout_triggered", blackout_entry is not None, f"blackout: {blackout_entry.get('detail') if blackout_entry else 'None'}")
     else:

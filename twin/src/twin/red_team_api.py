@@ -154,10 +154,10 @@ def _query_journal_sync(db_path: str, since_sim_ts: Optional[str], limit: int) -
 
             # 3. physical_events
             cur = conn.execute(
-                "SELECT event_id, type, zone_id, device_id, params_json, start_sim_ts, resolved_sim_ts, resolved_by "
-                "FROM physical_events WHERE start_sim_ts >= ? OR (resolved_sim_ts IS NOT NULL AND resolved_sim_ts >= ?) "
+                "SELECT event_id, type, zone_id, device_id, params_json, start_sim_ts, resolved_sim_ts, resolved_by, escalated_sim_ts, escalated_to "
+                "FROM physical_events WHERE start_sim_ts >= ? OR (resolved_sim_ts IS NOT NULL AND resolved_sim_ts >= ?) OR (escalated_sim_ts IS NOT NULL AND escalated_sim_ts >= ?) "
                 "ORDER BY start_sim_ts ASC LIMIT ?",
-                (since_sim_ts, since_sim_ts, limit),
+                (since_sim_ts, since_sim_ts, since_sim_ts, limit),
             )
             for r in cur.fetchall():
                 try:
@@ -176,6 +176,19 @@ def _query_journal_sync(db_path: str, since_sim_ts: Optional[str], limit: int) -
                             "zone_id": r["zone_id"],
                             "device_id": r["device_id"],
                             "params": params,
+                        },
+                    })
+                if r["escalated_sim_ts"] and r["escalated_sim_ts"] >= since_sim_ts:
+                    entries.append({
+                        "key": f"event_escalated:{r['event_id']}",
+                        "sim_ts": r["escalated_sim_ts"],
+                        "source": "event",
+                        "detail": {
+                            "event_id": r["event_id"],
+                            "action": "escalated",
+                            "type": r["type"],
+                            "to": r["escalated_to"] or "blackout",
+                            "zone_id": r["zone_id"],
                         },
                     })
                 if r["resolved_sim_ts"] and r["resolved_sim_ts"] >= since_sim_ts:
@@ -284,7 +297,7 @@ def _query_journal_sync(db_path: str, since_sim_ts: Optional[str], limit: int) -
 
             # 3. physical_events
             cur = conn.execute(
-                "SELECT event_id, type, zone_id, device_id, params_json, start_sim_ts, resolved_sim_ts, resolved_by "
+                "SELECT event_id, type, zone_id, device_id, params_json, start_sim_ts, resolved_sim_ts, resolved_by, escalated_sim_ts, escalated_to "
                 "FROM physical_events ORDER BY start_sim_ts DESC LIMIT ?",
                 (limit,),
             )
@@ -306,6 +319,19 @@ def _query_journal_sync(db_path: str, since_sim_ts: Optional[str], limit: int) -
                         "params": params,
                     },
                 })
+                if r["escalated_sim_ts"]:
+                    entries.append({
+                        "key": f"event_escalated:{r['event_id']}",
+                        "sim_ts": r["escalated_sim_ts"],
+                        "source": "event",
+                        "detail": {
+                            "event_id": r["event_id"],
+                            "action": "escalated",
+                            "type": r["type"],
+                            "to": r["escalated_to"] or "blackout",
+                            "zone_id": r["zone_id"],
+                        },
+                    })
                 if r["resolved_sim_ts"]:
                     entries.append({
                         "key": f"event_resolved:{r['event_id']}",

@@ -771,6 +771,12 @@ class CitySimulator:
                     overload_ev.overload_sim_seconds += dt
                     if overload_ev.overload_sim_seconds >= 60.0:
                         overload_ev.blackout = True
+                        if hasattr(self, "ledger") and self.ledger is not None:
+                            self.ledger.escalate_physical_event(
+                                overload_ev.event_id,
+                                self.get_sim_time(),
+                                "blackout",
+                            )
                 else:
                     overload_ev.overload_sim_seconds = 0.0
 

@@ -33,12 +33,17 @@ async def test_rogue_streaming_and_key_isolation(temp_ledger):
     assert "rg-01" in sim._rogue_keys
     rogue_pub = sim._rogue_keys["rg-01"][1]
 
-    # Run stream loop for ~20 ticks
+    # Run stream loop until at least 18 ticks of rogue readings are produced (deadline driven)
     stop_event = asyncio.Event()
     loop_task = asyncio.create_task(
         run_simulation_stream_loop(sim, streamer, stop_event, target_hz=100.0)
     )
-    await asyncio.sleep(0.25)
+    deadline = time.time() + 5.0
+    while time.time() < deadline:
+        rogue_count = sum(1 for b in streamer.sink_buffer if b"rg-01" in b)
+        if rogue_count >= 18:
+            break
+        await asyncio.sleep(0.01)
     stop_event.set()
     await loop_task
 

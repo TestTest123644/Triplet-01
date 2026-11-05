@@ -334,17 +334,27 @@ class MockGuardian:
                 if diff > 2.0:
                     self.water_divergence_counts[zone_id] += 1
                     if self.water_divergence_counts[zone_id] >= 20:
-                        hist1 = self.water_histories[device_id]
-                        hist2 = self.water_histories[other_dev_id]
-                        med1 = statistics.median(hist1) if hist1 else val
-                        med2 = statistics.median(hist2) if hist2 else other_val
-                        dev1 = abs(val - med1)
-                        dev2 = abs(other_val - med2)
-                        if abs(dev1 - dev2) > 0.1:
-                            outlier_id = device_id if dev1 > dev2 else other_dev_id
+                        h1 = list(self.water_histories[device_id])
+                        h2 = list(self.water_histories[other_dev_id])
+
+                        # Outlier is the sensor whose value jumped at divergence onset (~20 readings before divergence)
+                        idx1 = max(0, len(h1) - 40) if len(h1) > 20 else 0
+                        idx2 = max(0, len(h2) - 40) if len(h2) > 20 else 0
+
+                        pre_val1 = h1[idx1] if h1 else val
+                        pre_val2 = h2[idx2] if h2 else other_val
+
+                        jump1 = abs(val - pre_val1)
+                        jump2 = abs(other_val - pre_val2)
+
+                        if abs(jump1 - jump2) > 0.1:
+                            outlier_id = device_id if jump1 > jump2 else other_dev_id
                         else:
-                            # Both close to their recent medians; compare against nominal baseline level (3.5m)
-                            outlier_id = device_id if abs(val - 3.5) >= abs(other_val - 3.5) else other_dev_id
+                            med1 = statistics.median(h1) if h1 else val
+                            med2 = statistics.median(h2) if h2 else other_val
+                            dev1 = abs(val - med1)
+                            dev2 = abs(other_val - med2)
+                            outlier_id = device_id if dev1 >= dev2 else other_dev_id
 
                         if outlier_id not in self.isolated_devices:
                             self.isolated_devices.append(outlier_id)

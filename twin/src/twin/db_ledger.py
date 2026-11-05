@@ -170,7 +170,9 @@ class GroundTruthLedger:
         params_json TEXT NOT NULL,
         start_sim_ts TEXT NOT NULL,
         resolved_sim_ts TEXT,
-        resolved_by TEXT
+        resolved_by TEXT,
+        escalated_sim_ts TEXT,
+        escalated_to TEXT
     );
 
     CREATE INDEX IF NOT EXISTS idx_readings_device_ts ON readings_truth (device_id, ts);
@@ -293,9 +295,19 @@ class GroundTruthLedger:
             params_json TEXT NOT NULL,
             start_sim_ts TEXT NOT NULL,
             resolved_sim_ts TEXT,
-            resolved_by TEXT
+            resolved_by TEXT,
+            escalated_sim_ts TEXT,
+            escalated_to TEXT
         );
         """)
+        try:
+            self._writer_conn.execute("ALTER TABLE physical_events ADD COLUMN escalated_sim_ts TEXT;")
+        except Exception:
+            pass
+        try:
+            self._writer_conn.execute("ALTER TABLE physical_events ADD COLUMN escalated_to TEXT;")
+        except Exception:
+            pass
 
         self._writer_conn.commit()
 
@@ -667,6 +679,25 @@ class GroundTruthLedger:
                 WHERE event_id = ?
                 """,
                 (resolved_sim_ts, resolved_by, event_id),
+            )
+            self._writer_conn.commit()
+            return cur.rowcount > 0
+
+    def escalate_physical_event(
+        self,
+        event_id: str,
+        escalated_sim_ts: str,
+        escalated_to: str,
+    ) -> bool:
+        """Mark a physical incident event as escalated (e.g. grid_overload -> blackout)."""
+        with self._writer_lock:
+            cur = self._writer_conn.execute(
+                """
+                UPDATE physical_events
+                SET escalated_sim_ts = ?, escalated_to = ?
+                WHERE event_id = ?
+                """,
+                (escalated_sim_ts, escalated_to, event_id),
             )
             self._writer_conn.commit()
             return cur.rowcount > 0

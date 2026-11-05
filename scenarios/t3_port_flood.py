@@ -28,9 +28,10 @@ def run(ctx: ScenarioContext) -> bool:
 
     if ctx.no_brain:
         print(f"[{ctx.scenario_id}] Running unmitigated storm (--no-brain); monitoring flood rise...")
-        # Monitor water level via wire or status until > 8.0m
+        # Water needs 15-20 sim-min to cross 8 m. Watch up to 30 sim-min (1800 sim-s) converted via sim_speed
         max_level = 0.0
-        deadline = time.time() + 40.0
+        max_wait_wall = 1800.0 / max(0.1, ctx.sim_speed)
+        deadline = time.time() + max_wait_wall
         while time.time() < deadline:
             frames = ctx.wire.drain(max_seconds=0.5, max_items=100)
             for _, p in frames:
@@ -45,6 +46,7 @@ def run(ctx: ScenarioContext) -> bool:
         ctx.record_check("unmitigated_storm_crossed_8m", max_level > 8.0, f"peak level: {max_level:.2f} m (> 8.0m)")
     else:
         print(f"[{ctx.scenario_id}] Waiting for Brain to open flood valve via MCP set_valve...")
+        valve_wait_wall = max(35.0, 600.0 / max(0.1, ctx.sim_speed))
         valve_entry = ctx.wait_for_journal(
             predicate=lambda e: (
                 e.get("source") == "command"
@@ -52,14 +54,15 @@ def run(ctx: ScenarioContext) -> bool:
                 and e.get("detail", {}).get("args", {}).get("target_state") == "open"
                 and "z2-wl" in str(e.get("detail", {}).get("args", {}).get("device_id", ""))
             ),
-            timeout=35.0,
+            timeout=valve_wait_wall,
         )
         has_valve = valve_entry is not None
         ctx.record_check("set_valve_open_commanded", has_valve, f"valve command: {valve_entry.get('detail') if valve_entry else 'None'}")
 
-        # Verify level is kept under 8.0 m
+        # Verify level is kept under 8.0 m until the storm ends or up to 30 sim-min
         max_level = 0.0
-        deadline = time.time() + 15.0
+        monitor_wait_wall = 1800.0 / max(0.1, ctx.sim_speed)
+        deadline = time.time() + monitor_wait_wall
         while time.time() < deadline:
             frames = ctx.wire.drain(max_seconds=0.5, max_items=100)
             for _, p in frames:
@@ -67,6 +70,16 @@ def run(ctx: ScenarioContext) -> bool:
                     v = float(p.get("value", 0.0))
                     if v > max_level:
                         max_level = v
+            # Check if storm event has resolved in journal
+            journal = ctx.rest.get_journal(since_ts=ctx.start_sim_time, limit=500)
+            storm_resolved = any(
+                e.get("source") == "event"
+                and e.get("detail", {}).get("event_id") == event_id
+                and e.get("detail", {}).get("action") == "resolved"
+                for e in journal
+            )
+            if storm_resolved:
+                break
             time.sleep(0.5)
 
         ctx.record_check("mitigated_storm_level_under_8m", max_level < 8.0, f"peak level: {max_level:.2f} m (< 8.0m)")

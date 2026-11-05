@@ -282,6 +282,32 @@ class WireConsumer:
 # 5. Scenario Execution Context
 # ==============================================================================
 
+def resolve_tokens(
+    mcp_token: Optional[str] = None,
+    brain_token: Optional[str] = None,
+    guardian_token: Optional[str] = None,
+    scenario_token: Optional[str] = None,
+) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    """Resolve distinct bearer tokens for brain, guardian, and scenario."""
+    env_tokens: Dict[str, str] = {}
+    raw = os.getenv("MCP_AUTH_TOKENS", "").strip()
+    if raw:
+        for part in raw.split(","):
+            part = part.strip()
+            if ":" in part:
+                p1, p2 = part.split(":", 1)
+                p1, p2 = p1.strip(), p2.strip()
+                if p2.lower() in ("brain", "guardian", "scenario"):
+                    env_tokens[p2.lower()] = p1
+                else:
+                    env_tokens[p1.lower()] = p2
+
+    b_tok = brain_token or os.getenv("MCP_BRAIN_TOKEN") or env_tokens.get("brain") or mcp_token
+    g_tok = guardian_token or os.getenv("MCP_GUARDIAN_TOKEN") or env_tokens.get("guardian") or mcp_token
+    s_tok = scenario_token or os.getenv("MCP_SCENARIO_TOKEN") or env_tokens.get("scenario") or mcp_token
+    return b_tok, g_tok, s_tok
+
+
 class ScenarioContext:
     """Manages scenario lifecycle, live mock subprocesses, checks, and logs."""
 
@@ -293,6 +319,9 @@ class ScenarioContext:
         mcp_url: str = "http://localhost:8000",
         red_team_token: Optional[str] = None,
         mcp_token: Optional[str] = None,
+        brain_token: Optional[str] = None,
+        guardian_token: Optional[str] = None,
+        scenario_token: Optional[str] = None,
         kafka_bootstrap: str = "localhost:19092",
         kafka_topic: str = "twin.sensors",
         with_mocks: bool = False,
@@ -315,8 +344,18 @@ class ScenarioContext:
         self.log_dir = log_dir
         self.queue_source = queue_source
 
+        b_tok, g_tok, s_tok = resolve_tokens(
+            mcp_token=mcp_token,
+            brain_token=brain_token,
+            guardian_token=guardian_token,
+            scenario_token=scenario_token,
+        )
+        self.brain_token = b_tok
+        self.guardian_token = g_tok
+        self.scenario_token = s_tok
+
         self.rest = TwinRestClient(base_url=twin_host, token=red_team_token)
-        self.mcp = TwinMcpClient(base_url=mcp_url, token=mcp_token)
+        self.mcp = TwinMcpClient(base_url=mcp_url, token=s_tok)
         self.wire = WireConsumer(
             bootstrap_servers=kafka_bootstrap,
             topic=kafka_topic,
@@ -350,6 +389,9 @@ class ScenarioContext:
             mcp_url=getattr(args, "mcp_url", "http://localhost:8000"),
             red_team_token=getattr(args, "red_team_token", None),
             mcp_token=getattr(args, "mcp_token", None),
+            brain_token=getattr(args, "brain_token", None),
+            guardian_token=getattr(args, "guardian_token", None),
+            scenario_token=getattr(args, "scenario_token", None),
             kafka_bootstrap=getattr(args, "kafka_bootstrap", "localhost:19092"),
             kafka_topic=getattr(args, "kafka_topic", "twin.sensors"),
             with_mocks=getattr(args, "with_mocks", False),
@@ -358,8 +400,18 @@ class ScenarioContext:
             log_dir=getattr(args, "log_dir", "logs"),
         )
 
+    def get_sim_ts_now(self) -> str:
+        """Fetch current sim_ts from red team status if available."""
+        try:
+            st = self.rest.get_status()
+            return str(st.get("sim_time", ""))
+        except Exception:
+            return ""
+
     def log_event(self, sim_ts: str, layer: str, event: str, details: Dict[str, Any]) -> None:
         """Write single JSON line event to scenario log."""
+        if not sim_ts:
+            sim_ts = self.get_sim_ts_now()
         entry = {
             "wall_ts": datetime.now(timezone.utc).isoformat(),
             "sim_ts": sim_ts,
@@ -422,8 +474,8 @@ class ScenarioContext:
             "--kafka-bootstrap", self.kafka_bootstrap,
             "--log-file", self._guardian_log,
         ]
-        if self.mcp_token:
-            g_cmd.extend(["--mcp-token", self.mcp_token])
+        if self.guardian_token:
+            g_cmd.extend(["--mcp-token", self.guardian_token])
 
         self._guardian_proc = subprocess.Popen(g_cmd, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         self.log_event("", "scenario", "mock_started", {"component": "guardian", "pid": self._guardian_proc.pid})
@@ -438,8 +490,8 @@ class ScenarioContext:
                 "--kafka-bootstrap", self.kafka_bootstrap,
                 "--log-file", self._brain_log,
             ]
-            if self.mcp_token:
-                b_cmd.extend(["--mcp-token", self.mcp_token])
+            if self.brain_token:
+                b_cmd.extend(["--mcp-token", self.brain_token])
 
             self._brain_proc = subprocess.Popen(b_cmd, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             self.log_event("", "scenario", "mock_started", {"component": "brain", "pid": self._brain_proc.pid})
@@ -447,7 +499,7 @@ class ScenarioContext:
         # Allow mocks 2 seconds to connect and establish baseline stream
         time.sleep(2.0)
 
-    def _stop_mocks(self) -> None:
+    def _stop_mocks_processes(self) -> None:
         for name, proc, log_path in (
             ("guardian", self._guardian_proc, self._guardian_log),
             ("brain", self._brain_proc, self._brain_log),
@@ -461,18 +513,8 @@ class ScenarioContext:
                     proc.wait(timeout=2.0)
                 self.log_event("", "scenario", "mock_stopped", {"component": name})
 
-        # Merge mock logs into main scenario log
-        for log_path in (self._guardian_log, self._brain_log):
-            if log_path and os.path.exists(log_path):
-                try:
-                    with open(log_path, "r", encoding="utf-8") as f_in, open(self.log_file, "a", encoding="utf-8") as f_out:
-                        for line in f_in:
-                            line_s = line.strip()
-                            if line_s:
-                                f_out.write(line_s + "\n")
-                    os.remove(log_path)
-                except Exception as e:
-                    logger.warning(f"Error merging mock log {log_path}: {e}")
+    def _stop_mocks(self) -> None:
+        self._stop_mocks_processes()
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
         if not self._finished:
@@ -550,40 +592,116 @@ class ScenarioContext:
         except Exception as e:
             self.log_event("", "scenario", "clear_event_error", {"error": str(e)})
 
-        # Reinstate any contained devices and reset actuator states back to nominal
-        try:
-            dev_list = self.mcp.list_devices()
-            for d in dev_list:
-                did = d.get("device_id")
-                if not did:
-                    continue
-                if d.get("status") in ("isolated", "quarantined"):
-                    self.mcp.call_tool("reinstate_device", {"device_id": did})
-                if d.get("device_type") == "water_level":
-                    self.mcp.call_tool("set_valve", {"device_id": did, "target_state": "half"})
-                elif d.get("device_type") == "power_load":
-                    self.mcp.call_tool("switch_grid", {"device_id": did, "target_state": "grid_a"})
-        except Exception as e:
-            logger.debug(f"Device restoration notice: {e}")
+        # Reinstate and reset devices ONLY if not in --partners mode
+        if self.partners:
+            # Under --partners, scenario sends NO actuation or containment;
+            # report what is still contained
+            try:
+                dev_list = self.mcp.list_devices()
+                still_contained = [
+                    d.get("device_id") for d in dev_list if d.get("status") in ("isolated", "quarantined")
+                ]
+                if still_contained:
+                    print(f"[{self.scenario_id}] [PARTNERS] Devices still contained: {still_contained}")
+                    self.log_event("", "scenario", "partners_contained_report", {"still_contained": still_contained})
+            except Exception as e:
+                logger.debug(f"Partner containment report check: {e}")
+        else:
+            try:
+                # 1. Identify devices contained during THIS scenario from the journal
+                contained_during_scenario = set()
+                journal_entries = self.rest.get_journal(since_ts=self.start_sim_time, limit=1000)
+                for je in journal_entries:
+                    if je.get("source") == "containment":
+                        dt = je.get("detail", {})
+                        to_st = dt.get("to_status", "")
+                        tgt = dt.get("target") or dt.get("device_id")
+                        if to_st in ("isolated", "quarantined") and tgt:
+                            if not tgt.startswith("r-"):
+                                contained_during_scenario.add(tgt)
 
-        # Stop mock subprocesses and merge logs before writing final line
+                # 2. Inspect devices: reinstate only if contained during this scenario,
+                # and restore actuators only if differing from default
+                dev_list = self.mcp.list_devices()
+                for d in dev_list:
+                    did = d.get("device_id")
+                    if not did:
+                        continue
+                    if did in contained_during_scenario and d.get("status") in ("isolated", "quarantined"):
+                        self.mcp.call_tool("reinstate_device", {"device_id": did})
+
+                    act = d.get("actuator_state", {})
+                    dtype = d.get("device_type")
+                    if dtype == "water_level" and act.get("valve_position") != "half":
+                        self.mcp.call_tool("set_valve", {"device_id": did, "target_state": "half"})
+                    elif dtype == "power_load" and act.get("grid_state") != "grid_a":
+                        self.mcp.call_tool("switch_grid", {"device_id": did, "target_state": "grid_a"})
+                    elif dtype == "traffic_camera" and act.get("signal_plan") != "normal":
+                        self.mcp.call_tool("set_signal_plan", {"device_id": did, "target_state": "normal"})
+            except Exception as e:
+                logger.debug(f"Device restoration notice: {e}")
+
+        # Stop mock subprocesses before reading their log files
         if self.with_mocks:
-            self._stop_mocks()
+            self._stop_mocks_processes()
 
         self.wire.close()
         self._finished = True
 
+        # Collect and sort all log lines strictly by wall_ts
+        all_lines = []
+        if os.path.exists(self.log_file):
+            try:
+                with open(self.log_file, "r", encoding="utf-8") as f:
+                    for line in f:
+                        line_s = line.strip()
+                        if line_s:
+                            try:
+                                obj = json.loads(line_s)
+                                if obj.get("event") != "result":
+                                    all_lines.append(obj)
+                            except Exception:
+                                pass
+            except Exception as e:
+                logger.warning(f"Error reading scenario log {self.log_file}: {e}")
+
+        for log_path in (self._guardian_log, self._brain_log):
+            if log_path and os.path.exists(log_path):
+                try:
+                    with open(log_path, "r", encoding="utf-8") as f:
+                        for line in f:
+                            line_s = line.strip()
+                            if line_s:
+                                try:
+                                    obj = json.loads(line_s)
+                                    if obj.get("event") != "result":
+                                        all_lines.append(obj)
+                                except Exception:
+                                    pass
+                    os.remove(log_path)
+                except Exception as e:
+                    logger.warning(f"Error reading mock log {log_path}: {e}")
+
+        all_lines.sort(key=lambda x: str(x.get("wall_ts", "")))
+
         overall_pass = all(c["pass"] for c in self.checks) and len(self.checks) > 0
+        final_sim_ts = self.get_sim_ts_now()
         res_entry = {
             "wall_ts": datetime.now(timezone.utc).isoformat(),
-            "sim_ts": "",
+            "sim_ts": final_sim_ts,
             "layer": "scenario",
             "event": "result",
             "pass": overall_pass,
             "checks": self.checks,
         }
-        with open(self.log_file, "a", encoding="utf-8") as f:
-            f.write(json.dumps(res_entry) + "\n")
+
+        try:
+            with open(self.log_file, "w", encoding="utf-8") as f:
+                for item in all_lines:
+                    f.write(json.dumps(item) + "\n")
+                f.write(json.dumps(res_entry) + "\n")
+        except Exception as e:
+            logger.warning(f"Error writing sorted log {self.log_file}: {e}")
 
         print(f"=== Scenario {self.scenario_id} Finished: {'PASS' if overall_pass else 'FAIL'} ===", flush=True)
         print(f"Log written to: {self.log_file}", flush=True)
@@ -597,6 +715,9 @@ def make_common_parser(description: str) -> argparse.ArgumentParser:
     parser.add_argument("--mcp-url", default=os.getenv("TWIN_MCP_URL", "http://localhost:8000"), help="Twin MCP Server URL")
     parser.add_argument("--red-team-token", default=os.getenv("RED_TEAM_TOKEN"), help="Bearer token for Red Team API")
     parser.add_argument("--mcp-token", default=os.getenv("MCP_AUTH_TOKEN"), help="Bearer token for MCP")
+    parser.add_argument("--brain-token", default=os.getenv("MCP_BRAIN_TOKEN"), help="Bearer token for Mock Brain")
+    parser.add_argument("--guardian-token", default=os.getenv("MCP_GUARDIAN_TOKEN"), help="Bearer token for Mock Guardian")
+    parser.add_argument("--scenario-token", default=os.getenv("MCP_SCENARIO_TOKEN"), help="Bearer token for Scenario")
     parser.add_argument("--kafka-bootstrap", default=os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:19092"), help="Kafka broker")
     parser.add_argument("--kafka-topic", default=os.getenv("KAFKA_TOPIC", "twin.sensors"), help="Sensor telemetry topic")
     parser.add_argument("--with-mocks", action="store_true", help="Start live mock Guardian and Brain as subprocesses")
