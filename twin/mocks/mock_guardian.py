@@ -232,11 +232,11 @@ class MockGuardian:
             else:
                 ts_step = 0.0
 
-        late_threshold = max(2.0, 5.0 * ts_step)
+        late_threshold = max(2.0, 15.0 * ts_step)
         late_window = max(10.0, 5.0 * late_threshold)
 
         # 1. Late-frame rule: frame ts is > late_threshold older than newest stream ts -> flag late; 3 in late_window -> isolate
-        if (self.newest_stream_sim_sec - sim_sec) > late_threshold:
+        if len(ts_hist) >= 5 and ts_step > 0.0 and (self.newest_stream_sim_sec - sim_sec) > late_threshold:
             window = [t for t in self.late_events[device_id] if sim_sec - t <= late_window]
             window.append(sim_sec)
             self.late_events[device_id] = window
@@ -280,14 +280,14 @@ class MockGuardian:
                 self.rolled_back_readings.append(reading_id)
                 await self._safe_call_tool("rollback_reading", {"reading_id": reading_id})
 
-            window = [t for t in self.sig_failures[device_id] if sim_sec - t <= 10.0]
+            window = [t for t in self.sig_failures[device_id] if sim_sec - t <= late_window]
             window.append(sim_sec)
             self.sig_failures[device_id] = window
 
             if len(window) >= 3 and device_id not in self.quarantined_devices:
                 self.quarantined_devices.append(device_id)
                 await self._safe_call_tool("quarantine_device", {"device_id": device_id})
-                self._log_event(sim_ts, "quarantine_device", {"device_id": device_id, "reason": "3 signature failures within 10 sim-s"})
+                self._log_event(sim_ts, "quarantine_device", {"device_id": device_id, "reason": f"3 signature failures within {late_window:.1f} sim-s"})
 
             return {"action": "signature_verification_failed", "device_id": device_id, "reading_id": reading_id, "status": "quarantined" if device_id in self.quarantined_devices else "flagged"}
 
@@ -299,14 +299,14 @@ class MockGuardian:
                 self.rolled_back_readings.append(reading_id)
                 await self._safe_call_tool("rollback_reading", {"reading_id": reading_id})
 
-            window = [t for t in self.replay_delay_events[device_id] if sim_sec - t <= 10.0]
+            window = [t for t in self.replay_delay_events[device_id] if sim_sec - t <= late_window]
             window.append(sim_sec)
             self.replay_delay_events[device_id] = window
 
             if len(window) >= 3 and device_id not in self.isolated_devices:
                 self.isolated_devices.append(device_id)
                 await self._safe_call_tool("isolate_device", {"device_id": device_id})
-                self._log_event(sim_ts, "isolate_device", {"device_id": device_id, "reason": "3 replay/delay events within 10 sim-s"})
+                self._log_event(sim_ts, "isolate_device", {"device_id": device_id, "reason": f"3 replay/delay events within {late_window:.1f} sim-s"})
 
             return {"action": "replay_delay_detected", "device_id": device_id, "reading_id": reading_id, "status": "isolated" if device_id in self.isolated_devices else "flagged"}
 
@@ -340,7 +340,11 @@ class MockGuardian:
                         med2 = statistics.median(hist2) if hist2 else other_val
                         dev1 = abs(val - med1)
                         dev2 = abs(other_val - med2)
-                        outlier_id = device_id if dev1 >= dev2 else other_dev_id
+                        if abs(dev1 - dev2) > 0.1:
+                            outlier_id = device_id if dev1 > dev2 else other_dev_id
+                        else:
+                            # Both close to their recent medians; compare against nominal baseline level (3.5m)
+                            outlier_id = device_id if abs(val - 3.5) >= abs(other_val - 3.5) else other_dev_id
 
                         if outlier_id not in self.isolated_devices:
                             self.isolated_devices.append(outlier_id)
@@ -378,6 +382,17 @@ class MockGuardian:
             else:
                 self.stuck_tracker[device_id] = (r_val, 1)
 
+        # 7. Compromised key detection (device_key): signatures verify, but severe physical anomaly (power > 140 MW)
+        if device_type == "power_load" and val > 140.0:
+            if device_id not in self.quarantined_devices:
+                self.quarantined_devices.append(device_id)
+                await self._safe_call_tool("quarantine_device", {"device_id": device_id})
+            if reading_id:
+                self.rolled_back_readings.append(reading_id)
+                await self._safe_call_tool("rollback_reading", {"reading_id": reading_id})
+            self._log_event(sim_ts, "quarantine_device", {"device_id": device_id, "reason": f"physical limit violation (power {val} MW > 140 MW), probable compromised key"})
+            return {"action": "compromised_key_detected", "device_id": device_id, "reading_id": reading_id, "status": "quarantined"}
+
         self.verified_readings_count += 1
         return {"action": "verified_authentic", "device_id": device_id, "reading_id": reading_id, "status": "ok"}
 
@@ -408,10 +423,12 @@ def main():
     parser.add_argument("--mcp-url", default=os.getenv("TWIN_MCP_URL", "http://localhost:8000"), help="Twin MCP server URL")
     parser.add_argument("--mcp-token", default=os.getenv("MCP_AUTH_TOKEN"), help="Bearer token for MCP")
     parser.add_argument("--kafka-bootstrap", default=os.getenv("KAFKA_BOOTSTRAP", "localhost:9092"), help="Kafka bootstrap broker")
+    parser.add_argument("--group-id", default=None, help="Kafka consumer group ID")
     parser.add_argument("--log-file", default=None, help="Path for JSON lines event log")
     args = parser.parse_args()
 
-    source = KafkaSource(bootstrap_servers=args.kafka_bootstrap, group_id="mock-guardian-group")
+    gid = args.group_id or f"mock-guardian-{os.getpid()}-{int(time.time()*1000)}"
+    source = KafkaSource(bootstrap_servers=args.kafka_bootstrap, group_id=gid)
     guardian = MockGuardian(
         reading_source=source,
         mcp_url=args.mcp_url,

@@ -1,0 +1,51 @@
+# Layer 1 Digital Twin Scenarios
+
+All scenario scripts run as external clients communicating with Layer 1 strictly over HTTP (`/api` endpoints), Model Context Protocol (MCP over SSE on port 8000), and Apache Kafka telemetry streaming (`twin.sensors`).
+
+> **Architectural Boundary:** Zero internal `twin.*` package imports.
+
+---
+
+## Single "Run All" Command
+
+To execute all 11 scenarios sequentially against a live Twin runtime with live mock subprocesses:
+
+```bash
+python3 scenarios/run_all.py --with-mocks
+```
+
+To run against live partner implementations (City Brain and Guardian):
+
+```bash
+python3 scenarios/run_all.py --partners
+```
+
+---
+
+## Scenario Catalog & Conformance Matrix
+
+| Scenario | Command | What It Proves | Sim Duration | Wall Time (`SIM_SPEED=20`) |
+| :--- | :--- | :--- | :--- | :--- |
+| **t1_baseline_stream** | `python3 scenarios/t1_baseline_stream.py --with-mocks` | 42 devices emit continuous telemetry, every payload <= 300 B, every Ed25519 signature verifies, nominal rate 400-440 msg/s. | 100 sim-s | 5.0 s |
+| **t2_traffic_accident** | `python3 scenarios/t2_traffic_accident.py --with-mocks` | Accident on `z1-tc1` drops vehicle flow and spikes emergency calls; Brain issues `dispatch(medical_emergency)` and incident reaches `resolved_by`. | 60 sim-s | 3.0 s |
+| **t3_port_flood** | `python3 scenarios/t3_port_flood.py --with-mocks` | 3x rain storm in `zone-2`; Brain commands `set_valve(open)` keeping water level < 8.0 m (unmitigated crosses 8.0 m). | 120 sim-s | 6.0 s |
+| **t4_fire** | `python3 scenarios/t4_fire.py --with-mocks` | Fire in `zone-5` drives AQI > 150; Brain commands `dispatch(fire)` and incident is resolved after 180 sim-s. | 180 sim-s | 9.0 s |
+| **t5_grid_overload** | `python3 scenarios/t5_grid_overload.py --with-mocks` | High power load in `zone-3`; Brain triggers `switch_grid(shed)` preventing blackout cascade. | 60 sim-s | 3.0 s |
+| **t6_fake_port_flood** | `python3 scenarios/t6_fake_port_flood.py --with-mocks` | Cyber spoofing on `z2-wl1` (9.5 m) with valid signature; Guardian detects paired-water divergence and isolates `z2-wl1`; Brain holds valve closed. | 60 sim-s | 3.0 s |
+| **t7_stuck_sensor** | `python3 scenarios/t7_stuck_sensor.py --with-mocks` | Sensor fault stuck on `z4-aq1`; Guardian identifies 50 consecutive constant readings, isolates sensor, and rolls back reading. | 100 sim-s | 5.0 s |
+| **t8_rogue_device** | `python3 scenarios/t8_rogue_device.py --with-mocks` | Rogue device `rg-p1` queries `get_device_key` (returns null); Guardian triggers `quarantine_device`; Twin runtime blocks subsequent frames. | 40 sim-s | 2.0 s |
+| **t9_stolen_key** | `python3 scenarios/t9_stolen_key.py --with-mocks` | Stolen key on `z1-pl1` broadcasts out-of-bounds power reading; signature verifies; Guardian triggers `quarantine_device` and `rollback_reading`. | 60 sim-s | 3.0 s |
+| **t10_link_tamper** | `python3 scenarios/t10_link_tamper.py --mode corrupt_bytes --with-mocks` | Link adversary on `z3-tc1` (`corrupt_bytes`, `replay`, `delay`, `drop`); wire checks and corresponding Guardian containment. | 60 sim-s | 3.0 s |
+| **t11_actuator_refusal** | `python3 scenarios/t11_actuator_refusal.py --with-mocks` | Cyber-physical actuator tampering on `z2-wl1`; `set_valve` returns ok but journal records `executed=false`; reported state open while physical level keeps rising. | 80 sim-s | 4.0 s |
+
+---
+
+## Log Output Format
+
+Every scenario run appends JSON lines to `logs/tN-<UTC stamp>.log`.
+The final line of every log file contains the machine-verifiable outcome:
+
+```json
+{"wall_ts": "...", "sim_ts": "...", "layer": "scenario", "event": "result", "pass": true, "checks": [{"name": "...", "pass": true, "detail": "..."}]}
+```
+

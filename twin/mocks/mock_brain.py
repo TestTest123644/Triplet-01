@@ -162,8 +162,8 @@ class MockCityBrain:
                 val1, prev1 = self.water_levels[wl1_id]
                 val2, prev2 = self.water_levels[wl2_id]
 
-                # Rising condition: current > 7.0 on both and rising
-                both_high = val1 > 7.0 and val2 > 7.0
+                # Rising condition: current > 6.0 on both and rising
+                both_high = val1 > 6.0 and val2 > 6.0
                 rising = (val1 >= prev1) or (val2 >= prev2)
                 current_valve = self.valve_states.get(zone_id, "half")
 
@@ -322,10 +322,12 @@ def main():
     parser.add_argument("--mcp-url", default=os.getenv("TWIN_MCP_URL", "http://localhost:8000"), help="Twin MCP server URL")
     parser.add_argument("--mcp-token", default=os.getenv("MCP_AUTH_TOKEN"), help="Bearer token for MCP")
     parser.add_argument("--kafka-bootstrap", default=os.getenv("KAFKA_BOOTSTRAP", "localhost:9092"), help="Kafka bootstrap broker")
+    parser.add_argument("--group-id", default=None, help="Kafka consumer group ID")
     parser.add_argument("--log-file", default=None, help="Path for JSON lines event log")
     args = parser.parse_args()
 
-    source = KafkaSource(bootstrap_servers=args.kafka_bootstrap, group_id="mock-brain-group")
+    gid = args.group_id or f"mock-brain-{os.getpid()}-{int(time.time()*1000)}"
+    source = KafkaSource(bootstrap_servers=args.kafka_bootstrap, group_id=gid)
     brain = MockCityBrain(
         reading_source=source,
         mcp_url=args.mcp_url,
