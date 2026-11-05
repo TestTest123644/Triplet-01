@@ -49,6 +49,43 @@ def format_sim_time(sim_dt: datetime) -> str:
     return sim_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def traffic_target(t_hour: float) -> float:
+    """Calculate unscaled baseline traffic flow target (veh/min) for a given sim hour [0, 24)."""
+    t = t_hour % 24.0
+    return (
+        25.0
+        + 95.0 * math.exp(-((t - 8.5) ** 2) / (2.0 * (1.2 ** 2)))
+        + 110.0 * math.exp(-((t - 17.5) ** 2) / (2.0 * (1.5 ** 2)))
+    )
+
+
+def power_target(t_hour: float) -> float:
+    """Calculate baseline electrical power load target P* (MW) for a given sim hour [0, 24).
+
+    Continuous diurnal curve:
+    - 20:00 - 21:00: Smooth evening drop from 58 to 30 MW.
+    - 21:00 - 05:00: Deep night oscillation between 27 and 33 MW.
+    - 05:00 - 06:00: Smooth morning rise from 30 to 58 MW.
+    - 06:00 - 20:00: Daytime bell curve peaking at 100 MW (58 MW at boundaries).
+    """
+    t = t_hour % 24.0
+    if 20.0 <= t < 21.0:
+        return 30.0 + 14.0 * (1.0 + math.cos(math.pi * (t - 20.0)))
+    elif 21.0 <= t or t < 5.0:
+        t_night = (t - 21.0) % 24.0
+        return 30.0 + 3.0 * math.sin(2.0 * math.pi * t_night / 8.0)
+    elif 5.0 <= t < 6.0:
+        return 30.0 + 14.0 * (1.0 - math.cos(math.pi * (t - 5.0)))
+    else:
+        return 30.0 + 70.0 * (0.6 * math.sin(math.pi * (t - 6.0) / 14.0) + 0.4)
+
+
+def water_inflow(sim_ts: float) -> float:
+    """Calculate base water inflow rate Q_base (m/s) with tidal oscillation at sim_ts (seconds timestamp)."""
+    tidal_term = 0.10 * math.sin(2.0 * math.pi * sim_ts / 44640.0)
+    return 0.003 * (1.0 + tidal_term)
+
+
 class SimulationClock:
     """Dual-clock system coordinator.
 
@@ -198,7 +235,7 @@ class CitySimulator:
         self.run_id = uuid.uuid4().hex
         self.session_id = self.run_id[:4]
         self.rng = random.Random(seed)
-        self.physics_rng = random.Random(seed)
+        self.physics_rng = random.Random(f"physics:{seed}")
         self.ledger = ledger or GroundTruthLedger()
         self.keystore = DeviceKeystore(keystore_path=keystore_path)
 
@@ -452,6 +489,23 @@ class CitySimulator:
                 if dev.zone_id != zone_id:
                     raise ValueError(f"Device '{device_id}' does not belong to zone '{zone_id}'")
 
+        if params is not None and not isinstance(params, dict):
+            raise ValueError("params must be an object/dict")
+
+        if params:
+            def _check_finite(obj: Any) -> None:
+                if isinstance(obj, float):
+                    if not math.isfinite(obj):
+                        raise ValueError(f"Non-finite numeric parameter detected: {obj}")
+                elif isinstance(obj, dict):
+                    for v in obj.values():
+                        _check_finite(v)
+                elif isinstance(obj, (list, tuple)):
+                    for v in obj:
+                        _check_finite(v)
+
+            _check_finite(params)
+
         if type == "rain_storm":
             if intensity is None:
                 intensity = 3.0
@@ -460,6 +514,8 @@ class CitySimulator:
                     intensity = float(intensity)
                 except (ValueError, TypeError):
                     raise ValueError("intensity must be a numeric value between 1 and 5")
+                if not math.isfinite(intensity):
+                    raise ValueError("intensity must be a finite number")
                 if intensity < 1.0 or intensity > 5.0:
                     raise ValueError("intensity must be between 1.0 and 5.0")
         else:
@@ -470,14 +526,20 @@ class CitySimulator:
                     intensity = float(intensity)
                 except (ValueError, TypeError):
                     raise ValueError("intensity must be a numeric value")
+                if not math.isfinite(intensity):
+                    raise ValueError("intensity must be a finite number")
 
         if duration_s is not None:
             try:
                 duration_s = float(duration_s)
             except (ValueError, TypeError):
                 raise ValueError("duration_s must be a numeric value")
+            if not math.isfinite(duration_s):
+                raise ValueError("duration_s must be a finite number")
             if duration_s <= 0.0:
                 raise ValueError("duration_s must be greater than 0")
+        elif type in ("rain_storm", "air_hazard"):
+            duration_s = 1800.0
 
         event_id = f"ev-{uuid.uuid4().hex[:8]}"
         start_sim_ts = self.get_sim_time()
@@ -562,11 +624,7 @@ class CitySimulator:
         )
 
         # 1. Update traffic_camera models
-        v_star_base = (
-            25.0
-            + 95.0 * math.exp(-((t_hour - 8.5) ** 2) / (2.0 * (1.2 ** 2)))
-            + 110.0 * math.exp(-((t_hour - 17.5) ** 2) / (2.0 * (1.5 ** 2)))
-        )
+        v_star_base = traffic_target(t_hour)
 
         # Precompute base targets per camera and zone means
         zone_cam_targets: Dict[str, List[Tuple[DeviceState, float]]] = {z["zone_id"]: [] for z in self.ZONES}
@@ -609,14 +667,13 @@ class CitySimulator:
 
             tau = 60.0
             alpha = 1.0 - math.exp(-dt / tau)
-            noise = 2.5 * math.sqrt(dt) * self.physics_rng.gauss(0.0, 1.0)
+            noise = 0.6 * math.sqrt(dt) * self.physics_rng.gauss(0.0, 1.0)
             true_val = dev.current_value + alpha * (target - dev.current_value) + noise
-            dev.current_value = round(max(dev.min_val, min(dev.max_val, true_val)), 4)
+            dev.current_value = round(max(dev.min_val, min(dev.max_val, true_val)), 6)
 
         # 2. Update water_level models
         sim_ts_sec = sim_dt.timestamp()
-        tidal_term = 0.10 * math.sin(2.0 * math.pi * sim_ts_sec / 44640.0)
-        q_base = 0.003 * (1.0 + tidal_term)
+        q_base = water_inflow(sim_ts_sec)
 
         for dev in self.devices.values():
             if dev.device_type != "water_level":
@@ -657,14 +714,7 @@ class CitySimulator:
             dev.current_value = round(max(dev.min_val, min(dev.max_val, new_h)), 6)
 
         # 3. Update power_load models
-        if 6.0 <= t_hour <= 20.0:
-            p_star = 30.0 + 70.0 * (0.6 * math.sin(math.pi * (t_hour - 6.0) / 14.0) + 0.4)
-        else:
-            if t_hour >= 20.0:
-                t_night = t_hour - 20.0
-            else:
-                t_night = t_hour + 4.0
-            p_star = 44.0 + 14.0 * math.cos(math.pi * t_night / 5.0)
+        p_star = power_target(t_hour)
 
         grid_factors = {
             "grid_a": 1.0,
@@ -694,9 +744,9 @@ class CitySimulator:
 
             tau = 120.0
             alpha = 1.0 - math.exp(-dt / tau)
-            noise = 1.2 * math.sqrt(dt) * self.physics_rng.gauss(0.0, 1.0)
+            noise = 0.3 * math.sqrt(dt) * self.physics_rng.gauss(0.0, 1.0)
             true_p = dev.current_value + alpha * (target_power - dev.current_value) + noise
-            dev.current_value = round(max(dev.min_val, min(dev.max_val, true_p)), 4)
+            dev.current_value = round(max(dev.min_val, min(dev.max_val, true_p)), 6)
 
             if overload_ev and not overload_ev.blackout:
                 if dev.current_value > 114.0:
@@ -751,9 +801,9 @@ class CitySimulator:
             target_aqi = bg + (0.45 * avg_traffic) + industrial_term + incident_terms
             tau = 300.0
             alpha = 1.0 - math.exp(-dt / tau)
-            noise = 0.5 * math.sqrt(dt) * self.physics_rng.gauss(0.0, 1.0)
+            noise = 0.15 * math.sqrt(dt) * self.physics_rng.gauss(0.0, 1.0)
             true_aqi = dev.current_value + alpha * (target_aqi - dev.current_value) + noise
-            dev.current_value = round(max(dev.min_val, min(dev.max_val, true_aqi)), 4)
+            dev.current_value = round(max(dev.min_val, min(dev.max_val, true_aqi)), 6)
 
         # 5. Update emergency_call models
         for dev in self.devices.values():

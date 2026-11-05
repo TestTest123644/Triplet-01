@@ -50,7 +50,7 @@ The digital twin models 42 IoT devices across 5 municipal categories:
   - `adaptive`: Targets the zone-wide mean target across both cameras in the zone.
 - **Incident Impact (`traffic_accident`):**
   - Reduces target throughput to $\times 0.3$ ramped over 60 simulation seconds.
-- **Dynamics:** Time constant $\tau = 60\text{ s}$, noise $\sigma = 2.5\sqrt{\Delta t}\text{ veh/min}$.
+- **Dynamics:** Time constant $\tau = 60\text{ s}$, noise $\sigma = 0.6\sqrt{\Delta t}\text{ veh/min}$. Steady-state spread $\sigma\sqrt{\tau/2} \approx 3.29\text{ veh/min}$.
 
 ---
 
@@ -82,20 +82,26 @@ The digital twin models 42 IoT devices across 5 municipal categories:
 - **Metric:** Substation electrical load in megawatts ($P$).
 - **Operating Bounds:** $5.0 \le P \le 120.0\text{ MW}$.
 - **Diurnal Target Demand ($P^*(t)$):**
+  - **Evening Transition ($20:00 \le t < 21:00$):**
+    $$P^*(t) = 30.0 + 14.0 \cdot (1.0 + \cos(\pi(t - 20.0)))$$
+    Smooth cosine descent from $58.0\text{ MW}$ down to $30.0\text{ MW}$.
+  - **Deep Night ($21:00 \le t < 05:00$):**
+    With $t_{\text{night}} = (t - 21.0) \pmod{24}$:
+    $$P^*(t) = 30.0 + 3.0 \cdot \sin\left(\frac{2\pi \cdot t_{\text{night}}}{8.0}\right)$$
+    Night load oscillates gently between $27.0\text{ MW}$ and $33.0\text{ MW}$ (strictly within $25 - 35\text{ MW}$).
+  - **Morning Transition ($05:00 \le t < 06:00$):**
+    $$P^*(t) = 30.0 + 14.0 \cdot (1.0 - \cos(\pi(t - 5.0)))$$
+    Smooth cosine ascent from $30.0\text{ MW}$ up to $58.0\text{ MW}$.
   - **Daytime ($06:00 \le t \le 20:00$):**
     $$P^*(t) = 30.0 + 70.0 \cdot \left(0.6 \cdot \sin\left(\frac{\pi(t - 6.0)}{14.0}\right) + 0.4\right)$$
-    Daytime peak reaches $100.0\text{ MW}$ (within $85 - 110\text{ MW}$).
-  - **Night ($20:00 < t < 06:00$):**
-    Using hours into the night $t_{\text{night}} \in [0, 10]$ ($t_{\text{night}} = t - 20$ if $t \ge 20$ else $t + 4$):
-    $$P^*(t) = 44.0 + 14.0 \cdot \cos\left(\frac{\pi \cdot t_{\text{night}}}{5.0}\right)$$
-    Night load settles around $30.0\text{ MW}$ (within $25 - 35\text{ MW}$).
-  - Smooth $C^1$ transition: Zero first derivative at $06:00$ and $20:00$ ($58.0\text{ MW}$), preventing jumps $> 3\text{ MW}$ between consecutive simulation minutes.
+    Daytime peak reaches $100.0\text{ MW}$ at 13:00 (within $85 - 110\text{ MW}$).
+  - Seamless continuity at boundary hours $05:00$, $06:00$, $20:00$, and $21:00$ prevents jumps $> 3\text{ MW}$ between consecutive simulation minutes (max step $< 0.75\text{ MW/min}$).
 - **Actuation Impact (`switch_grid`):**
   - Grid state factors: `grid_a` ($1.0$), `grid_b` ($0.85$), `island` ($0.60$), `shed` ($0.40$), `standby` ($0.20$).
 - **Incident Impact (`grid_overload`):**
   - Target demand multiplied by $1.35$.
   - If true power exceeds $114.0\text{ MW}$ continuously for 60 simulation seconds, **blackout** triggers: power target drops to $10\%$ of normal target and emergency calls surge ($+4.0$).
-- **Dynamics:** Time constant $\tau = 120\text{ s}$, noise $\sigma = 1.2\sqrt{\Delta t}\text{ MW}$.
+- **Dynamics:** Time constant $\tau = 120\text{ s}$, noise $\sigma = 0.3\sqrt{\Delta t}\text{ MW}$. Steady-state spread $\sigma\sqrt{\tau/2} \approx 2.32\text{ MW}$.
 
 ---
 
@@ -106,12 +112,12 @@ The digital twin models 42 IoT devices across 5 municipal categories:
   $$\text{Target} = \text{Background}(\text{zone}) + 0.45 \cdot \text{mean}(\text{zone true traffic}) + \text{IndustrialTerm} + \text{IncidentTerms}$$
 - **Parameters:**
   - Zone Backgrounds: `zone-1` ($18.0$), `zone-2` ($15.0$), `zone-3` ($20.0$), `zone-4` ($8.0$), `zone-5` ($14.0$), `zone-6` ($12.0$).
-  - Clean Baseline: In `zone-4` (Green Hills), background of $8.0$ ensures baseline AQI stays reliably between $25$ and $45$.
+  - Clean Baseline: In `zone-4` (Green Hills), background of $8.0$ yields measured AQI of about $19$ at night and about $60$ at rush hour.
   - Industrial Contribution: `zone-3` receives $+25.0\text{ AQI}$.
   - Incidents:
     - `fire`: $+150.0\text{ AQI}$ ramping linearly over 120 simulation seconds.
     - `air_hazard`: $+100.0\text{ AQI}$, mitigated by signal plans (`red_restriction` reduces bonus by 50%, `all_red` reduces bonus by 80%).
-- **Dynamics:** Time constant $\tau = 300\text{ s}$, noise $\sigma = 0.5\sqrt{\Delta t}\text{ AQI}$.
+- **Dynamics:** Time constant $\tau = 300\text{ s}$, noise $\sigma = 0.15\sqrt{\Delta t}\text{ AQI}$. Steady-state spread $\sigma\sqrt{\tau/2} \approx 1.84\text{ AQI}$.
 
 ---
 
@@ -134,13 +140,13 @@ The digital twin models 42 IoT devices across 5 municipal categories:
 
 Physical incidents represent real municipal emergencies, distinct from adversary cyber attacks. They alter physical reality directly and can be resolved through timely city actuation.
 
-| Incident Type | Scope | Physical Effect | Resolution Mechanism |
+| Incident Type | Scope | Physical Effect | Resolution & Duration Defaults |
 | :--- | :--- | :--- | :--- |
-| **`rain_storm`** | Zone | Upstream inflow $Q_{\text{in}}$ multiplied by intensity ($1.0 - 5.0$, default $3.0$). | Naturally expires at `duration_s`; water recedes through gravity valves. |
-| **`traffic_accident`** | Device (Camera) | Camera target multiplied by $\times 0.3$ ramped over 60 s; zone $\lambda + 6.0$. | Resolved by `dispatch` matching `traffic_accident`, `medical_emergency`, or `medical_surge` after 300 s response time. |
-| **`fire`** | Zone | AQI target $+150$ ramped over 120 s; zone $\lambda + 8.0$. | Resolved by `dispatch` matching `fire` after 180 s response time. |
-| **`grid_overload`** | Zone (Power) | Power target $\times 1.35$. Continuous load $> 114\text{ MW}$ for 60 s causes blackout (target $\times 0.10$, $\lambda + 4.0$). | Pre-blackout: resolved immediately by `switch_grid` to `grid_b`, `shed`, or `standby`. Post-blackout: resolved by `dispatch("blackout")` after 240 s. |
-| **`air_hazard`** | Zone | AQI target $+100$, mitigated by `red_restriction` or `all_red` signal plans. | Naturally expires at `duration_s`. |
+| **`rain_storm`** | Zone | Upstream inflow $Q_{\text{in}}$ multiplied by intensity ($1.0 - 5.0$, default $3.0$). | Defaults to `duration_s = 1800` (30 min) when omitted; naturally expires. |
+| **`traffic_accident`** | Device (Camera) | Camera target multiplied by $\times 0.3$ ramped over 60 s; zone $\lambda + 6.0$. | Lasts until resolved by `dispatch` matching `traffic_accident`, `medical_emergency`, or `medical_surge` after 300 s response time (or cleared). |
+| **`fire`** | Zone | AQI target $+150$ ramped over 120 s; zone $\lambda + 8.0$. | Lasts until resolved by `dispatch` matching `fire` after 180 s response time (or cleared). |
+| **`grid_overload`** | Zone (Power) | Power target $\times 1.35$. Continuous load $> 114\text{ MW}$ for 60 s causes blackout (target $\times 0.10$, $\lambda + 4.0$). | Pre-blackout: resolved immediately by `switch_grid` to `grid_b`, `shed`, or `standby`. Post-blackout: resolved by `dispatch("blackout")` after 240 s. Lasts until resolved or cleared. |
+| **`air_hazard`** | Zone | AQI target $+100$, mitigated by `red_restriction` or `all_red` signal plans. | Defaults to `duration_s = 1800` (30 min) when omitted; naturally expires. |
 
 ### Zero-Trust Isolation of Physical Incidents
 - **MCP Invisibility:** Physical events are never exposed to City Brain or Guardian through MCP queries.

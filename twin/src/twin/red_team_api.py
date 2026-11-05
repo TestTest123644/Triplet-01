@@ -187,12 +187,22 @@ def build_red_team_app(sim: CitySimulator, token: str, streamer: Optional[Any] =
     async def api_inject_event(request: Request) -> JSONResponse:
         try:
             body = await request.json()
+            if not isinstance(body, dict):
+                return JSONResponse(
+                    {
+                        "status": "error",
+                        "code": "INVALID_EVENT",
+                        "message": "Request body must be a JSON object",
+                    },
+                    status_code=400,
+                )
+
             event_type = body.get("type")
             zone_id = body.get("zone_id")
             device_id = body.get("device_id")
             intensity = body.get("intensity")
             duration_s = body.get("duration_s")
-            params = body.get("params", {})
+            params = body.get("params")
 
             if not event_type or not zone_id:
                 return JSONResponse(
@@ -200,6 +210,16 @@ def build_red_team_app(sim: CitySimulator, token: str, streamer: Optional[Any] =
                         "status": "error",
                         "code": "INVALID_EVENT",
                         "message": "Missing required fields: 'type' and 'zone_id'",
+                    },
+                    status_code=400,
+                )
+
+            if params is not None and not isinstance(params, dict):
+                return JSONResponse(
+                    {
+                        "status": "error",
+                        "code": "INVALID_EVENT",
+                        "message": "Field 'params' must be a JSON object",
                     },
                     status_code=400,
                 )
@@ -235,13 +255,32 @@ def build_red_team_app(sim: CitySimulator, token: str, streamer: Optional[Any] =
     async def api_clear_event(request: Request) -> JSONResponse:
         try:
             body = await request.json() if request.headers.get("content-length") not in (None, "0") else {}
-            event_id = body.get("event_id")
-            if event_id and event_id != "all":
-                cleared = sim.clear_event(event_id)
-                return JSONResponse({"status": "ok", "cleared": cleared, "event_id": event_id})
+            if not isinstance(body, dict) or "event_id" not in body or not body.get("event_id"):
+                return JSONResponse(
+                    {
+                        "status": "error",
+                        "code": "INVALID_EVENT",
+                        "message": "Missing required field: 'event_id'",
+                    },
+                    status_code=400,
+                )
+
+            event_id = body["event_id"]
+            if event_id == "all":
+                count = sim.clear_all_events()
+                return JSONResponse({"status": "ok", "cleared_all": True, "count": count})
             else:
-                sim.clear_all_events()
-                return JSONResponse({"status": "ok", "cleared_all": True})
+                cleared = sim.clear_event(event_id)
+                if not cleared:
+                    return JSONResponse(
+                        {
+                            "status": "error",
+                            "code": "EVENT_NOT_FOUND",
+                            "message": f"Event '{event_id}' not found",
+                        },
+                        status_code=404,
+                    )
+                return JSONResponse({"status": "ok", "cleared": True, "event_id": event_id})
         except Exception as e:
             logger.error(f"Error clearing physical events via API: {e}")
             return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
