@@ -3,6 +3,7 @@ from pathlib import Path
 
 import jsonschema
 import pytest
+from jsonschema import FormatChecker
 
 from city_brain.adapters.files.jsonl_log import verify_chain
 from city_brain.runtime.main import main
@@ -29,7 +30,12 @@ def test_t02_valve_opened_before_6m_and_verified(t02_events):
     cmd = first(t02_events, type=COMMAND, target=valve, state="open", status="DISPATCHED")
     assert max_level_before(t02_events, valve, cmd["simtime"]) < expect["level_limit"]
     assert first(t02_events, type=VERIFICATION, actionid=cmd["actionid"])["data"]["verdict"] == expect["verdict"]
-    assert all(e["data"]["status"] != "REFUSED" or e["data"]["reasons"] for e in commands(t02_events))
+
+
+def test_t02_refuses_nothing_on_a_commanded_channel(t02_events):
+    commanded = {e["data"]["target"] for e in matching(t02_events, type=COMMAND, status="DISPATCHED")}
+    assert load_scenario("T02").expect["valve"] in commanded
+    assert [e for e in matching(t02_events, type=COMMAND, status="REFUSED") if e["data"]["target"] in commanded] == []
 
 
 def test_t02_channel_returns_into_band(t02_events):
@@ -52,15 +58,23 @@ def test_t05_faulty_valve_unverified_alerted_not_resent(t05_events):
     expect = load_scenario("T05").expect
     valve = expect["valve"]
     assert verdicts_for(t05_events, valve) == expect["verdicts"]
-    assert count(t05_events, type=ALERT, code="ACTUATOR_NO_EFFECT") == expect["no_effect_alerts"]
+    assert count(t05_events, type=ALERT, code="ACTUATOR_NO_EFFECT", subject=valve) == expect["no_effect_alerts"]
     assert count(t05_events, type=COMMAND, target=valve, status="DISPATCHED") == expect["dispatches"]
 
 
 def test_twin_restart_reloads_keys_and_continues(restart_events):
-    assert any(e["type"].endswith("status.v1") and e["data"]["reason"] == "registry_reloaded" for e in restart_events)
-    assert any(e["type"].endswith("status.v1") and e["data"]["reason"] == "epoch_changed" for e in restart_events)
+    reasons = [e["data"]["reason"] for e in restart_events if e["type"].endswith("status.v1")]
+    assert reasons.index("registry_reloaded") < reasons.index("epoch_changed")
     later = [e for e in restart_events if e["epoch"] == 1]
     assert any(e["type"].endswith("command.v1") and e["data"]["status"] == "DISPATCHED" for e in later)
+    assert "verified" in [e["data"]["verdict"] for e in matching(later, type=VERIFICATION)]
+
+
+def test_twin_restart_settles_the_action_it_interrupted(restart_events):
+    [alert] = matching(restart_events, type=ALERT, code="EPOCH_CHANGED_ACTION_UNKNOWN", subject="z1-wl1")
+    trail = [e["data"]["status"] for e in commands(restart_events) if e["actionid"] == alert["actionid"]]
+    assert trail[-2:] == ["VERIFYING", "UNKNOWN"]
+    assert count(restart_events, type=VERIFICATION, actionid=alert["actionid"]) == 0
 
 
 def test_every_logged_event_matches_the_schema_and_the_chain_verifies(
@@ -69,7 +83,7 @@ def test_every_logged_event_matches_the_schema_and_the_chain_verifies(
     for path, events in ((t02_log, t02_events), (t05_log, t05_events), (restart_log, restart_events)):
         assert verify_chain(path)
         for event in events:
-            jsonschema.validate(event, SCHEMA)
+            jsonschema.validate(event, SCHEMA, format_checker=FormatChecker())
 
 
 def test_log_name_carries_scenario_and_epoch(t02_log):
@@ -103,5 +117,6 @@ def test_scenario_rejects_an_unknown_guardian_policy(tmp_path, monkeypatch):
 
 
 def test_t05_alert_reaches_operator_and_guardian(t05_events):
-    audiences = sorted(e["data"]["audience"] for e in matching(t05_events, type=ALERT, code="ACTUATOR_NO_EFFECT"))
+    alerts = matching(t05_events, type=ALERT, code="ACTUATOR_NO_EFFECT", subject="z4-wl1")
+    audiences = sorted(e["data"]["audience"] for e in alerts)
     assert audiences == ["guardian", "operator"]

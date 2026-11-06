@@ -685,6 +685,14 @@ def test_reading_from_a_contained_device_stays_weightless_after_release(verdict_
     assert any(r.device_status is DeviceStatus.QUARANTINED for r in record.intent.evidence)
 
 
+def test_a_refused_command_says_why():
+    s = state_with_registry(allowlist={})
+    s = feed_rising_channel(s, DEVICE, until_level=6.05)
+    [refused] = commands(s.last_effects, "REFUSED")
+    assert refused["data"]["reasons"]
+    assert refused["data"]["shield"]["refusals"] == refused["data"]["reasons"]
+
+
 def test_dispatched_is_published_before_the_command_is_sent():
     s, _ = dispatched_open()
     published = s.last_effects.index(Publish(commands(s.last_effects, "DISPATCHED")[0]))

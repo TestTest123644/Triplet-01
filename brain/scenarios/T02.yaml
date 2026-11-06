@@ -1,5 +1,5 @@
 # T02: a channel rises past the high band with nothing attacking it, then drains back into band.
-duration_s: 300
+duration_s: 360
 guardian_policy: trust_all
 inject: []
 expect:

@@ -37,10 +37,13 @@ class JsonlLog:
 
 
 def verify_chain(path: Path) -> bool:
-    """True only if every line links to the one before it and matches its hash. Never raises."""
+    """True only if there are records and each links to the one before it and matches its hash. Never raises."""
     prev_hash = GENESIS_HASH
     try:
-        for line in Path(path).read_bytes().splitlines():
+        lines = Path(path).read_bytes().splitlines()
+        if not lines:
+            return False
+        for line in lines:
             record = json.loads(line)
             if record["prev_hash"] != prev_hash or record["hash"] != _digest(record):
                 return False

@@ -24,7 +24,7 @@ from city_brain.core.state import BrainState
 from city_brain.core.step import step
 from city_brain.domain.types import DeviceProfile
 from city_brain.edge.guard import Accepted, AcceptedVerdict, ReadingGuard, Rejected, VerdictGuard
-from city_brain.edge.profiles import StateNotAllowed, TwinProfile
+from city_brain.edge.profiles import ProfileError, ToolCall, TwinProfile
 from city_brain.edge.signatures import KeyRing
 from city_brain.ports import TwinPort
 from city_brain.runtime.clocks import Clock
@@ -136,16 +136,21 @@ class BrainApp:
         data = event["data"]
         if (event["type"], data.get("status")) != DISPATCHED_COMMAND:
             return event
-        try:
-            call = self._profile.to_tool_call(data["capability"], data["target"], data["state"])
-        except StateNotAllowed:
+        call = self._tool_call(data["capability"], data["target"], data["state"])
+        if isinstance(call, ProfileError):
             return event  # the SendCommand that follows reports it
         return {**event, "data": {**data, "tool": {"name": call.tool, "args": call.args}}}
 
-    async def _send(self, command: SendCommand) -> CommandResult:
+    def _tool_call(self, capability: str, target: str, state: str) -> ToolCall | ProfileError:
+        """The partner call, or why there is none: a bad mapping must end as REJECTED, not crash the loop."""
         try:
-            call = self._profile.to_tool_call(command.capability, command.target, command.state)
-        except StateNotAllowed:
-            return CommandResult(command.action_id, "REJECTED", {"error": "StateNotAllowed"})
+            return self._profile.to_tool_call(capability, target, state)
+        except ProfileError as exc:
+            return exc
+
+    async def _send(self, command: SendCommand) -> CommandResult:
+        call = self._tool_call(command.capability, command.target, command.state)
+        if isinstance(call, ProfileError):
+            return CommandResult(command.action_id, "REJECTED", {"error": type(call).__name__})
         outcome = await self._twin.call(call, command.idempotency_key)
         return CommandResult(command.action_id, outcome.outcome, outcome.reply)

@@ -6,9 +6,18 @@ import pytest
 from city_brain.adapters.files.jsonl_log import JsonlLog
 from city_brain.adapters.inproc_twin import InProcTwin
 from city_brain.config import load_config
-from city_brain.core.events import CancelTimer, CommandResult, Publish, SendCommand, StartTimer, TimerFired
+from city_brain.core.events import (
+    CancelTimer,
+    CommandResult,
+    Publish,
+    SendCommand,
+    StartTimer,
+    TimerFired,
+    VerdictReceived,
+)
+from city_brain.domain.types import ActionStatus
 from city_brain.edge.guard import ReadingGuard, VerdictGuard
-from city_brain.edge.profiles import GuardianProfile
+from city_brain.edge.profiles import GuardianProfile, ProfileError
 from city_brain.edge.signatures import KeyRing
 from city_brain.runtime import app as app_module
 from city_brain.runtime.app import BrainApp
@@ -16,6 +25,7 @@ from city_brain.runtime.clocks import SimClock
 from mocks.guardian.mock_guardian import MockGuardian
 from mocks.keys import derive_keypair
 from mocks.twin import MockTwin
+from tests.helpers_coordinator import feed_rising_channel, seq_of, state_with_registry, verdict_for
 
 BRAIN = Path(__file__).resolve().parents[2]
 DEVICES = ("z1-wl1", "z2-wl1", "z3-wl1", "z4-wl1", "z5-wl1", "z6-wl1")
@@ -187,6 +197,25 @@ async def test_state_not_allowed_becomes_a_rejected_result(rig, monkeypatch):
     await rig.app.feed(TimerFired("t", "k"))
     assert seen[1] == CommandResult("a1", "REJECTED", {"error": "StateNotAllowed"})
     assert rig.log()[-1]["data"]["tool"] is None
+    assert rig.twin.command_results == {}
+
+
+async def test_unmappable_command_is_rejected_and_frees_the_target(rig, monkeypatch):
+    def unmappable(*_):
+        raise ProfileError("unknown capability 'valve'")
+
+    monkeypatch.setattr(rig.twin.profile, "to_tool_call", unmappable)
+    state = feed_rising_channel(state_with_registry(), "z1-wl1", until_level=6.05, verdict=None)
+    [record] = state.actions.values()
+    rig.app.state = state
+    for ref in record.intent.evidence:
+        await rig.app.feed(VerdictReceived(verdict_for("z1-wl1", seq_of(ref))))
+    assert record.status is ActionStatus.REJECTED
+    assert "z1-wl1" not in state.in_flight
+    rejected = rig.log()[-1]
+    assert rejected["data"]["status"] == "REJECTED"
+    assert rejected["data"]["twin_reply"] == {"error": "ProfileError"}
+    assert [e["data"]["tool"] for e in rig.log() if e["data"].get("status") == "DISPATCHED"] == [None]
     assert rig.twin.command_results == {}
 
 

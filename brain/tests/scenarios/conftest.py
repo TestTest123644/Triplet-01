@@ -5,6 +5,8 @@ import pytest
 from scenarios.runner import run
 from tests.scenarios.helpers import read_log
 
+RESTART_AT_S = 192  # z1-wl1 opened at 191.4 s and is still VERIFYING
+
 
 @pytest.fixture(scope="session")
 def t02_log(tmp_path_factory):
@@ -23,7 +25,7 @@ def t05_log(tmp_path_factory):
 
 @pytest.fixture(scope="session")
 def restart_log(tmp_path_factory):
-    return run("T02", "standalone", tmp_path_factory.mktemp("restart"), restart_at_s=200, duration_s=450)
+    return run("T02", "standalone", tmp_path_factory.mktemp("restart"), restart_at_s=RESTART_AT_S, duration_s=450)
 
 
 @pytest.fixture(scope="session")

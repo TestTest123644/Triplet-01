@@ -84,5 +84,11 @@ def test_verify_chain_survives_crlf_conversion(tmp_path):
     assert verify_chain(path)
 
 
+def test_verify_chain_of_an_empty_log_is_false(tmp_path):
+    path = tmp_path / "a.jsonl"
+    JsonlLog(path)
+    assert verify_chain(path) is False
+
+
 def test_verify_chain_of_a_missing_file_is_false(tmp_path):
     assert verify_chain(tmp_path / "nope.jsonl") is False
