@@ -1,7 +1,7 @@
 import pytest
 from pydantic import ValidationError
 
-from city_brain.domain.types import Alternative, RiskClass, TrustState
+from city_brain.domain.types import Alternative, CanonicalUnit, RiskClass, StateKind, TrustState
 from tests.factories import make_observation, make_verdict
 
 
@@ -27,3 +27,26 @@ def test_alternative_carries_rejected_because():
 
 def test_risk_class_values():
     assert [r.value for r in RiskClass] == ["R0", "R1", "R2", "R3"]
+
+
+def test_enum_wire_values_are_pinned():
+    from city_brain.domain.types import (
+        ActionStatus, CanonicalUnit, DeviceStatus, SensorKind, StateKind,
+    )
+
+    assert {m.name: m.value for m in TrustState} == {
+        "TRUSTED": "TRUSTED", "DOUBTFUL": "DOUBTFUL",
+        "UNTRUSTED": "UNTRUSTED", "UNKNOWN": "UNKNOWN",
+    }
+    assert {m.name: m.value for m in StateKind} == {
+        "OBSERVED": "OBSERVED", "VALIDATED": "VALIDATED",
+        "ESTIMATED": "ESTIMATED", "UNKNOWN": "UNKNOWN",
+    }
+    assert {m.name: m.value for m in CanonicalUnit} == {
+        "M": "m", "VEH_PER_MIN": "veh_per_min", "MW": "MW",
+        "AQI": "AQI", "CALLS_PER_MIN": "calls_per_min",
+    }
+    assert ActionStatus.DISPATCHED.value == "DISPATCHED"
+    assert ActionStatus.REFUSED.value == "REFUSED"
+    assert DeviceStatus.OK.value == "OK"
+    assert SensorKind.WATER_LEVEL.value == "WATER_LEVEL"

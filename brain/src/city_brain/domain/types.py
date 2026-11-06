@@ -1,48 +1,48 @@
 """Canonical, immutable domain types."""
 
 from datetime import datetime
-from enum import StrEnum, auto
+from enum import StrEnum
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict
 
 
 class SensorKind(StrEnum):
-    WATER_LEVEL = auto()
-    TRAFFIC_FLOW = auto()
-    POWER_LOAD = auto()
-    AIR_QUALITY = auto()
-    CALL_RATE = auto()
+    WATER_LEVEL = "WATER_LEVEL"
+    TRAFFIC_FLOW = "TRAFFIC_FLOW"
+    POWER_LOAD = "POWER_LOAD"
+    AIR_QUALITY = "AIR_QUALITY"
+    CALL_RATE = "CALL_RATE"
 
 
 class CanonicalUnit(StrEnum):
-    M = auto()
-    VEH_PER_MIN = auto()
-    MW = auto()
-    AQI = auto()
-    CALLS_PER_MIN = auto()
+    M = "m"
+    VEH_PER_MIN = "veh_per_min"
+    MW = "MW"
+    AQI = "AQI"
+    CALLS_PER_MIN = "calls_per_min"
 
 
 class DeviceStatus(StrEnum):
-    OK = auto()
-    ISOLATED = auto()
-    QUARANTINED = auto()
-    ROLLED_BACK = auto()
-    MODELLED = auto()
+    OK = "OK"
+    ISOLATED = "ISOLATED"
+    QUARANTINED = "QUARANTINED"
+    ROLLED_BACK = "ROLLED_BACK"
+    MODELLED = "MODELLED"
 
 
 class TrustState(StrEnum):
-    TRUSTED = auto()
-    DOUBTFUL = auto()
-    UNTRUSTED = auto()
-    UNKNOWN = auto()
+    TRUSTED = "TRUSTED"
+    DOUBTFUL = "DOUBTFUL"
+    UNTRUSTED = "UNTRUSTED"
+    UNKNOWN = "UNKNOWN"
 
 
 class StateKind(StrEnum):
-    OBSERVED = auto()
-    VALIDATED = auto()
-    ESTIMATED = auto()
-    UNKNOWN = auto()
+    OBSERVED = "OBSERVED"
+    VALIDATED = "VALIDATED"
+    ESTIMATED = "ESTIMATED"
+    UNKNOWN = "UNKNOWN"
 
 
 class RiskClass(StrEnum):
@@ -53,17 +53,17 @@ class RiskClass(StrEnum):
 
 
 class ActionStatus(StrEnum):
-    PROPOSED = auto()
-    REFUSED = auto()
-    AWAITING_TRUST = auto()
-    BLOCKED = auto()
-    DISPATCHED = auto()
-    REJECTED = auto()
-    UNKNOWN = auto()
-    VERIFYING = auto()
-    VERIFIED = auto()
-    UNVERIFIED = auto()
-    SUPERSEDED = auto()
+    PROPOSED = "PROPOSED"
+    REFUSED = "REFUSED"
+    AWAITING_TRUST = "AWAITING_TRUST"
+    BLOCKED = "BLOCKED"
+    DISPATCHED = "DISPATCHED"
+    REJECTED = "REJECTED"
+    UNKNOWN = "UNKNOWN"
+    VERIFYING = "VERIFYING"
+    VERIFIED = "VERIFIED"
+    UNVERIFIED = "UNVERIFIED"
+    SUPERSEDED = "SUPERSEDED"
 
 
 class _Frozen(BaseModel):
