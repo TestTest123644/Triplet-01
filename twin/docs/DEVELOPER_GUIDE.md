@@ -296,11 +296,11 @@ sqlite3 ground_truth.db "SELECT device_id, type, zone_id, status FROM devices LI
 
 ### 1. `ConnectionRefusedError: [Errno 61]` on Kafka port 19092
 - **Cause:** Apache Kafka in KRaft mode takes 5 to 10 seconds to finish controller quorum elections on initial boot.
-- **Fix:** Wait 10 seconds or check container health with `docker compose ps`. Our `twin.main` runner automatically retries connecting up to 10 times.
+- **Fix:** Wait 10 seconds or check container health with `docker compose ps`. Our `twin.main` runner automatically retries connecting up to 30 times (`KAFKA_WAIT_RETRIES=30`).
 
 ### 2. `sqlite3.OperationalError: database is locked`
 - **Cause:** Concurrent reads from the Streamlit dashboard while the simulation engine is inserting batches at 10 Hz.
-- **Fix:** We resolved this in `twin/db_ledger.py` by enabling Write-Ahead Logging (`PRAGMA journal_mode = WAL;`) and a 10-second busy timeout (`PRAGMA busy_timeout = 10000;`). If you open the database in a custom script, always use `timeout=10.0`.
+- **Fix:** We resolved this in `twin/src/twin/db_ledger.py` by enabling Write-Ahead Logging (`PRAGMA journal_mode = WAL;`) and a 10-second busy timeout (`PRAGMA busy_timeout = 10000;`). If you open the database in a custom script, always use `timeout=10.0`.
 
 ### 3. Port Conflicts (`8000`, `8501`, `19092`)
 - If port `8000` is already in use by another local web service, override it via environment variable:

@@ -59,19 +59,10 @@ class KafkaSource(ReadingSource):
         try:
             import confluent_kafka
             try:
-                import importlib
-                kafka_config_mod = importlib.import_module("twin.kafka_config")
-                kafka_client_config = getattr(kafka_config_mod, "kafka_client_config")
-                sasl_conf = kafka_client_config()
+                from mocks.kafka_config import kafka_client_config
             except ImportError:
-                import sys, os
-                src_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src"))
-                if src_path not in sys.path:
-                    sys.path.insert(0, src_path)
-                import importlib
-                kafka_config_mod = importlib.import_module("twin.kafka_config")
-                kafka_client_config = getattr(kafka_config_mod, "kafka_client_config")
-                sasl_conf = kafka_client_config()
+                from .kafka_config import kafka_client_config
+            sasl_conf = kafka_client_config()
 
             consumer_conf = {
                 "bootstrap.servers": bootstrap_servers,

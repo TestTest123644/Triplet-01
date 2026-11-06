@@ -18,10 +18,12 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt
 
-# Copy Twin source package, dashboard, and mock components
+# Copy Twin source package, dashboard, mock components, console, and streamlit config
 COPY src/ ./src/
 COPY dashboard.py ./
 COPY mocks/ ./mocks/
+COPY console/ ./console/
+COPY .streamlit/ ./.streamlit/
 
 # Expose MCP Command Server port and Streamlit Dashboard port
 EXPOSE 8000 8501

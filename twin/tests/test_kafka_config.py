@@ -189,7 +189,7 @@ def test_consumer_receives_helper_keys(monkeypatch):
         "sasl.username": "consumer_user",
         "sasl.password": "consumer_pass",
     }
-    monkeypatch.setattr("twin.kafka_config.kafka_client_config", lambda: expected_sasl)
+    monkeypatch.setattr("mocks.kafka_config.kafka_client_config", lambda: expected_sasl)
 
     captured_conf = {}
 

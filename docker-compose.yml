@@ -1,6 +1,6 @@
 services:
   kafka:
-    image: apache/kafka:latest
+    image: apache/kafka:4.3.1
     container_name: kafka
     ports:
       - "19092:19092"
@@ -45,6 +45,7 @@ services:
       RED_TEAM_PORT: "8100"
       WAIT_FOR_KAFKA: "true"
       SIM_SEED: "42"
+      SIM_SPEED: "${SIM_SPEED:-20.0}"
       GROUND_TRUTH_DB_PATH: "/app/data/ground_truth.db"
       RED_TEAM_TOKEN_FILE: "/app/data/red_team.token"
       KEYSTORE_PATH: "/app/keys/device_keys.json"
@@ -52,7 +53,8 @@ services:
       - shared_data:/app/data
       - twin_keys:/app/keys
     ports:
-      - "8000:8000"
+      - "8000:8000"  # MCP command server (JSON-RPC over HTTP/SSE)
+      - "8100:8100"  # Red-team adversary REST API
     networks:
       - city_network
     restart: unless-stopped
@@ -69,9 +71,10 @@ services:
     environment:
       GROUND_TRUTH_DB_PATH: "/app/data/ground_truth.db"
       TWIN_API_URL: "http://twin_layer:8100"
+      MCP_URL: "http://twin_layer:8000"
       RED_TEAM_TOKEN_FILE: "/app/data/red_team.token"
     ports:
-      - "8501:8501"
+      - "8501:8501"  # Streamlit operations console
     volumes:
       - shared_data:/app/data
     networks:

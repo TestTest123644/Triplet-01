@@ -1156,8 +1156,10 @@ def render_timeline_tab(db_path: str):
 
             table_records = []
             for r in operational_rows:
+                # Format time as HH:MM:SS for compact display; full RFC3339 ts remains in _raw JSON
+                time_disp = r.sim_ts[11:19] if (r.sim_ts and len(r.sim_ts) >= 19 and "T" in r.sim_ts) else r.sim_ts
                 table_records.append({
-                    "Time": r.sim_ts,
+                    "Time": time_disp,
                     "Lane": r.lane,
                     "Event": r.event_type,
                     "Target": r.target,
@@ -1170,15 +1172,15 @@ def render_timeline_tab(db_path: str):
             df_display = pd.DataFrame(table_records)
 
             # Table column configuration with proper widths at 1280px (Finding 5)
-            # Total width: 135+75+115+65+75+380+85 = 930px (no horizontal scroll at 1280px)
+            # Fits within 818px content box without horizontal scrolling
             column_config = {
-                "Time": st.column_config.TextColumn("Time", width=135),
-                "Lane": st.column_config.TextColumn("Lane", width=75),
-                "Event": st.column_config.TextColumn("Event", width=115),
-                "Target": st.column_config.TextColumn("Target", width=65),
-                "Reaction": st.column_config.TextColumn("Reaction", width=75),
-                "Summary": st.column_config.TextColumn("Summary", width=380),
-                "Chain": st.column_config.TextColumn("Chain", width=85),
+                "Time": st.column_config.TextColumn("Time", width=70),
+                "Lane": st.column_config.TextColumn("Lane", width=60),
+                "Event": st.column_config.TextColumn("Event", width=100),
+                "Target": st.column_config.TextColumn("Target", width=55),
+                "Reaction": st.column_config.TextColumn("Reaction", width=65),
+                "Summary": st.column_config.TextColumn("Summary", width=340),
+                "Chain": st.column_config.TextColumn("Chain", width=65),
                 "_raw": None,
             }
 

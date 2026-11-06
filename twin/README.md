@@ -1,90 +1,59 @@
-# Layer 1: Digital Twin & Physical World Simulation
+# Twin layer (Layer 1)
 
-The **Twin Layer** simulates the physical smart city environment, produces high-frequency telemetry, signs outgoing data cryptographically, and executes actuation and containment commands.
-
----
-
-## 1. Responsibilities
-- **Physical World Simulation (10 Hz):** Models 42 devices across 6 geographic zones in Greater Tunis spanning 5 sensor types (`traffic_camera`, `water_level`, `power_load`, `air_quality`, `emergency_call`).
-- **Telemetry Streaming (Kafka):** Broadcasts 420 msgs/s to Apache Kafka topic `twin.sensors`. Every payload conforms to the sub-300-byte schema and includes a unique Ed25519 digital signature.
-- **Synchronous Commands (MCP):** Exposes an official Model Context Protocol (MCP) server on port `8000` (`http://localhost:8000/sse`) for device discovery (`list_devices`), cryptographic key retrieval (`get_device_key`), actuation (`dispatch`, `set_valve`, `switch_grid`, `set_signal_plan`), and containment (`quarantine_device`, `isolate_device`, `rollback_reading`).
-- **Red Team Adversary Engine:** Injects 6 cyber-physical attack capabilities (`link`, `rogue`, `device_key`, `device_physical`, `actuator`, `sensor_fault`).
-- **Ground Truth Ledger:** Logs uncompromised ground truth and attack events into an isolated local SQLite database (`ground_truth.db`).
+The Twin layer simulates 42 devices across 6 zones in Greater Tunis. It streams Ed25519-signed telemetry to Kafka at 420 messages per second, exposes 16 command tools over Model Context Protocol (MCP) on port 8000, and runs an adversary engine backed by an isolated SQLite ground-truth ledger.
 
 ---
 
-## 2. Directory Layout
-```text
-twin/
-├── .env.example          # Environment variable reference and defaults
-├── Dockerfile            # Container build definition for Twin Layer runtime
-├── INTERFACE.md          # Complete API contract and Kafka schema specification
-├── README.md             # This document
-├── pyproject.toml        # Pytest configuration (pythonpath = ["src", "."])
-├── requirements.txt      # Python dependencies
-├── docker-compose.yml    # Standalone compose: Kafka + Twin Layer + Dashboard
-├── dashboard.py          # Operations and adversary management console
-├── src/
-│   └── twin/             # Core twin package
-│       ├── __init__.py   # Package exports
-│       ├── simulation.py # 10 Hz physical world simulation and diurnal kinetics
-│       ├── mcp_server.py # MCP JSON-RPC Server (Port 8000)
-│       ├── kafka_streamer.py # High-throughput Kafka producer with Ed25519 signing
-│       ├── crypto_utils.py # Ed25519 signing, canonical JSON formatting, verification
-│       ├── db_ledger.py  # SQLite ground-truth storage (isolated)
-│       └── main.py       # Twin runtime entrypoint
-├── mocks/                # Mock implementations for Layer 2 and Layer 3 partners
-│   ├── mock_brain.py     # Mock City Brain actuator
-│   └── mock_guardian.py  # Mock Guardian verifier and containment caller
-├── tests/                # Automated pytest suite and contract locks
-├── scripts/              # Documentation build and capture scripts
-└── docs/                 # Guides, specifications, and architecture assets
-```
+## Quick start in 3 commands
 
----
-
-## 3. Running the Twin Layer
-
-### Using Docker Compose (Standalone Twin Ecosystem)
 From the `twin/` directory:
-```bash
-docker compose up -d
-```
-Starts:
-- Apache Kafka broker on `localhost:19092`
-- Twin Layer engine on `http://localhost:8000/sse`
-- Streamlit operations console on `http://localhost:8501`
 
-### Running Locally with Python
+```bash
+# 1. Start the Twin layer, Kafka broker, and console
+docker compose up -d
+
+# 2. Run an incident scenario with mock partners
+python3 ../scenarios/t5_grid_overload.py --with-mocks
+
+# 3. Open the operations console
+open http://localhost:8501
+```
+
+---
+
+## Local development run
+
+To run locally without containers:
+
 ```bash
 # 1. Install dependencies
 pip install -r requirements.txt
 
-# 2. Run the test suite
-python -m pytest -q
+# 2. Run automated test suite
+python3 -m pytest -q
 
-# 3. Launch the Twin engine (requires Kafka broker or set WAIT_FOR_KAFKA=false)
-PYTHONPATH=src python -m twin.main
+# 3. Start the Twin engine (requires running Kafka or WAIT_FOR_KAFKA=false)
+PYTHONPATH=src python3 -m twin.main
 
-# 4. In a separate terminal, launch the Operations Console
+# 4. In a separate terminal, launch the console
 PYTHONPATH=src streamlit run dashboard.py
 ```
 
-### Endpoints and Ports
-- **Kafka Telemetry:** `localhost:19092` (Topic: `twin.sensors`, 420 msgs/s)
-- **MCP Server:** `http://localhost:8000/sse` (MCP JSON-RPC only, strictly isolated from truth)
-- **Red Team Adversary API:** `http://localhost:8100/api/status` (Port 8100, protected by `X-Red-Team-Token`)
-- **Operations Console:** `http://localhost:8501`
+---
 
-### State Persistence and Keystore
-- **Keystore (`KEYSTORE_PATH`):** Device identities are backed by a persistent JSON keystore (mode 600) to keep public keys stable across restarts. Partners can safely cache device public keys.
-- **Ledger Reset (`RESET_LEDGER=true`):** Wipes telemetry readings, attacks, and runs records from the ledger on startup while preserving registered devices and device keystore.
+## Endpoints and services
 
-### Kafka Authentication & Security Configuration
-Kafka clients (producer, readiness probe AdminClient, and mock consumers) support optional SASL authentication driven strictly by environment variables:
-- `KAFKA_SECURITY_PROTOCOL`: Security protocol to use (`PLAINTEXT` [default], `SASL_PLAINTEXT`, `SASL_SSL`). When `PLAINTEXT`, no SASL keys are added.
-- `KAFKA_SASL_MECHANISM`: SASL mechanism (`PLAIN` [default], `SCRAM-SHA-256`, `SCRAM-SHA-512`).
-- `KAFKA_USERNAME`: Username for SASL authentication (required if protocol is `SASL_*`).
-- `KAFKA_PASSWORD`: Literal password for SASL authentication.
-- `KAFKA_PASSWORD_FILE`: Path to a file holding the password (Docker-secret style; trailing newline stripped). Takes precedence over `KAFKA_PASSWORD` if both are specified.
-Passwords are never logged or exposed in status endpoints.
+- **Kafka telemetry:** `localhost:19092` (internal `kafka:9092`, topic `twin.sensors`)
+- **MCP command server:** `http://localhost:8000/sse` and `/mcp` (JSON-RPC)
+- **Red-team adversary API:** `http://localhost:8100/api/status` (header `X-Red-Team-Token`)
+- **Operations console:** `http://localhost:8501` (Streamlit)
+
+---
+
+## Documentation index
+
+- [Interface Card](INTERFACE.md): One-page contract specification, real wire messages, and authentication
+- [Interface Reference](docs/INTERFACE_REFERENCE.md): Full reference for all 16 MCP tool signatures and parameter rules
+- [Developer Guide](docs/DEVELOPER_GUIDE.md): Architecture, module layout, and mock boundary specifications
+- [User Guide](docs/USER_GUIDE.md): Operations console manual, timeline navigation, and manual attack injection
+- [Physics and Adversary Spec](docs/PHYSICS_AND_ADVERSARY_SPEC.md): Differential equations, diurnal curves, and adversary capabilities

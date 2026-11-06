@@ -1,0 +1,20 @@
+# Database ledgers and WAL files
+*.db
+*.db-wal
+*.db-shm
+
+# Keystores and cryptographic keys
+*keys*.json
+*.key
+*.pem
+
+# Python cache and testing artifacts
+__pycache__
+.pytest_cache
+tests/
+
+# Documentation, logs, and environments
+docs/
+logs/
+.env*
+

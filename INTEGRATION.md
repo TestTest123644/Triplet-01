@@ -37,7 +37,7 @@ This document describes the cross-layer communication architecture connecting th
 | Service | Internal (Docker Network) | External (Host Machine) | Description |
 | :--- | :--- | :--- | :--- |
 | **Apache Kafka** | `kafka:9092` | `localhost:19092` | Telemetry topic: `twin.sensors` (420 msgs/s) |
-| **Twin MCP Server** | `http://twin_layer:8000/sse` | `http://localhost:8000/sse` | Synchronous actuation, queries, and containment |
+| **Twin MCP Server** | `http://twin_layer:8000/sse` | `http://localhost:8000/sse` | Synchronous actuation, queries, and containment (SSE and `/mcp`) |
 
 ---
 
@@ -64,6 +64,7 @@ This document describes the cross-layer communication architecture connecting th
 ---
 
 ## 4. Contract Specifications
-- **Full API Specification:** See [twin/INTERFACE.md](twin/INTERFACE.md).
+- **Interface Card:** See [twin/INTERFACE.md](twin/INTERFACE.md).
+- **Full API Specification:** See [twin/docs/INTERFACE_REFERENCE.md](twin/docs/INTERFACE_REFERENCE.md).
 - **Developer Guide:** See [twin/docs/DEVELOPER_GUIDE.md](twin/docs/DEVELOPER_GUIDE.md).
 - **User Guide:** See [twin/docs/USER_GUIDE.md](twin/docs/USER_GUIDE.md).
