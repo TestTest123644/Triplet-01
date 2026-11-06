@@ -1,0 +1,60 @@
+profile: twin-triplet07
+observed: {commit: 418a024, date: 2026-11-04, by: city-brain-team, method: code_read}
+schema: schemas/partners/twin-triplet07.reading.schema.json
+fields:            # partner field -> canonical field
+  reading_id: reading_id
+  device_id: device_id
+  device_type: kind
+  value: value
+  unit: unit
+  location: zone_id
+  ts: sim_time
+  seq: seq
+  status: device_status
+kinds: {water_level: WATER_LEVEL, traffic_camera: TRAFFIC_FLOW, power_load: POWER_LOAD, air_quality: AIR_QUALITY, emergency_call: CALL_RATE}
+units: {meters: m, "veh/min": veh_per_min, MW: MW, AQI: AQI, "call/min": calls_per_min}
+statuses: {ok: OK, isolated: ISOLATED, quarantined: QUARANTINED, rolled_back: ROLLED_BACK, modelled: MODELLED}
+signature: {alg: ed25519, encoding: base64, canonical: sorted_compact_json_without_sig, keys: "mcp:get_device_key"}
+registry:
+  source: "mcp:list_devices"
+  fields: [device_id, zone_id, device_type, unit, lat, lon, min_val, max_val, status, actuator_state]
+inventory:         # read by the mock only; copied from twin/simulation.py
+  zones: 6
+  device_id: "z{zone}-{suffix}"
+  zone_id: "zone-{zone}"
+  devices:
+    - {suffix: tc1, type: traffic_camera, unit: "veh/min", min: 0.0, max: 200.0, init: 45.0}
+    - {suffix: tc2, type: traffic_camera, unit: "veh/min", min: 0.0, max: 200.0, init: 38.0}
+    - {suffix: wl1, type: water_level, unit: meters, min: 0.0, max: 12.0, init: 3.2}
+    - {suffix: wl2, type: water_level, unit: meters, min: 0.0, max: 12.0, init: 2.8}
+    - {suffix: pl1, type: power_load, unit: MW, min: 5.0, max: 120.0, init: 48.0}
+    - {suffix: aq1, type: air_quality, unit: AQI, min: 10.0, max: 350.0, init: 42.0}
+    - {suffix: ec1, type: emergency_call, unit: "call/min", min: 0.0, max: 30.0, init: 1.0}
+couplings:
+  - {kind: sibling, a: "{zone}-tc1", b: "{zone}-tc2"}
+  - {kind: follows, a: "{zone}-aq1", b: "mean({zone}-tc*)", lag_s: 5}
+actuators:
+  valve:
+    tool: set_valve
+    target: device
+    device_type: water_level
+    state_field: valve_position
+    states: {open: "open", closed: "closed", ratio: "{pct}%"}
+  signal:
+    tool: set_signal_plan
+    target: device
+    device_type: traffic_camera
+    state_field: signal_plan
+    states: {boost: green_wave, normal: normal, restrict: red_restriction}
+  grid:
+    tool: switch_grid
+    target: device
+    device_type: power_load
+    state_field: grid_state
+    states: {primary: grid_a, secondary: grid_b, shed: shed, standby: standby}
+  dispatch:
+    tool: dispatch
+    target: zone
+    args: {incident_type: "{incident_type}"}
+detectors:
+  water: {high: 6.0, critical: 9.0, target: 4.0, band: [3.0, 6.0]}
