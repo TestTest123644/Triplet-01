@@ -1,0 +1,9 @@
+filter:
+  sample_period_s: 0.1
+  r0: 2.5e-5
+  q_level: 1.0e-8
+  q_inflow: 1.0e-8
+  b_prior: 0.045
+  jump_sigma: 6.0
+  stuck_ticks: 30
+  stale_s: 2.0

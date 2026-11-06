@@ -1,0 +1,27 @@
+water:
+  high_band: 6.0
+  low_band: 3.0
+  close_sustain_s: 5.0
+  evidence_count: 3
+verification:
+  open_rate_max: -0.01
+  open_window_s: 3.0
+  close_rate_min: 0.005
+  close_window_s: 5.0
+shield:
+  cooldown_s:
+    valve: 5.0
+  rate_limit:
+    burst: 8
+    per_s: 2.0
+trust:
+  verdict_wait_s: 2.0
+  pending_weight: 0.5
+  caps:
+    TRUSTED: 1.0
+    DOUBTFUL: 0.5
+    UNTRUSTED: 0.0
+    UNKNOWN: 0.0
+epochs:
+  seq_drop: 100
+  ts_back_s: 60

@@ -1,0 +1,4 @@
+mode: standalone
+logs_dir: ../logs
+policy_file: ../policy/default.yaml
+params_file: ../params/twin-triplet07-v1.yaml
