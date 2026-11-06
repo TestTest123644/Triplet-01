@@ -4,7 +4,7 @@ import pytest
 
 from city_brain.config import load_config
 from city_brain.core.estimator import WaterFilter
-from city_brain.core.events import ReadingReceived
+from city_brain.core.events import ReadingReceived, RegistryLoaded
 from city_brain.core.state import BrainState
 from city_brain.core.step import step
 from city_brain.domain.types import DeviceStatus
@@ -202,6 +202,7 @@ def test_new_epoch_clears_filters():
     s = fresh_state()
     s = feed(s, seq=5000, value=3.0, sim_time=T0)
     assert s.filters
+    s, _ = step(s, RegistryLoaded((), keys_changed=True))
     s, _ = step(s, ReadingReceived(make_observation(seq=3, reading_id="n", sig_hash="n", sim_time=T0)))
     assert s.epoch == 1 and list(s.filters) == ["z1-wl1"] and s.filters["z1-wl1"].last_tick == 3
 
@@ -223,3 +224,32 @@ def test_initialised_false_until_first_weighted_reading():
     assert not f.initialised
     f.update(value=3.0, tick=2, weight=1.0, u=0.0)
     assert f.initialised
+
+
+def test_clamped_rise_to_the_ceiling_is_not_stuck_and_the_valve_can_open():
+    f = WaterFilter(CFG.params["filter"])
+    tick, level = 0, 11.0
+    while level < 12.0:
+        tick += 1
+        level = min(12.0, level + 0.002)
+        f.update(level, tick, 1.0, u=0.0, at_ceiling=level >= 12.0)
+    for _ in range(100):
+        tick += 1
+        f.update(12.0, tick, 1.0, u=0.0, at_ceiling=True)
+        assert "STUCK" not in f.flags
+    assert "CEILING" in f.flags
+    for _ in range(50):
+        tick += 1
+        level -= 0.0025
+        f.update(level, tick, 1.0, u=1.0)
+    assert "STUCK" not in f.flags and "CEILING" not in f.flags
+    assert f.observed_slope(tick - 30) == pytest.approx(-0.025, abs=1e-6)
+
+
+def test_a_flat_sensor_below_the_ceiling_is_still_stuck():
+    f = WaterFilter(CFG.params["filter"])
+    for tick in range(1, 40):
+        f.update(5.0 + 0.002 * tick, tick, 1.0, u=0.0)
+    for tick in range(40, 80):
+        f.update(5.08, tick, 1.0, u=0.0)
+    assert "STUCK" in f.flags

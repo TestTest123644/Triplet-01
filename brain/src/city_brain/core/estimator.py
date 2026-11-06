@@ -117,7 +117,8 @@ class WaterFilter:
         self._flags.discard("CEILING")
         if at_ceiling:
             self._flags.add("CEILING")
-        self._track_stuck(value, prior_rate)
+        if not at_ceiling:  # a sensor clamped at its top is flat by design, not stuck
+            self._track_stuck(value, prior_rate)
         s = self._p[0, 0] + self._r0 / weight**2
         innovation = value - self._x[0]
         if abs(innovation) > self._jump_sigma * float(np.sqrt(s)):
@@ -153,7 +154,8 @@ class WaterFilter:
         self._ring.append((tick, value))
         if at_ceiling:
             self._flags.add("CEILING")
-        self._track_stuck(value, prior_rate)
+        else:
+            self._track_stuck(value, prior_rate)
 
     def _track_stuck(self, value: float, prior_rate: float) -> None:
         if value == self._last_value:
