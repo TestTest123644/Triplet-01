@@ -112,6 +112,24 @@ def test_evidence_ref_state_kinds():
     assert evidence_ref(obs, make_verdict(state=TrustState.UNKNOWN), 0.0).state_kind is StateKind.UNKNOWN
 
 
+def test_contained_trusted_ref_has_zero_weight_and_fails():
+    v = make_verdict(state=TrustState.TRUSTED)
+    zero = evidence_ref(make_observation(), v, trust_weight(v, DeviceStatus.QUARANTINED, CAPS))
+    assert zero.state_kind is StateKind.UNKNOWN and zero.weight == 0.0
+    fail = (False, ("TRUST_INSUFFICIENT",))
+    assert meets_requirement([zero], RiskClass.R1) == fail
+    assert meets_requirement([zero], RiskClass.R2) == fail
+    assert meets_requirement([zero], RiskClass.R3) == fail
+    assert meets_requirement([zero, ref(TrustState.DOUBTFUL)], RiskClass.R1) == fail
+    assert meets_requirement([zero, ref(TrustState.TRUSTED)], RiskClass.R1) == fail
+
+
+def test_reason_only_for_refs_that_fail_the_class():
+    pending = evidence_ref(make_observation(), None, 0.0)
+    ev = [pending, ref(TrustState.DOUBTFUL), ref(TrustState.TRUSTED)]
+    assert meets_requirement(ev, RiskClass.R1) == (False, ("VERDICT_MISSING",))
+
+
 def test_r1_accepts_doubtful_with_one_trusted_r2_does_not():
     ev = [ref(TrustState.TRUSTED), ref(TrustState.DOUBTFUL)]
     assert meets_requirement(ev, RiskClass.R1)[0] is True
@@ -137,10 +155,19 @@ def test_missing_verdict_reason():
     )
 
 
-@given(st.lists(st.sampled_from(list(TrustState)), min_size=1, max_size=5))
-def test_property_no_r2_with_untrusted_or_unknown(states):
-    ok, _ = meets_requirement([ref(s) for s in states], RiskClass.R2)
-    assert not ok or all(s is TrustState.TRUSTED for s in states)
+@given(
+    st.lists(
+        st.tuples(st.sampled_from(list(TrustState)), st.sampled_from([0.0, 0.3, 1.0])),
+        min_size=1,
+        max_size=5,
+    )
+)
+def test_property_no_r2_with_untrusted_unknown_or_zero_weight(pairs):
+    refs = [evidence_ref(make_observation(), make_verdict(state=s), w) for s, w in pairs]
+    ok, _ = meets_requirement(refs, RiskClass.R2)
+    assert not ok or all(s is TrustState.TRUSTED and w > 0 for s, w in pairs)
+    ok1, _ = meets_requirement(refs, RiskClass.R1)
+    assert not ok1 or any(s is TrustState.TRUSTED and w > 0 for s, w in pairs)
 
 
 POLICY = {"epochs": {"seq_drop": 100, "ts_back_s": 60}}

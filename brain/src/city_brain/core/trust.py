@@ -78,7 +78,7 @@ def estimate_weight(
 def evidence_ref(obs: Observation, verdict: Verdict | None, weight: float) -> EvidenceRef:
     if verdict is None:
         kind = StateKind.OBSERVED
-    elif verdict.state in (TrustState.TRUSTED, TrustState.DOUBTFUL):
+    elif weight > 0 and verdict.state in (TrustState.TRUSTED, TrustState.DOUBTFUL):
         kind = StateKind.VALIDATED
     else:
         kind = StateKind.UNKNOWN
@@ -98,24 +98,24 @@ def evidence_ref(obs: Observation, verdict: Verdict | None, weight: float) -> Ev
 def meets_requirement(evidence: Sequence[EvidenceRef], risk: RiskClass) -> tuple[bool, tuple[str, ...]]:
     """R0 always passes; R1 needs all TRUSTED/DOUBTFUL with one TRUSTED; R2 and R3 need all TRUSTED.
 
+    A ref with zero weight (contained device, spec 7.2/8.1) never counts as acceptable.
     R3's approval rule belongs to P5; here it is treated as all-TRUSTED (spec 8.6).
     """
     if risk is RiskClass.R0:
         return True, ()
-    states = [e.trust_state for e in evidence]
-    if risk is RiskClass.R1:
-        ok = (
-            bool(states)
-            and all(s in (TrustState.TRUSTED, TrustState.DOUBTFUL) for s in states)
-            and TrustState.TRUSTED in states
-        )
-    else:
-        ok = bool(states) and all(s is TrustState.TRUSTED for s in states)
-    if ok:
+    allowed = (
+        (TrustState.TRUSTED, TrustState.DOUBTFUL) if risk is RiskClass.R1 else (TrustState.TRUSTED,)
+    )
+    pending = [e for e in evidence if e.verdict_id is None]
+    failing = [
+        e for e in evidence if e.verdict_id is not None and (e.weight <= 0 or e.trust_state not in allowed)
+    ]
+    has_trusted = any(e.trust_state is TrustState.TRUSTED and e.weight > 0 for e in evidence)
+    if not pending and not failing and has_trusted:
         return True, ()
     reasons = []
-    if not states or any(s is not TrustState.TRUSTED and e.verdict_id is not None for s, e in zip(states, evidence)):
+    if failing or (not pending and not has_trusted):
         reasons.append("TRUST_INSUFFICIENT")
-    if any(e.verdict_id is None for e in evidence):
+    if pending:
         reasons.append("VERDICT_MISSING")
     return False, tuple(reasons)
