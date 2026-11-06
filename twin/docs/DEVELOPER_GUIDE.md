@@ -56,8 +56,7 @@ The Twin provides a pluggable secrets resolver and hot-reloading mechanism for r
 - `MCP_AUTH_TOKENS`: Principal bearer tokens (`principal:token,...`).
 - `RED_TEAM_TOKEN`: Authentication token for the Red Team REST API.
 
-> [!NOTE]
-> Device signing keys located at `KEYSTORE_PATH` are long-term identity keys and are not runtime secrets. They do not rotate at runtime.
+**Note:** Device signing keys located at `KEYSTORE_PATH` are long-term identity keys and are not runtime secrets. They do not rotate at runtime.
 
 ### Secret Resolution Order
 For any secret `NAME`, the resolution precedence is:
@@ -116,6 +115,18 @@ Automated scenarios in `scenarios/` employ a deterministic settle procedure to e
 Live mock implementations (`twin.mocks.mock_brain`, `twin.mocks.mock_guardian`) feature safe lifecycle management:
 - `--exit-with-parent`: When launched by scenario runners or parent processes, mocks continuously monitor parent process liveness and terminate cleanly if the parent exits.
 - Signal traps: Standard `SIGINT` and `SIGTERM` handlers ensure orderly consumer disconnects and socket closures.
+
+### Mock Environment Variables
+
+The standalone mock processes support the following configuration environment variables:
+
+| Variable | Default | Description |
+| :--- | :--- | :--- |
+| `TWIN_MCP_URL` | `http://localhost:8000` | Twin MCP server endpoint URL for tool calls (`--mcp-url`). |
+| `MCP_AUTH_TOKEN` | *(unset)* | Optional bearer token passed in `Authorization: Bearer <token>` for MCP authentication. |
+| `KAFKA_BOOTSTRAP` | `localhost:9092` | Kafka bootstrap broker address for consuming telemetry (`--kafka-bootstrap`). |
+| `BRAIN_LOG_PATH` | *(unset)* | Destination file path for City Brain mock structured execution log entries. |
+| `GUARDIAN_LOG_PATH` | *(unset)* | Destination file path for Guardian mock structured execution log entries. |
 
 ---
 

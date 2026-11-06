@@ -48,16 +48,19 @@ The timeline tab is the primary operational view. It correlates events across fi
 
 #### Incident chains and operational data grid
 
-Above the timeline table, an **Incident chains** narrative list displays correlated chains sorted newest first. Each entry provides the full lifecycle story from detection through escalation and final resolution (for example: `- INC-001: rain_storm in zone-2 escalated to flood; Brain opened valve; water receded below 5m`).
+Above the timeline table, an **Incident chains** narrative list displays correlated chains sorted newest first. Each entry traces an incident lifecycle through arrows (`→`), showing detection, response latency, and escalation or resolution:
+- `chain-1: z1-pl1 device_key spoofed to 180 → Guardian quarantine_device +2 s (+1 more) → no Brain action`
+- `chain-3: grid_overload in zone-3 → no Guardian action → no Brain action → escalated to blackout`
+- `chain-2: rain_storm in zone-2 → no Guardian action → no Brain action → resolved by cleared`
 
-The main data grid presents columns for Time, Lane, Event, Target, Reaction, Summary, and Chain identifier:
+The main data grid presents columns for Time, Lane, Event, Target, Reaction, Summary, and Chain:
 - Time: Simulation timestamp formatted as `HH:MM:SS`.
 - Lane: Originating lane (`Twin`, `Guardian`, `Brain`, `Actuator`).
 - Event: Event type identifier (`attack_inject`, `isolate_device`, `dispatch`, `set_valve`, etc.).
 - Target: Device identifier or zone.
-- Reaction: Reaction latency relative to incident origin (for example, `+12.4s`).
+- Reaction: Reaction latency relative to incident origin (for example, `+2.0s`).
 - Summary: Narrative description of the action and arguments.
-- Chain: Correlated incident chain identifier (`INC-NNN`).
+- Chain: Correlated incident chain identifier (`chain-1`, `chain-2`, etc.).
 
 #### Interactive row selection
 
@@ -134,7 +137,22 @@ Displays a real-time list of all currently active exploits and environmental con
 
 ---
 
-## 4. Running the demo and caller attribution
+## 4. Console environment variables
+
+The operations console accepts the following configuration environment variables:
+
+| Variable | Default | Description |
+| :--- | :--- | :--- |
+| `TWIN_API_URL` | `http://localhost:8100` | Red Team REST API endpoint used for querying journal entries, active threats, and status. |
+| `TWIN_MCP_URL` / `MCP_URL` | `http://localhost:8000` | Model Context Protocol server endpoint used for device queries and command execution. |
+| `GROUND_TRUTH_DB_PATH` | `ground_truth.db` | Filesystem path to the local SQLite simulation ledger. |
+| `RED_TEAM_TOKEN` | *(unset)* | Literal secret token for authenticated Red Team REST API endpoints. |
+| `RED_TEAM_TOKEN_FILE` | *(unset)* | File path containing the secret token (in Docker Compose, written to `/app/data/red_team.token`). |
+| `TIMELINE_LOG_DIR` | *(unset)* | Optional directory path to load external partner log entries for display in the timeline. |
+
+---
+
+## 5. Running the demo and caller attribution
 
 ### Token configuration for clean timeline lanes
 To route automated test harness actions into the dedicated **Test harness** lane rather than polluting the operational lanes, configure distinct principal tokens:
@@ -159,15 +177,14 @@ python3 -m twin.mocks.mock_brain
 
 While these mocks are running, you can inject attacks or physical events through the console sidebar and watch the mocks react in real time on the Timeline and Map tabs.
 
-> [!IMPORTANT]
-> **Stop standalone mocks before running automated scenarios:** If you run automated test scripts with `--with-mocks`, stop any standalone mock processes first (`pkill -f "twin.mocks.mock_"`). Otherwise, multiple mock processes will consume from the same Kafka consumer groups or issue conflicting actuation commands.
+**Important:** Stop standalone mocks before running automated scenarios. If you run automated test scripts with `--with-mocks`, stop any standalone mock processes first (`pkill -f "twin.mocks.mock_"`). Otherwise, multiple mock processes will consume from the same Kafka consumer groups or issue conflicting actuation commands.
 
 ### Containment persistence across restarts
 Device containment enforced by Guardian (or the console) is fully persistent. When a device is isolated or quarantined, its status is updated in the SQLite ledger (`devices.status`) and recorded in `containment_log`. If the Twin container or simulator process restarts on an existing ledger, all device containment states and rogue hardware blocklists are restored before the first simulation tick. Devices do not revert to nominal status until an authorized caller explicitly invokes `reinstate_device` or `release_device`.
 
 ---
 
-## 5. Operational verification workflow
+## 6. Operational verification workflow
 
 To verify complete end-to-end telemetry and defense responses:
 1. Start the Twin unified runtime and console.
