@@ -13,7 +13,7 @@ import os
 import signal
 import sys
 import time
-from typing import Optional
+from typing import Callable, Optional
 
 import uvicorn
 
@@ -121,6 +121,28 @@ async def run_simulation_stream_loop(
     logger.info("Simulation stream loop shut down cleanly.")
 
 
+def setup_sighup_handler(
+    loop: asyncio.AbstractEventLoop, sim: CitySimulator, streamer: KafkaStreamer
+) -> Optional[Callable[[], None]]:
+    """Register SIGHUP signal handler with event loop to trigger secret reload safely."""
+    import twin.secrets
+
+    def handle_sighup() -> None:
+        logger.info("Received SIGHUP signal. Triggering secrets reload...")
+        try:
+            twin.secrets.reload_secrets(sim=sim, streamer=streamer)
+        except Exception as e:
+            logger.error(f"Error during SIGHUP secrets reload: {e}")
+
+    if hasattr(signal, "SIGHUP"):
+        try:
+            loop.add_signal_handler(signal.SIGHUP, handle_sighup)
+            return handle_sighup
+        except (ValueError, AttributeError, NotImplementedError, RuntimeError):
+            pass
+    return None
+
+
 async def main() -> None:
     bootstrap_servers = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:19092")
     topic = os.getenv("KAFKA_TOPIC", "twin.sensors")
@@ -186,20 +208,8 @@ async def main() -> None:
         except (ValueError, AttributeError):
             pass
 
-    from twin.secrets import reload_secrets
-
-    def handle_sighup(*_):
-        logger.info("Received SIGHUP signal. Triggering secrets reload...")
-        try:
-            reload_secrets(sim=sim, streamer=streamer)
-        except Exception as e:
-            logger.error(f"Error during SIGHUP secrets reload: {e}")
-
-    try:
-        if hasattr(signal, "SIGHUP"):
-            signal.signal(signal.SIGHUP, handle_sighup)
-    except (ValueError, AttributeError):
-        pass
+    loop = asyncio.get_running_loop()
+    setup_sighup_handler(loop, sim, streamer)
 
     # 6. Run concurrent tasks in event loop
     sim_task = asyncio.create_task(run_simulation_stream_loop(sim, streamer, stop_event))

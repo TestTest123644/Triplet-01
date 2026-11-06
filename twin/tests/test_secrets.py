@@ -1,9 +1,11 @@
 """Tests for pluggable secret resolution and zero-downtime runtime rotation (Phase 9.3)."""
 
+import asyncio
 import os
 import signal
 import sys
 import tempfile
+from unittest.mock import MagicMock
 import pytest
 from starlette.testclient import TestClient
 from starlette.requests import Request
@@ -200,6 +202,145 @@ def test_kafka_producer_swap_keeps_seq_continuous(tmp_path, monkeypatch):
 
     assert reading_1.seq == seq_0 + 1
     assert reading_1.reading_id == f"r-z1-tc1-{reading_1.seq}"
+
+
+def test_kafka_producer_wrong_credentials_rejected(monkeypatch):
+    """When new credentials fail metadata probe, old producer is kept and error is returned."""
+    monkeypatch.setenv("KAFKA_SECURITY_PROTOCOL", "SASL_PLAINTEXT")
+    monkeypatch.setenv("KAFKA_USERNAME", "sensor_writer")
+    monkeypatch.setenv("KAFKA_PASSWORD", "bad-pass")
+
+    streamer = KafkaStreamer(mock_mode=True)
+    old_prod = MagicMock()
+    streamer.producer = old_prod
+    streamer._cached_password = "initial-pass"
+    streamer._producer_conf = {
+        "bootstrap.servers": "localhost:19092",
+        "sasl.username": "sensor_writer",
+        "sasl.password": "initial-pass",
+    }
+
+    # Mock new producer whose list_topics raises
+    new_prod = MagicMock()
+    new_prod.list_topics.side_effect = Exception("SASL authentication error: wrong password")
+
+    import confluent_kafka
+    monkeypatch.setattr(confluent_kafka, "Producer", lambda conf: new_prod)
+
+    status = streamer.reload_kafka_password()
+
+    assert status == "error: new credentials rejected by broker"
+    assert streamer.producer is old_prod
+    assert streamer._cached_password == "initial-pass"
+    assert old_prod.flush.call_count == 0
+    assert "bad-pass" not in status
+    assert "initial-pass" not in status
+
+
+def test_kafka_producer_right_credentials_swapped_and_flushed_twice(monkeypatch):
+    """When credentials pass probe, new producer is swapped and old producer is flushed twice."""
+    monkeypatch.setenv("KAFKA_SECURITY_PROTOCOL", "SASL_PLAINTEXT")
+    monkeypatch.setenv("KAFKA_USERNAME", "sensor_writer")
+    monkeypatch.setenv("KAFKA_PASSWORD", "correct-new-pass")
+
+    streamer = KafkaStreamer(mock_mode=True)
+    old_prod = MagicMock()
+    streamer.producer = old_prod
+    streamer._cached_password = "initial-pass"
+    streamer._producer_conf = {
+        "bootstrap.servers": "localhost:19092",
+        "sasl.username": "sensor_writer",
+        "sasl.password": "initial-pass",
+    }
+
+    # Mock new producer whose list_topics succeeds
+    new_prod = MagicMock()
+    new_prod.list_topics.return_value = MagicMock()
+
+    import confluent_kafka
+    monkeypatch.setattr(confluent_kafka, "Producer", lambda conf: new_prod)
+
+    status = streamer.reload_kafka_password()
+
+    assert status == "changed"
+    assert streamer.producer is new_prod
+    assert streamer._cached_password == "correct-new-pass"
+    assert old_prod.flush.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_sighup_handler_registered_with_event_loop(monkeypatch):
+    """SIGHUP handler is registered with the asyncio event loop."""
+    import signal
+    if not hasattr(signal, "SIGHUP"):
+        pytest.skip("SIGHUP not supported on this platform")
+
+    sim = CitySimulator(seed=42)
+    streamer = KafkaStreamer(mock_mode=True)
+    loop = asyncio.get_running_loop()
+
+    registered_sig = None
+    registered_cb = None
+
+    def mock_add_signal_handler(sig, callback, *args):
+        nonlocal registered_sig, registered_cb
+        registered_sig = sig
+        registered_cb = callback
+
+    monkeypatch.setattr(loop, "add_signal_handler", mock_add_signal_handler)
+
+    from twin.main import setup_sighup_handler
+    handler = setup_sighup_handler(loop, sim, streamer)
+
+    assert registered_sig == signal.SIGHUP
+    assert callable(registered_cb)
+    assert handler is registered_cb
+
+    # Verify executing handler calls reload_secrets
+    reloaded = False
+    def mock_reload(sim=None, streamer=None):
+        nonlocal reloaded
+        reloaded = True
+        return {"status": "ok"}
+
+    monkeypatch.setattr("twin.secrets.reload_secrets", mock_reload)
+    registered_cb()
+    assert reloaded is True
+
+
+def test_secrets_reload_endpoint_reports_kafka_error(monkeypatch):
+    """POST /api/secrets/reload returns error when new Kafka password is rejected."""
+    monkeypatch.setenv("KAFKA_SECURITY_PROTOCOL", "SASL_PLAINTEXT")
+    monkeypatch.setenv("KAFKA_USERNAME", "sensor_writer")
+    monkeypatch.setenv("KAFKA_PASSWORD", "bad-pass")
+    monkeypatch.setenv("RED_TEAM_TOKEN", "rt-token")
+
+    sim = CitySimulator(seed=42)
+    streamer = KafkaStreamer(mock_mode=True)
+    old_prod = MagicMock()
+    streamer.producer = old_prod
+    streamer._cached_password = "initial-pass"
+    streamer._producer_conf = {
+        "bootstrap.servers": "localhost:19092",
+        "sasl.username": "sensor_writer",
+        "sasl.password": "initial-pass",
+    }
+
+    new_prod = MagicMock()
+    new_prod.list_topics.side_effect = Exception("SASL authentication error: wrong password")
+
+    import confluent_kafka
+    monkeypatch.setattr(confluent_kafka, "Producer", lambda conf: new_prod)
+
+    app = build_red_team_app(sim, token="rt-token", streamer=streamer)
+    client = TestClient(app)
+
+    resp = client.post("/api/secrets/reload", headers={"X-Red-Team-Token": "rt-token"})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["status"] == "ok"
+    assert data["results"]["KAFKA_PASSWORD"] == "error: new credentials rejected by broker"
+    assert streamer.producer is old_prod
 
 
 def test_sighup_triggers_reload(monkeypatch):

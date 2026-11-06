@@ -234,12 +234,12 @@ class KafkaStreamer:
         if self._cached_password == new_password:
             return "unchanged"
 
-        if self.mock_mode:
+        if self.mock_mode and self.producer is None:
             self._cached_password = new_password
             return "changed"
 
         # Build new producer configuration with updated password
-        new_conf = dict(self._producer_conf)
+        new_conf = dict(self._producer_conf) if self._producer_conf else self.build_producer_config(self.bootstrap_servers)
         new_conf["sasl.password"] = new_password
 
         try:
@@ -247,23 +247,41 @@ class KafkaStreamer:
 
             new_producer = confluent_kafka.Producer(new_conf)
 
+            # Probe broker metadata to verify authentication credentials before swapping
+            try:
+                new_producer.list_topics(timeout=5)
+            except Exception as probe_err:
+                logger.warning(
+                    f"New Kafka credentials rejected or broker unreachable during metadata probe: {type(probe_err).__name__}"
+                )
+                return "error: new credentials rejected by broker"
+
             # Flush old producer before swapping (deadline 5 s)
-            if self.producer is not None:
+            old_producer = self.producer
+            if old_producer is not None:
                 try:
-                    self.producer.flush(timeout=5.0)
+                    old_producer.flush(timeout=5.0)
                 except Exception as flush_err:
-                    logger.warning(f"Error flushing previous Kafka producer: {flush_err}")
+                    logger.warning(f"Error flushing previous Kafka producer before swap: {flush_err}")
 
             # Atomically swap producer reference
             self.producer = new_producer
             self._producer_conf = new_conf
             self._cached_password = new_password
             self._kafka_state = "ok"
+
+            # Flush old producer once more after swap before dropping it
+            if old_producer is not None:
+                try:
+                    old_producer.flush(timeout=5.0)
+                except Exception as flush_err2:
+                    logger.warning(f"Error flushing previous Kafka producer after swap: {flush_err2}")
+
             logger.info("Kafka SASL producer swapped successfully with rotated credentials")
             return "changed"
         except Exception as e:
-            logger.error(f"Failed to hot-swap Kafka producer with new credentials: {e}")
-            return f"error: {e}"
+            logger.error(f"Failed to hot-swap Kafka producer: {type(e).__name__}")
+            return "error: new credentials rejected by broker"
 
     def _record_error(self) -> None:
         """Record error timestamp and handle transition to degraded state."""

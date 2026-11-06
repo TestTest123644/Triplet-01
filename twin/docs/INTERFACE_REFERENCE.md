@@ -319,7 +319,7 @@ Secrets can be reloaded without process restarts or losing simulator state:
 During reload:
 - MCP tokens swap atomically; in-flight calls complete with the prior token map.
 - Red-team API token swaps immediately after validating the reload request.
-- Kafka producer swaps without losing message sequence continuity (`seq` numbers increment continuously).
+- Kafka producer validates new credentials against the broker with a metadata probe before swapping; if authentication fails, the active producer is preserved and `"error: new credentials rejected by broker"` is reported. Message sequence continuity is maintained across successful swaps (`seq` numbers increment continuously).
 - Rotation events are written to the SQLite ledger `secret_rotations` table and visible via `GET /api/journal`.
 
 
