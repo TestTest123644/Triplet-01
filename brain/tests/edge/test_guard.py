@@ -190,7 +190,7 @@ def test_verdict_lowercase_rfc3339_is_rejected_not_raised():
     v["issued_at"] = "2026-01-01t00:00:00z"
     v["sig"] = sign(v, G_PRIV)
     r = vrejected(b(v), "SCHEMA_VIOLATION")
-    assert "issued_at" in r.detail
+    assert "2026-01-01t00:00:00z" in r.detail
 
 
 def test_deeply_nested_json_is_malformed_for_both_guards():
@@ -212,3 +212,19 @@ def test_verdict_oversized():
     v = json.loads(verdict_bytes())
     r = vrejected(b(v) + b" " * 4096, "OVERSIZED")
     assert r.device_id is None
+
+
+def test_huge_integer_value_is_schema_violation_not_raised():
+    payload = {k: v for k, v in WATER.items() if k != "sig"}
+    text = json.dumps({**payload, "value": 0.0, "sig": sign(payload, WATER_PRIV)})
+    raw = text.replace('"value": 0.0', '"value": ' + "9" * 400).encode()
+    r = rejected(raw, "SCHEMA_VIOLATION")
+    assert "value" in r.detail
+
+
+def test_non_finite_or_huge_trust_is_schema_violation():
+    v = json.loads(verdict_bytes())
+    for literal in ("NaN", "Infinity", "-Infinity", "1e999", "9" * 400):
+        text = json.dumps({**v, "trust": 0.5}).replace('"trust": 0.5', f'"trust": {literal}')
+        r = vrejected(text.encode(), "SCHEMA_VIOLATION")
+        assert "trust" in r.detail, literal
