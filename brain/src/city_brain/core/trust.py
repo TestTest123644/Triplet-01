@@ -75,7 +75,7 @@ def estimate_weight(
     return trust_weight(verdict, device_status, caps)
 
 
-def evidence_ref(obs: Observation, verdict: Verdict | None, weight: float) -> EvidenceRef:
+def evidence_ref(obs: Observation | EvidenceRef, verdict: Verdict | None, weight: float) -> EvidenceRef:
     if verdict is None:
         kind = StateKind.OBSERVED
     elif weight > 0 and verdict.state in (TrustState.TRUSTED, TrustState.DOUBTFUL):

@@ -23,9 +23,11 @@ from city_brain.domain.types import (
     ActionIntent,
     ActionStatus,
     Alternative,
+    CanonicalUnit,
     EvidenceRef,
     ExpectedEffect,
     RiskClass,
+    SensorKind,
     StateKind,
     TrustState,
 )
@@ -34,7 +36,7 @@ from tests.factories import T0, make_observation
 SCHEMA_PATH = Path(__file__).resolve().parents[2] / "schemas" / "brain-event.v1.schema.json"
 BRAIN_EVENT_SCHEMA = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
 PARAMS = load_config("config/standalone.yaml").params
-POLICY = {"epochs": {"seq_drop": 100, "ts_back_s": 60}}
+POLICY = load_config("config/standalone.yaml").policy
 NINE = ["incident", "evidence", "rule_or_plan", "alternatives", "rationale"]
 EXPECTED = ExpectedEffect(channel="z1-wl1", metric="rate", comparator="<=", threshold=-0.01, window_s=3.0)
 
@@ -43,9 +45,14 @@ def fresh_state():
     return BrainState.new(POLICY, PARAMS)
 
 
+def traffic_reading(**fields):
+    """A reading the planner ignores, so it emits nothing of its own."""
+    return make_observation(kind=SensorKind.TRAFFIC_FLOW, unit=CanonicalUnit.VEH_PER_MIN, **fields)
+
+
 def running_state():
     s = fresh_state()
-    s, _ = step(s, ReadingReceived(make_observation(seq=1)))
+    s, _ = step(s, ReadingReceived(traffic_reading(seq=1)))
     return s
 
 
@@ -175,8 +182,8 @@ def test_event_ids_are_sequential_per_epoch():
 def test_epoch_change_resets_sequence_and_carries_new_epoch():
     s = fresh_state()
     s, _ = step(s, RegistryLoaded(devices=()))
-    s, _ = step(s, ReadingReceived(make_observation(seq=5000, sim_time=T0 + timedelta(seconds=500))))
-    s, fx = step(s, ReadingReceived(make_observation(seq=3, sim_time=T0, reading_id="r-n", sig_hash="new")))
+    s, _ = step(s, ReadingReceived(traffic_reading(seq=5000, sim_time=T0 + timedelta(seconds=500))))
+    s, fx = step(s, ReadingReceived(traffic_reading(seq=3, sim_time=T0, reading_id="r-n", sig_hash="new")))
     [ev] = [e.event for e in fx if isinstance(e, Publish)]
     assert ev["data"]["reason"] == "epoch_changed"
     assert ev["epoch"] == 1 and ev["id"] == "1-0"

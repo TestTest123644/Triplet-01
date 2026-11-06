@@ -1,6 +1,7 @@
 """Core input events and output effects (spec 6.2). All frozen."""
 
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from typing import Literal
 
 from city_brain.domain.types import DeviceProfile, Observation, Verdict
@@ -9,6 +10,7 @@ from city_brain.domain.types import DeviceProfile, Observation, Verdict
 @dataclass(frozen=True)
 class RegistryLoaded:
     devices: tuple[DeviceProfile, ...]
+    allowlist: Mapping[str, frozenset[str]] = field(default_factory=dict)  # empty refuses every state
 
 
 @dataclass(frozen=True)

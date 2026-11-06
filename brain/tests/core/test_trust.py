@@ -2,6 +2,7 @@ from datetime import timedelta
 
 from hypothesis import given, strategies as st
 
+from city_brain.config import load_config
 from city_brain.core.epochs import start_new_epoch
 from city_brain.core.events import ReadingReceived, VerdictReceived
 from city_brain.core.state import BrainState
@@ -170,7 +171,7 @@ def test_property_no_r2_with_untrusted_unknown_or_zero_weight(pairs):
     assert not ok1 or any(s is TrustState.TRUSTED and w > 0 for s, w in pairs)
 
 
-POLICY = {"epochs": {"seq_drop": 100, "ts_back_s": 60}}
+POLICY = load_config("config/standalone.yaml").policy
 
 
 def test_verdict_before_any_reading_is_parked_without_sim_now():

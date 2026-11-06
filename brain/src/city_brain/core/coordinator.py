@@ -1,0 +1,290 @@
+"""Action lifecycle: Shield, trust gate, dispatch, results and effect verification (spec 8.6, 8.8).
+
+Every function mutates `state` on behalf of `step` and returns the effects to emit.
+"""
+
+from city_brain.core.events import CancelTimer, CommandResult, Effect, Publish, SendCommand, StartTimer, TimerFired
+from city_brain.core.records import alert_event, command_event, decision_event, verification_event
+from city_brain.core.shield import ShieldContext, evaluate
+from city_brain.core.state import ActionRecord, BrainState
+from city_brain.core.trust import evidence_ref, meets_requirement, trust_weight
+from city_brain.domain.ids import idempotency_key
+from city_brain.domain.types import ActionIntent, ActionStatus, DeviceStatus, EvidenceRef, StateKind
+
+RULE = "water_t0"
+VERDICT_WAIT = "verdict_wait"
+VERDICT_TIMER_PREFIX = "verdict:"
+SETTLE_TICKS = 5  # skip the first 0.5 s after acceptance while the valve takes effect
+ACTIVE = frozenset(
+    {ActionStatus.PROPOSED, ActionStatus.AWAITING_TRUST, ActionStatus.DISPATCHED, ActionStatus.VERIFYING}
+)
+
+
+# ----- planning gates -----
+
+
+def may_propose(state: BrainState, intent: ActionIntent) -> bool:
+    """One active action per target, and one attempt per cooldown after BLOCKED."""
+    if any(r.status in ACTIVE and r.intent.target == intent.target for r in state.actions.values()):
+        return False
+    blocked_at = state.last_blocked_at.get(intent.target)
+    if blocked_at is None:
+        return True
+    cooldown = state.policy["shield"]["cooldown_s"].get(intent.capability, 0.0)
+    return (state.sim_now - blocked_at).total_seconds() >= cooldown
+
+
+# ----- transitions -----
+
+
+def propose(state: BrainState, intent: ActionIntent) -> list[Effect]:
+    context = ShieldContext(
+        registry=state.registry,
+        in_flight=state.in_flight,
+        cycle_intents=(),
+        last_command_at=state.last_command_at,
+        bucket=state.bucket,
+        suspect=state.suspect,
+        now=state.sim_now,
+    )
+    shield = evaluate(intent, context, state.allowlist, state.policy)
+    refusal_key = (intent.target, intent.state)
+    if shield.passed:
+        state.last_refusal.pop(refusal_key, None)
+    elif state.last_refusal.get(refusal_key) == shield.refusals:
+        state.counters["REFUSED_REPEAT"] += 1
+        return []
+    else:
+        state.last_refusal[refusal_key] = shield.refusals
+
+    record = ActionRecord(
+        intent=intent,
+        status=ActionStatus.PROPOSED,
+        key=idempotency_key(state.epoch, intent.action_id),
+        dispatched_at=None,
+        reasons=(),
+        shield=shield,
+    )
+    state.actions[intent.action_id] = record
+    state.plan_version[intent.target] = intent.plan_version
+
+    passes, reasons = _check_trust(state, record)
+    effects: list[Effect] = [_decision(state, record)]
+    if not shield.passed:
+        effects.append(_transition(state, record, ActionStatus.REFUSED, shield.refusals))
+    elif passes is None:
+        effects.append(_transition(state, record, ActionStatus.AWAITING_TRUST, reasons))
+        wait_s = float(state.policy["trust"]["verdict_wait_s"])
+        effects.append(StartTimer(_timer_id(intent.action_id), VERDICT_WAIT, wait_s))
+    else:
+        effects.extend(_conclude(state, record, passes, reasons))
+    return effects
+
+
+def on_verdict(state: BrainState, reading_key: tuple[str, str]) -> list[Effect]:
+    """Re-check every action citing the reading, whatever the ledger said about the verdict."""
+    effects: list[Effect] = []
+    for action_id in sorted(state.actions):
+        record = state.actions[action_id]
+        if record.status is not ActionStatus.AWAITING_TRUST or not _cites(record, reading_key):
+            continue
+        passes, reasons = _check_trust(state, record)
+        if passes is None:
+            continue
+        effects.append(CancelTimer(_timer_id(action_id)))
+        effects.extend(_conclude(state, record, passes, reasons))
+    return effects
+
+
+def on_timer(state: BrainState, timer: TimerFired) -> list[Effect]:
+    if timer.kind != VERDICT_WAIT:
+        return []
+    record = state.actions.get(timer.timer_id.removeprefix(VERDICT_TIMER_PREFIX))
+    if record is None or record.status is not ActionStatus.AWAITING_TRUST:
+        return []
+    passes, reasons = _check_trust(state, record)
+    if passes is None:
+        # A reading without a verdict after the wait counts as UNKNOWN (spec 8.6).
+        evidence = tuple(
+            ref.model_copy(update={"state_kind": StateKind.UNKNOWN}) if ref.verdict_id is None else ref
+            for ref in record.intent.evidence
+        )
+        record.intent = record.intent.model_copy(update={"evidence": evidence})
+        passes, reasons = False, ("VERDICT_TIMEOUT",)
+    return _conclude(state, record, passes, reasons)
+
+
+def dispatch(state: BrainState, record: ActionRecord) -> list[Effect]:
+    passes, reasons = _check_trust(state, record)
+    if not passes:
+        return [_block(state, record, reasons)]
+    if not state.bucket.take(state.sim_now):
+        return [_block(state, record, ("RATE_LIMIT",))]
+    intent = record.intent
+    state.in_flight.add(intent.target)
+    state.last_command_at[intent.target] = state.sim_now
+    return [
+        SendCommand(intent.action_id, record.key, intent.capability, intent.target, intent.state),
+        _transition(state, record, ActionStatus.DISPATCHED, ()),
+    ]
+
+
+def on_result(state: BrainState, result: CommandResult) -> list[Effect]:
+    """Record the Twin's answer. No branch ever resends."""
+    record = state.actions.get(result.action_id)
+    if record is None or record.status is not ActionStatus.DISPATCHED:
+        state.counters["LATE_COMMAND_RESULT"] += 1
+        return []
+    intent = record.intent
+    if result.outcome == "ACCEPTED":
+        _adopt_state(state, intent)
+        record.dispatched_at = state.sim_now
+        record.dispatch_tick = state.global_tick
+        return [_transition(state, record, ActionStatus.VERIFYING, (), result.reply)]
+    state.in_flight.discard(intent.target)
+    if result.outcome == "REJECTED":
+        return [_transition(state, record, ActionStatus.REJECTED, (), result.reply)]
+    return [
+        _transition(state, record, ActionStatus.UNKNOWN, (), result.reply),
+        Publish(alert_event(
+            state, "operator", "warning", "COMMAND_RESULT_UNKNOWN",
+            f"No result for {intent.state} on {intent.target}; the command is not resent.",
+            _refs(intent),
+        )),
+    ]
+
+
+def on_estimate(state: BrainState, device_id: str) -> list[Effect]:
+    effects: list[Effect] = []
+    for action_id in sorted(state.actions):
+        record = state.actions[action_id]
+        expected = record.intent.expected_effect
+        if record.status is not ActionStatus.VERIFYING or expected.channel != device_id:
+            continue
+        if (state.sim_now - record.dispatched_at).total_seconds() >= expected.window_s:
+            effects.extend(_verify(state, record))
+    return effects
+
+
+def on_new_epoch(state: BrainState) -> list[Effect]:
+    """Nothing dangles across a Twin restart: active actions end as UNKNOWN."""
+    effects: list[Effect] = []
+    for action_id in sorted(state.actions):
+        record = state.actions[action_id]
+        if record.status not in ACTIVE:
+            continue
+        if record.status is ActionStatus.AWAITING_TRUST:
+            effects.append(CancelTimer(_timer_id(action_id)))
+        effects.append(_transition(state, record, ActionStatus.UNKNOWN, ("EPOCH_CHANGED",)))
+        effects.append(Publish(alert_event(
+            state, "operator", "warning", "EPOCH_CHANGED_ACTION_UNKNOWN",
+            f"The Twin restarted during {record.intent.state} on {record.intent.target}.",
+            _refs(record.intent),
+        )))
+    return effects
+
+
+# ----- helpers -----
+
+
+def _timer_id(action_id: str) -> str:
+    return f"{VERDICT_TIMER_PREFIX}{action_id}"
+
+
+def _cites(record: ActionRecord, reading_key: tuple[str, str]) -> bool:
+    return any((r.reading_id, r.sig_hash) == reading_key for r in record.intent.evidence)
+
+
+def _refs(intent: ActionIntent) -> dict:
+    return {"action_id": intent.action_id, "incident_id": intent.incident_id, "target": intent.target}
+
+
+def _resolve(state: BrainState, ref: EvidenceRef) -> tuple[EvidenceRef, bool]:
+    """The ref as the ledger and registry see it now, and whether its verdict has gone."""
+    verdict = state.ledger.lookup(ref.reading_id, ref.sig_hash, state.sim_now)
+    device = state.registry.get(ref.device_id)
+    # An unregistered device carries no evidence weight.
+    status = device.status if device is not None else DeviceStatus.ISOLATED
+    weight = trust_weight(verdict, status, state.policy["trust"]["caps"])
+    return evidence_ref(ref, verdict, weight), verdict is None and ref.verdict_id is not None
+
+
+def _check_trust(state: BrainState, record: ActionRecord) -> tuple[bool | None, tuple[str, ...]]:
+    """Refresh the cited evidence. True: requirement met; False: failed; None: verdicts pending."""
+    resolved = [_resolve(state, ref) for ref in record.intent.evidence]
+    evidence = tuple(ref for ref, _ in resolved)
+    record.intent = record.intent.model_copy(update={"evidence": evidence})
+    met, reasons = meets_requirement(evidence, record.intent.risk_class)
+    if any(expired for _, expired in resolved):
+        return False, ("VERDICT_EXPIRED", *reasons)
+    if met:
+        return True, ()
+    return (False if "TRUST_INSUFFICIENT" in reasons else None), reasons
+
+
+def _conclude(
+    state: BrainState, record: ActionRecord, passes: bool, reasons: tuple[str, ...]
+) -> list[Effect]:
+    return dispatch(state, record) if passes else [_block(state, record, reasons)]
+
+
+def _block(state: BrainState, record: ActionRecord, reasons: tuple[str, ...]) -> Publish:
+    state.last_blocked_at[record.intent.target] = state.sim_now
+    return _transition(state, record, ActionStatus.BLOCKED, reasons)
+
+
+def _transition(
+    state: BrainState,
+    record: ActionRecord,
+    status: ActionStatus,
+    reasons: tuple[str, ...],
+    reply: dict | None = None,
+) -> Publish:
+    record.status = status
+    record.reasons = reasons
+    # `tool_call` is the runtime's: the core knows capabilities, not partner tools.
+    return Publish(command_event(state, record.intent, record.shield, status, None, reply, reasons))
+
+
+def _decision(state: BrainState, record: ActionRecord) -> Publish:
+    intent = record.intent
+    device = state.registry.get(intent.target)
+    incident = {"incident_id": intent.incident_id, "zone": device.zone_id if device is not None else None}
+    return Publish(decision_event(
+        state, intent, "act", incident, RULE, intent.evidence, intent.alternatives, intent.rationale, (),
+    ))
+
+
+def _adopt_state(state: BrainState, intent: ActionIntent) -> None:
+    device = state.registry.get(intent.target)
+    if device is None or device.actuator is None:
+        return
+    actuator = device.actuator.model_copy(update={"current_state": intent.state})
+    state.registry[intent.target] = device.model_copy(update={"actuator": actuator})
+
+
+def _verify(state: BrainState, record: ActionRecord) -> list[Effect]:
+    intent = record.intent
+    expected = intent.expected_effect
+    since_tick = record.dispatch_tick + SETTLE_TICKS
+    slope = state.filters[expected.channel].observed_slope(since_tick=since_tick)
+    if slope is None:
+        verdict = "inconclusive"
+    elif expected.comparator == "<=":
+        verdict = "verified" if slope <= expected.threshold else "unverified"
+    else:
+        verdict = "verified" if slope >= expected.threshold else "unverified"
+    record.status = ActionStatus.VERIFIED if verdict == "verified" else ActionStatus.UNVERIFIED
+    state.in_flight.discard(intent.target)
+    effects: list[Effect] = [Publish(verification_event(
+        state, intent.action_id, expected, {"slope": slope, "since_tick": since_tick}, verdict,
+        target=intent.target, incident_id=intent.incident_id,
+    ))]
+    if verdict == "verified":
+        return effects
+    state.suspect.add(intent.target)
+    message = f"{intent.state} on {intent.target} had no observed effect; the command is not resent."
+    refs = {**_refs(intent), "observed_slope": slope}
+    for audience in ("operator", "guardian"):
+        effects.append(Publish(alert_event(state, audience, "critical", "ACTUATOR_NO_EFFECT", message, refs)))
+    return effects
