@@ -34,9 +34,16 @@ class TimelineRow:
     def target(self) -> str:
         return self.device_id or self.zone_id or "-"
 
+    @property
+    def formatted_reaction(self) -> str:
+        if self.reaction_time_s is None or (self.reaction_time_s == 0.0 and self.event_type in ("attack_inject", "event_start")):
+            return ""
+        return f"+{int(round(self.reaction_time_s))} s"
+
     def to_dict(self) -> Dict[str, Any]:
         d = asdict(self)
         d["target"] = self.target
+        d["formatted_reaction"] = self.formatted_reaction
         return d
 
 
@@ -130,6 +137,8 @@ def build_timeline_rows(
 
     rows: List[TimelineRow] = []
 
+    attack_meta_map: Dict[str, Dict[str, Any]] = {}
+
     # 1. Process Journal Entries
     for idx, entry in enumerate(journal_entries):
         key = entry.get("key", f"entry:{idx}")
@@ -140,12 +149,23 @@ def build_timeline_rows(
         if source == "attack":
             action = detail.get("action", "")
             aid = detail.get("attack_id", "")
-            target_dev = detail.get("target_device_id")
-            target_zone = detail.get("target_zone_id") or extract_zone_from_device(target_dev, device_zone_map)
             cap = detail.get("capability", "")
             params = detail.get("params", {})
+            target_dev = detail.get("target_device_id")
+
+            # Handle rogue capability device and zone resolution (Reviewer finding 4)
+            if not target_dev and cap == "rogue":
+                target_dev = params.get("rogue_device_id")
+            target_zone = detail.get("target_zone_id") or (params.get("zone_id") if cap == "rogue" else None) or extract_zone_from_device(target_dev, device_zone_map)
 
             if action == "inject":
+                if aid:
+                    attack_meta_map[aid] = {
+                        "capability": cap,
+                        "target_dev": target_dev,
+                        "target_zone": target_zone,
+                        "params": params,
+                    }
                 val = params.get("value") if params.get("value") is not None else params.get("spoofed_value")
                 val_txt = f" (spoofed to {val})" if val is not None else ""
                 summary = f"Attack injected: {cap} on {target_dev or target_zone}{val_txt}"
@@ -162,6 +182,11 @@ def build_timeline_rows(
                     )
                 )
             elif action == "clear":
+                if aid in attack_meta_map:
+                    if not target_dev:
+                        target_dev = attack_meta_map[aid]["target_dev"]
+                    if not target_zone:
+                        target_zone = attack_meta_map[aid]["target_zone"]
                 summary = f"Attack cleared: {aid} on {target_dev or target_zone or 'target'}"
                 rows.append(
                     TimelineRow(
@@ -411,6 +436,8 @@ def build_timeline_rows(
     # Pre-calculate maximum timestamp across all rows for open-ended chains
     max_sim_sec = max((parse_rfc3339_to_seconds(r.sim_ts) for r in rows), default=0.0)
 
+    # 4a. Initialize origins metadata and link direct clearance/resolution rows
+    origins_meta: List[Dict[str, Any]] = []
     for chain_num, origin in enumerate(origin_rows, start=1):
         chain_id = f"chain-{chain_num}"
         origin.chain_id = chain_id
@@ -425,7 +452,6 @@ def build_timeline_rows(
         if origin.event_type == "attack_inject":
             aid = origin.raw_json.get("detail", {}).get("attack_id") if origin.raw_json else None
             if aid:
-                # Find corresponding attack_clear
                 for r in rows:
                     if r.event_type == "attack_clear" and r.raw_json:
                         if r.raw_json.get("detail", {}).get("attack_id") == aid:
@@ -450,58 +476,90 @@ def build_timeline_rows(
                                 r.chain_id = chain_id
                                 r.reaction_time_s = max(0.0, res_sec - origin_ts_sec)
 
-        # Link first attacked reading associated with this attack
+        origins_meta.append({
+            "chain_id": chain_id,
+            "origin": origin,
+            "origin_ts_sec": origin_ts_sec,
+            "end_ts_sec": end_ts_sec,
+            "target_dev": target_dev,
+            "target_zone": target_zone,
+        })
+
+    # 4b. Link first attacked reading associated with each attack (finding 1)
+    for meta in origins_meta:
+        origin = meta["origin"]
+        target_dev = meta["target_dev"]
         if origin.event_type == "attack_inject" and target_dev:
             for r in rows:
                 if r.event_type == "attacked_reading" and r.device_id == target_dev and r.chain_id is None:
                     r_sec = parse_rfc3339_to_seconds(r.sim_ts)
-                    if origin_ts_sec <= r_sec <= end_ts_sec:
-                        r.chain_id = chain_id
-                        r.reaction_time_s = max(0.0, r_sec - origin_ts_sec)
+                    if meta["origin_ts_sec"] <= r_sec <= meta["end_ts_sec"]:
+                        r.chain_id = meta["chain_id"]
+                        r.reaction_time_s = max(0.0, r_sec - meta["origin_ts_sec"])
                         break
 
-        # Link ALL matching Guardian rows in window [origin_ts_sec, end_ts_sec] (finding 3)
-        for r in rows:
-            if r.lane == "Guardian" and r.chain_id is None:
-                r_sec = parse_rfc3339_to_seconds(r.sim_ts)
-                if origin_ts_sec <= r_sec <= end_ts_sec:
-                    g_target = str(r.raw_json.get("detail", {}).get("target", "")) if r.raw_json else ""
-                    # Match exact device, rollback reading targeting r-<dev>-, or zone
-                    dev_match = bool(target_dev and (r.device_id == target_dev or g_target == target_dev or g_target.startswith(f"r-{target_dev}-")))
-                    zone_match = bool(target_zone and (r.zone_id == target_zone or (not target_dev and target_zone in g_target)))
-                    if dev_match or zone_match:
-                        r.chain_id = chain_id
-                        r.reaction_time_s = max(0.0, r_sec - origin_ts_sec)
+    # 4c. Link Guardian rows (Reviewer finding 3):
+    # Rule: a Guardian or Brain row belongs to the matching origin with the LATEST start time at or before the row whose window still contains it.
+    for r in rows:
+        if r.lane == "Guardian" and r.chain_id is None:
+            r_sec = parse_rfc3339_to_seconds(r.sim_ts)
+            g_target = str(r.raw_json.get("detail", {}).get("target", "")) if r.raw_json else ""
 
-        # Link ALL matching Brain rows and their Actuator pairs in window (finding 3)
-        for r in rows:
-            if r.lane == "Brain" and r.chain_id is None:
-                r_sec = parse_rfc3339_to_seconds(r.sim_ts)
-                if origin_ts_sec <= r_sec <= end_ts_sec:
-                    dev_match = bool(target_dev and r.device_id == target_dev)
-                    zone_match = bool(target_zone and r.zone_id == target_zone)
-                    if dev_match or zone_match:
-                        r.chain_id = chain_id
-                        r.reaction_time_s = max(0.0, r_sec - origin_ts_sec)
+            candidate_origins = []
+            for meta in origins_meta:
+                t_dev = meta["target_dev"]
+                t_zone = meta["target_zone"]
+                dev_match = bool(t_dev and (r.device_id == t_dev or g_target == t_dev or g_target.startswith(f"r-{t_dev}-")))
+                zone_match = bool(t_zone and (r.zone_id == t_zone or (not t_dev and t_zone in g_target)))
+                if (dev_match or zone_match) and (meta["origin_ts_sec"] <= r_sec <= meta["end_ts_sec"]):
+                    candidate_origins.append(meta)
 
-                        # Pair Actuator row follows its Brain row
-                        pair_key = r.row_id.replace(":brain", ":actuator")
-                        for act_r in rows:
-                            if act_r.row_id == pair_key and act_r.chain_id is None:
-                                act_r.chain_id = chain_id
-                                act_r.reaction_time_s = r.reaction_time_s
-                                break
+            if candidate_origins:
+                best_origin = max(candidate_origins, key=lambda m: m["origin_ts_sec"])
+                r.chain_id = best_origin["chain_id"]
+                r.reaction_time_s = max(0.0, r_sec - best_origin["origin_ts_sec"])
 
-        # Build formatted chain summary (finding 4)
-        # Expected:
-        # "rain_storm in zone-2 -> no Guardian action -> Brain set_valve +862 s (+1 more) -> Actuator executed"
-        # "z1-pl1 device_key spoofed to 180.0 -> Guardian quarantine_device +2 s (+1 more) -> no Brain action"
+    # 4d. Link Brain rows and their Actuator pairs (Reviewer finding 3):
+    for r in rows:
+        if r.lane == "Brain" and r.chain_id is None:
+            r_sec = parse_rfc3339_to_seconds(r.sim_ts)
+
+            candidate_origins = []
+            for meta in origins_meta:
+                t_dev = meta["target_dev"]
+                t_zone = meta["target_zone"]
+                dev_match = bool(t_dev and r.device_id == t_dev)
+                zone_match = bool(t_zone and r.zone_id == t_zone)
+                if (dev_match or zone_match) and (meta["origin_ts_sec"] <= r_sec <= meta["end_ts_sec"]):
+                    candidate_origins.append(meta)
+
+            if candidate_origins:
+                best_origin = max(candidate_origins, key=lambda m: m["origin_ts_sec"])
+                r.chain_id = best_origin["chain_id"]
+                r.reaction_time_s = max(0.0, r_sec - best_origin["origin_ts_sec"])
+
+                # Pair Actuator row follows its Brain row
+                pair_key = r.row_id.replace(":brain", ":actuator")
+                for act_r in rows:
+                    if act_r.row_id == pair_key and act_r.chain_id is None:
+                        act_r.chain_id = best_origin["chain_id"]
+                        act_r.reaction_time_s = r.reaction_time_s
+                        break
+
+    # 4e. Build formatted chain summary strings for all origins (Reviewer finding 4)
+    for meta in origins_meta:
+        chain_id = meta["chain_id"]
+        origin = meta["origin"]
+        target_dev = meta["target_dev"]
+        target_zone = meta["target_zone"]
+
         if origin.event_type == "attack_inject":
             params = origin.raw_json.get("detail", {}).get("params", {}) if origin.raw_json else {}
             val = params.get("value") if params.get("value") is not None else params.get("spoofed_value")
             cap = origin.raw_json.get("detail", {}).get("capability", "attack") if origin.raw_json else "attack"
             spoofed_txt = f" spoofed to {val}" if val is not None else ""
-            origin_txt = f"{target_dev or target_zone} {cap}{spoofed_txt}"
+            dev_or_zone = target_dev or target_zone
+            origin_txt = f"{dev_or_zone} {cap}{spoofed_txt}"
         else:
             etype = origin.raw_json.get("detail", {}).get("type", "incident") if origin.raw_json else "incident"
             origin_txt = f"{etype} in {target_zone or 'city'}"

@@ -550,3 +550,177 @@ def test_reviewer_live_stolen_key_chain():
     atk_row = next(r for r in rows if r.event_type == "attack_inject")
     assert atk_row.chain_summary == expected_summary
     assert rollback_row.chain_summary == expected_summary
+
+
+def test_chain_attribution_five_back_to_back_attacks():
+    """Verify that 5 overlapping back-to-back attacks on one device each get their own action (Finding 3)."""
+    device_zone_map = {"z3-tc1": "zone-3"}
+    journal_entries = []
+
+    # 5 back-to-back attacks: inject at T, action at T+2, clear at T+30, next inject at T+40
+    for i in range(5):
+        t_base = i * 40
+        aid = f"atk-link-{i+1}"
+        cid = f"chain-{i+1}"
+
+        # Inject
+        t_inj = f"2026-10-17T12:{t_base//60:02d}:{t_base%60:02d}Z"
+        journal_entries.append({
+            "key": f"attack_inject:{aid}",
+            "sim_ts": t_inj,
+            "source": "attack",
+            "detail": {
+                "attack_id": aid,
+                "action": "inject",
+                "capability": "link",
+                "target_device_id": "z3-tc1",
+                "params": {"mode": "corrupt"},
+            },
+        })
+
+        # Guardian quarantine at +2s
+        t_act = t_base + 2
+        t_act_str = f"2026-10-17T12:{t_act//60:02d}:{t_act%60:02d}Z"
+        journal_entries.append({
+            "key": f"containment:{i+1}",
+            "sim_ts": t_act_str,
+            "source": "containment",
+            "detail": {
+                "caller": "guardian",
+                "tool": "quarantine_device",
+                "target": "z3-tc1",
+                "from_status": "ok",
+                "to_status": "quarantined",
+            },
+        })
+
+        # Clear at +30s
+        t_clr = t_base + 30
+        t_clr_str = f"2026-10-17T12:{t_clr//60:02d}:{t_clr%60:02d}Z"
+        journal_entries.append({
+            "key": f"attack_clear:{aid}",
+            "sim_ts": t_clr_str,
+            "source": "attack",
+            "detail": {
+                "attack_id": aid,
+                "action": "clear",
+                "target_device_id": "z3-tc1",
+            },
+        })
+
+    rows = build_timeline_rows(journal_entries, attacked_readings=[], device_zone_map=device_zone_map)
+
+    # Every chain chain-1 to chain-5 must exist and contain exactly its own Guardian action at +2 s
+    for i in range(1, 6):
+        cid = f"chain-{i}"
+        c_rows = [r for r in rows if r.chain_id == cid]
+        assert len(c_rows) >= 3, f"Chain {cid} missing rows: {len(c_rows)}"
+
+        g_rows = [r for r in c_rows if r.lane == "Guardian"]
+        assert len(g_rows) == 1, f"Chain {cid} should have exactly 1 Guardian action, got {len(g_rows)}"
+        assert g_rows[0].reaction_time_s == 2.0
+        assert g_rows[0].formatted_reaction == "+2 s"
+
+        atk_row = next(r for r in c_rows if r.event_type == "attack_inject")
+        assert atk_row.formatted_reaction == ""
+        assert "Guardian quarantine_device +2 s -> no Brain action" in atk_row.chain_summary
+
+
+def test_rogue_device_chain_attribution():
+    """Verify rogue device attack linking, naming, and rollback matching (Finding 4)."""
+    device_zone_map = {"z1-pl1": "zone-1"}
+    journal_entries = [
+        {
+            "key": "attack_inject:atk-rogue-1",
+            "sim_ts": "2026-10-17T12:00:00Z",
+            "source": "attack",
+            "detail": {
+                "attack_id": "atk-rogue-1",
+                "action": "inject",
+                "capability": "rogue",
+                "target_device_id": None,
+                "target_zone_id": None,
+                "params": {
+                    "rogue_device_id": "rg-p1",
+                    "zone_id": "zone-2",
+                    "device_type": "power_load",
+                    "value": 88.88,
+                },
+            },
+        },
+        {
+            "key": "containment:1",
+            "sim_ts": "2026-10-17T12:00:04Z",
+            "source": "containment",
+            "detail": {
+                "caller": "guardian",
+                "tool": "quarantine_device",
+                "target": "rg-p1",
+                "from_status": "ok",
+                "to_status": "quarantined",
+            },
+        },
+        {
+            "key": "containment:2",
+            "sim_ts": "2026-10-17T12:00:06Z",
+            "source": "containment",
+            "detail": {
+                "caller": "guardian",
+                "tool": "rollback_reading",
+                "target": "r-rg-p1-1",
+                "from_status": "ok",
+                "to_status": "rolled_back",
+            },
+        },
+    ]
+
+    rows = build_timeline_rows(journal_entries, attacked_readings=[], device_zone_map=device_zone_map)
+
+    atk_row = next(r for r in rows if r.event_type == "attack_inject")
+    assert atk_row.device_id == "rg-p1"
+    assert atk_row.zone_id == "zone-2"
+    assert atk_row.formatted_reaction == ""
+
+    expected_summary = "rg-p1 rogue spoofed to 88.88 -> Guardian quarantine_device +4 s (+1 more) -> no Brain action"
+    assert atk_row.chain_summary == expected_summary
+
+    g_quarantine = next(r for r in rows if r.event_type == "containment" and "quarantine_device" in r.summary)
+    assert g_quarantine.chain_id == "chain-1"
+    assert g_quarantine.reaction_time_s == 4.0
+    assert g_quarantine.formatted_reaction == "+4 s"
+
+    g_rollback = next(r for r in rows if r.event_type == "containment" and "rollback_reading" in r.summary)
+    assert g_rollback.chain_id == "chain-1"
+    assert g_rollback.reaction_time_s == 6.0
+    assert g_rollback.formatted_reaction == "+6 s"
+
+
+def test_filter_timeline_rows_with_current_sim_ts():
+    """Verify rows older than now - 5 min are excluded even when they are the newest rows (Finding 2)."""
+    rows = [
+        TimelineRow(
+            row_id="e1",
+            sim_ts="2026-10-17T12:36:00Z",
+            lane="Twin",
+            event_type="event_start",
+            device_id=None,
+            zone_id="zone-1",
+            summary="Test event 10 minutes ago",
+        )
+    ]
+
+    # At sim 12:46:00Z, Last 5 sim-min window cuts off at 12:41:00Z
+    filtered = filter_timeline_rows(
+        rows,
+        window_sim_minutes=5,
+        current_sim_ts="2026-10-17T12:46:00Z",
+    )
+    assert len(filtered) == 0, "Row at 12:36:00Z must be excluded under 5-min window when current time is 12:46:00Z"
+
+    # With 15-min window, cutoff is 12:31:00Z, so 12:36:00Z is included
+    filtered_15 = filter_timeline_rows(
+        rows,
+        window_sim_minutes=15,
+        current_sim_ts="2026-10-17T12:46:00Z",
+    )
+    assert len(filtered_15) == 1

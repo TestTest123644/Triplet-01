@@ -82,8 +82,10 @@ code, pre, .mono, [data-testid="stMetricValue"] {
 .status-bar {
     display: flex;
     flex-direction: row;
+    flex-wrap: wrap;
     align-items: center;
-    gap: 1.5rem;
+    column-gap: 1.1rem;
+    row-gap: 0.4rem;
     padding: 0.6rem 1rem;
     background: #121821;
     border: 1px solid #1e293b;
@@ -92,7 +94,7 @@ code, pre, .mono, [data-testid="stMetricValue"] {
     font-size: 0.88rem;
 }
 @media (max-width: 900px) {
-    .status-bar { flex-wrap: wrap; gap: 0.75rem; }
+    .status-bar { gap: 0.75rem; }
 }
 .status-bar .item { display: flex; align-items: center; gap: 0.4rem; white-space: nowrap; }
 .status-bar .lbl { color: #94a3b8; }
@@ -228,7 +230,7 @@ def _fetch_scoreboard_metrics_cached(db_path: str, mtime: float) -> Dict[str, An
         metrics["latest_sim_time"] = status_data.get("sim_time", metrics["latest_sim_time"])
         metrics["sim_speed"] = float(status_data.get("sim_speed", 1.0))
         st_info = status_data.get("stream", {})
-        metrics["msgs_per_sec"] = float(st_info.get("throughput_msgs_sec", 0.0))
+        metrics["msgs_per_sec"] = float(st_info.get("msgs_per_sec", st_info.get("throughput_msgs_sec", 0.0)))
         metrics["kafka_state"] = st_info.get("kafka_state", "unknown")
     else:
         metrics["twin_api_online"] = False
@@ -370,13 +372,20 @@ def fetch_journal_entries(
             return data.get("journal", []), None
         else:
             msg = (
-                f"Cannot connect to journal API: Twin API returned HTTP {resp.status_code} ({resp.text.strip()}). "
-                f"Check TWIN_API_URL ({TWIN_API_URL}) and RED_TEAM_TOKEN / RED_TEAM_TOKEN_FILE ({token_state})."
+                f"Cannot connect to journal API: HTTP {resp.status_code} at {TWIN_API_URL}. "
+                f"Check TWIN_API_URL ({TWIN_API_URL}) and RED_TEAM_TOKEN or RED_TEAM_TOKEN_FILE ({token_state})."
             )
             return None, msg
     except requests.RequestException as e:
+        err_str = str(e).lower()
+        if "connection refused" in err_str or "errno 61" in err_str or "errno 111" in err_str:
+            reason = "connection refused"
+        elif "timed out" in err_str or "timeout" in err_str:
+            reason = "timed out"
+        else:
+            reason = "cannot reach host"
         msg = (
-            f"Cannot connect to journal API: Cannot reach Twin red-team API at {TWIN_API_URL} ({e}). "
+            f"Cannot connect to journal API: {reason} at {TWIN_API_URL}. "
             f"Check TWIN_API_URL ({TWIN_API_URL}) and RED_TEAM_TOKEN or RED_TEAM_TOKEN_FILE ({token_state})."
         )
         return None, msg
@@ -427,6 +436,23 @@ def fetch_first_attacked_readings_for_attacks(
         if conn:
             conn.close()
     return first_readings
+
+
+def fetch_device_zone_map(db_path: str) -> Dict[str, str]:
+    """Query registered devices to map device_id to zone_id from SQLite ledger (Finding 4)."""
+    if not os.path.isfile(db_path):
+        return {}
+    conn = None
+    try:
+        conn = get_db_connection()
+        rows = conn.execute("SELECT device_id, zone_id FROM devices").fetchall()
+        return {r["device_id"]: r["zone_id"] for r in rows if r["device_id"] and r["zone_id"]}
+    except Exception as e:
+        logger.warning(f"Error fetching device zone map: {e}")
+        return {}
+    finally:
+        if conn:
+            conn.close()
 
 
 def inject_attack_to_simulator(
@@ -725,15 +751,23 @@ def build_spatial_twin_deck(sensors_df: pd.DataFrame, map_pitch: int = 50) -> pd
         )
         layers.append(halo_layer)
 
-    # 3. Municipal Sector Centroids with offset positions (Finding 14)
-    # Offset labels so they do not sit directly on top of the sensor pillars
+    # 3. Municipal Sector Centroids with offset positions away from columns (Finding 7)
+    zone_offsets = {
+        "zone-1": {"lat": 36.814, "lon": 10.170},
+        "zone-2": {"lat": 36.832, "lon": 10.292},
+        "zone-3": {"lat": 36.872, "lon": 10.180},
+        "zone-4": {"lat": 36.828, "lon": 10.102},
+        "zone-5": {"lat": 36.852, "lon": 10.130},
+        "zone-6": {"lat": 36.772, "lon": 10.205},
+    }
     zone_records = []
     for z in NEIGHBORHOODS:
+        pos = zone_offsets.get(z["zone_id"], {"lat": z["lat"] + 0.010, "lon": z["lon"] - 0.015})
         zone_records.append({
             "name": z["name"],
             "zone_id": z["zone_id"],
-            "lat": z["lat"] + 0.007,   # Offset north
-            "lon": z["lon"] - 0.012,   # Offset west
+            "lat": pos["lat"],
+            "lon": pos["lon"],
         })
     zone_df = pd.DataFrame(zone_records)
 
@@ -747,6 +781,7 @@ def build_spatial_twin_deck(sensors_df: pd.DataFrame, map_pitch: int = 50) -> pd
         get_angle=0,
         get_text_anchor="'start'",
         get_alignment_baseline="'bottom'",
+        get_pixel_offset=[0, -20],
         pickable=False,
     )
     layers.append(text_layer)
@@ -754,7 +789,8 @@ def build_spatial_twin_deck(sensors_df: pd.DataFrame, map_pitch: int = 50) -> pd
     return pdk.Deck(
         layers=layers,
         initial_view_state=view_state,
-        map_style="mapbox://styles/mapbox/dark-v10",
+        map_style="https://basemaps.cartocdn.com/gl/dark-matter-nolabels-gl-style/style.json",
+        map_provider="carto",
         tooltip={
             "html": "<b>Device:</b> {device_id}<br/>"
                     "<b>Type:</b> {device_type}<br/>"
@@ -787,12 +823,21 @@ def render_status_and_kpis(db_path: str):
     mcp_cls = "state-nominal" if mcp_state == "ok" else "state-attack"
     mcp_label = "MCP up" if mcp_state == "ok" else "MCP down"
 
-    # Status Bar
+    if not sb["twin_api_online"]:
+        sim_time_display = "-"
+        speed_display = "-"
+        throughput_display = "-"
+    else:
+        sim_time_display = sb["latest_sim_time"]
+        speed_display = f"{sb['sim_speed']:.0f}x"
+        throughput_display = f"{sb['msgs_per_sec']:.1f} msg/s"
+
+    # Status Bar (Finding 1 & 6)
     status_bar_html = f"""
     <div class="status-bar">
-        <div class="item"><span class="lbl">Sim time:</span> <span class="val">{sb['latest_sim_time']}</span></div>
-        <div class="item"><span class="lbl">Speed:</span> <span class="val">{sb['sim_speed']:.0f}x</span></div>
-        <div class="item"><span class="lbl">Throughput:</span> <span class="val">{sb['msgs_per_sec']:.1f} msg/s</span></div>
+        <div class="item"><span class="lbl">Sim time:</span> <span class="val">{sim_time_display}</span></div>
+        <div class="item"><span class="lbl">Speed:</span> <span class="val">{speed_display}</span></div>
+        <div class="item"><span class="lbl">Throughput:</span> <span class="val">{throughput_display}</span></div>
         <div class="item"><span class="lbl">API:</span> <span class="val {twin_state_cls}">{twin_label}</span></div>
         <div class="item"><span class="lbl">Kafka:</span> <span class="val {kafka_cls}">{kafka_label}</span></div>
         <div class="item"><span class="lbl">MCP:</span> <span class="val {mcp_cls}">{mcp_label}</span></div>
@@ -970,23 +1015,30 @@ def render_timeline_tab(db_path: str):
     st.subheader("Operational timeline")
     st.caption("Correlated sequence of telemetry readings, Guardian containment actions, City Brain actuation commands, and actuator results with simulation timestamps.")
 
+    # Fetch current simulation time for time window calculations (Finding 2)
+    sb_metrics = _fetch_scoreboard_metrics_cached(db_path, _get_db_mtime(db_path))
+    sim_now_ts = sb_metrics.get("latest_sim_time")
+
     # Top Controls
     col_win, col_zone, col_dev, col_live = st.columns([1.6, 1.2, 1.2, 1.0])
 
     with col_win:
-        # Time window options (Finding 9)
+        # Time window options (Finding 2 & 9)
         window_options = ["Last 5 sim-min", "Last 15 sim-min", "Last 60 sim-min", "Since a sim time"]
-        window_choice = st.selectbox("Time window", window_options, index=0, key="tl_win_choice")
+        window_choice = st.selectbox("Time window", window_options, index=2, key="tl_win_choice")
 
     since_sim_ts: Optional[str] = None
     window_sim_minutes: Optional[int] = None
 
-    if window_choice == "Last 5 sim-min":
-        window_sim_minutes = 5
-    elif window_choice == "Last 15 sim-min":
-        window_sim_minutes = 15
-    elif window_choice == "Last 60 sim-min":
-        window_sim_minutes = 60
+    if window_choice in ("Last 5 sim-min", "Last 15 sim-min", "Last 60 sim-min"):
+        window_sim_minutes = int(window_choice.split()[1])
+        if sim_now_ts and sim_now_ts != "-":
+            try:
+                now_sec = parse_rfc3339_to_seconds(sim_now_ts)
+                since_sec = now_sec - (window_sim_minutes * 60)
+                since_sim_ts = datetime.fromtimestamp(since_sec, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            except Exception:
+                since_sim_ts = None
     elif window_choice == "Since a sim time":
         custom_ts = st.text_input("Enter simulation timestamp", value="2026-10-17T12:00:00Z", key="tl_custom_ts")
         if custom_ts:
@@ -1026,8 +1078,9 @@ def render_timeline_tab(db_path: str):
         s_ts: Optional[str],
         z_filt: str,
         d_filt: str,
+        curr_sim_ts: Optional[str],
     ):
-        # 1. Fetch Journal Entries (Finding 7: Strictly no fallback to ledger)
+        # 1. Fetch Journal Entries (Finding 2 & 7: since_sim_ts used for Last N; strictly no fallback to ledger)
         journal, err = fetch_journal_entries(since_sim_ts=s_ts, limit=1000)
         if err:
             st.error(err)
@@ -1035,11 +1088,14 @@ def render_timeline_tab(db_path: str):
 
         journal_entries = journal or []
 
-        # 2. Identify attack_inject rows to query the FIRST attacked reading from ledger (Finding 1)
+        # 2. Identify attack_inject rows to query the FIRST attacked reading from ledger (Finding 1 & 4)
         temp_attacks = []
         for idx, entry in enumerate(journal_entries):
             if entry.get("source") == "attack" and entry.get("detail", {}).get("action") == "inject":
-                tgt = entry.get("detail", {}).get("target_device_id")
+                detail = entry.get("detail", {})
+                tgt = detail.get("target_device_id")
+                if not tgt and detail.get("capability") == "rogue":
+                    tgt = detail.get("params", {}).get("rogue_device_id")
                 if tgt:
                     temp_attacks.append(
                         TimelineRow(
@@ -1048,7 +1104,7 @@ def render_timeline_tab(db_path: str):
                             lane="Twin",
                             event_type="attack_inject",
                             device_id=tgt,
-                            zone_id=entry.get("detail", {}).get("target_zone_id"),
+                            zone_id=detail.get("target_zone_id") or detail.get("params", {}).get("zone_id"),
                             summary="",
                         )
                     )
@@ -1058,8 +1114,8 @@ def render_timeline_tab(db_path: str):
         # 3. Optional partner logs (Finding 8: off unless TIMELINE_LOG_DIR is set)
         partner_logs = load_partner_log_entries(TIMELINE_LOG_DIR) if TIMELINE_LOG_DIR else []
 
-        # 4. Build correlated 5-lane timeline rows
-        device_zone_map = {n["zone_id"]: n["zone_id"] for n in NEIGHBORHOODS}
+        # 4. Build correlated 5-lane timeline rows (Finding 4: query real device to zone map from devices table)
+        device_zone_map = fetch_device_zone_map(db_p)
         all_rows = build_timeline_rows(
             journal_entries=journal_entries,
             attacked_readings=first_attacked_readings,
@@ -1067,13 +1123,14 @@ def render_timeline_tab(db_path: str):
             log_entries=partner_logs,
         )
 
-        # 5. Apply user filters
+        # 5. Apply user filters (Finding 2: pass current_sim_ts to exclude rows older than cutoff)
         filtered_rows = filter_timeline_rows(
             all_rows,
             window_sim_minutes=w_min,
             since_sim_ts=s_ts,
             zone_id=z_filt,
             device_id=d_filt,
+            current_sim_ts=curr_sim_ts,
         )
 
         # 6. Separate Test Harness rows from primary 4 operational lanes
@@ -1083,6 +1140,20 @@ def render_timeline_tab(db_path: str):
         if not operational_rows:
             st.info("No operational events observed in the selected time window.")
         else:
+            # Incident chains summary list above table (Finding 5: newest first)
+            chain_summaries_dict: Dict[str, str] = {}
+            for r in operational_rows:
+                if r.chain_id and r.chain_summary and r.chain_id not in chain_summaries_dict:
+                    chain_summaries_dict[r.chain_id] = r.chain_summary
+
+            if chain_summaries_dict:
+                st.markdown("**Incident chains**")
+                def chain_num_key(cid: str) -> int:
+                    parts = cid.split("-")
+                    return int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
+                for cid in sorted(chain_summaries_dict.keys(), key=chain_num_key, reverse=True):
+                    st.markdown(f"- **{cid}**: {chain_summaries_dict[cid]}")
+
             table_records = []
             for r in operational_rows:
                 table_records.append({
@@ -1090,21 +1161,24 @@ def render_timeline_tab(db_path: str):
                     "Lane": r.lane,
                     "Event": r.event_type,
                     "Target": r.target,
+                    "Reaction": r.formatted_reaction,
                     "Summary": r.summary,
-                    "Chain": r.chain_summary or "-",
+                    "Chain": r.chain_id or "-",
                     "_raw": r.raw_json,
                 })
 
             df_display = pd.DataFrame(table_records)
 
-            # Table column configuration with proper widths at 1280px (Finding 13)
+            # Table column configuration with proper widths at 1280px (Finding 5)
+            # Total width: 135+75+115+65+75+380+85 = 930px (no horizontal scroll at 1280px)
             column_config = {
-                "Time": st.column_config.TextColumn("Time", width=140),
-                "Lane": st.column_config.TextColumn("Lane", width=80),
-                "Event": st.column_config.TextColumn("Event", width=120),
-                "Target": st.column_config.TextColumn("Target", width=70),
-                "Summary": st.column_config.TextColumn("Summary", width=260),
-                "Chain": st.column_config.TextColumn("Chain", width=280),
+                "Time": st.column_config.TextColumn("Time", width=135),
+                "Lane": st.column_config.TextColumn("Lane", width=75),
+                "Event": st.column_config.TextColumn("Event", width=115),
+                "Target": st.column_config.TextColumn("Target", width=65),
+                "Reaction": st.column_config.TextColumn("Reaction", width=75),
+                "Summary": st.column_config.TextColumn("Summary", width=380),
+                "Chain": st.column_config.TextColumn("Chain", width=85),
                 "_raw": None,
             }
 
@@ -1139,7 +1213,7 @@ def render_timeline_tab(db_path: str):
                 } for r in harness_rows]
                 st.dataframe(pd.DataFrame(h_records), use_container_width=True, hide_index=True)
 
-    render_timeline_fragment(db_path, window_sim_minutes, since_sim_ts, zone_filter, device_filter)
+    render_timeline_fragment(db_path, window_sim_minutes, since_sim_ts, zone_filter, device_filter, sim_now_ts)
 
 
 def render_city_map_tab(db_path: str):

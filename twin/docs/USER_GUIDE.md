@@ -45,7 +45,7 @@ The timeline tab is the primary operational view. It correlates events across fi
 4. Actuator lane: Physical actuation execution results, distinguishing successful operations from refused commands (such as refusal under an actuator tampering attack).
 5. Test harness lane: Diagnostic actions originating from scenario test runners, kept collapsed by default to preserve operational clarity.
 
-Incident chains link related events that share target devices or zones from incident start to clearance plus a 120 simulation-second evaluation window. Each chain displays its computed reaction time in simulation seconds. Selecting any row in the timeline data grid displays its full underlying JSON record for deep inspection.
+Incident chains correlate related events from the incident origin through its resolution plus a 120 simulation-second cooldown window. A summary list above the table displays full incident chain narratives (newest first), while the operational data grid presents columns for Time, Lane, Event, Target, Reaction time, Summary, and Chain identifier. Selecting any row in the timeline data grid displays its full underlying JSON record for deep forensic inspection.
 
 ---
 
