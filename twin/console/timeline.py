@@ -1,20 +1,17 @@
-"""Pure timeline processing logic for the Twin operations console.
+"""Correlated incident timeline processor for Twin Operations Console.
 
-Fulfills Challenge Rule R3:
-A live timeline screen showing reading -> Guardian verdict -> Brain decision -> actuator action,
-with timestamps and correlated reaction chains.
-
-This module contains pure data-transformation functions with zero Streamlit dependencies,
-making it completely unit-testable.
+Transforms raw journal entries from the Twin red-team REST API (/api/journal),
+attacked readings from the ground truth ledger, and optional partner logs into
+a 5-lane timeline with correlated incident chains and reaction times.
 """
 
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
-import glob
 import json
 import os
+import re
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 
@@ -33,50 +30,62 @@ class TimelineRow:
     chain_summary: Optional[str] = None
     raw_json: Optional[Dict[str, Any]] = None
 
+    @property
+    def target(self) -> str:
+        return self.device_id or self.zone_id or "-"
+
     def to_dict(self) -> Dict[str, Any]:
-        return asdict(self)
+        d = asdict(self)
+        d["target"] = self.target
+        return d
 
 
 def parse_rfc3339_to_seconds(ts_str: str) -> float:
     """Convert RFC 3339 timestamp (e.g. 2026-10-17T13:10:26Z) to epoch seconds."""
-    s = ts_str.strip()
-    if s.endswith("Z"):
-        s = s[:-1] + "+00:00"
-    dt = datetime.fromisoformat(s)
-    return dt.timestamp()
-
-
-def format_seconds_to_rfc3339(seconds: float) -> str:
-    """Convert epoch seconds to RFC 3339 UTC string with Z suffix."""
-    dt = datetime.fromtimestamp(seconds, tz=timezone.utc)
-    return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+    s = str(ts_str).strip()
+    if not s:
+        return 0.0
+    try:
+        if s.endswith("Z"):
+            s = s[:-1] + "+00:00"
+        dt = datetime.fromisoformat(s)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.timestamp()
+    except Exception:
+        return 0.0
 
 
 def format_reaction_delta(delta_s: float) -> str:
-    """Format reaction time delta in seconds (e.g. '+20 s')."""
+    """Format simulation reaction time delta (e.g. +20 s)."""
     return f"+{int(round(delta_s))} s"
 
 
 def extract_zone_from_device(device_id: Optional[str], device_zone_map: Dict[str, str]) -> Optional[str]:
-    """Look up zone for a device ID, either from the map or by convention."""
+    """Resolve zone_id from device_id using lookup map or standard naming prefix."""
     if not device_id:
         return None
     if device_id in device_zone_map:
         return device_zone_map[device_id]
-    if device_id.startswith("z") and "-" in device_id:
-        prefix = device_id.split("-")[0]
-        if len(prefix) == 2 and prefix[1].isdigit():
-            return f"zone-{prefix[1]}"
+    m = re.match(r"^z([1-6])-", device_id)
+    if m:
+        return f"zone-{m.group(1)}"
     return None
 
 
-def load_partner_log_entries(log_dir: str) -> List[Dict[str, Any]]:
-    """Read partner log lines from JSON-lines files in TIMELINE_LOG_DIR."""
-    entries: List[Dict[str, Any]] = []
+def load_partner_log_entries(log_dir: Optional[str]) -> List[Dict[str, Any]]:
+    """Load JSON-lines partner logs from directory (TIMELINE_LOG_DIR)."""
     if not log_dir or not os.path.isdir(log_dir):
-        return entries
+        return []
 
-    log_files = glob.glob(os.path.join(log_dir, "*.log"))
+    entries: List[Dict[str, Any]] = []
+    try:
+        files = sorted(os.listdir(log_dir))
+    except OSError:
+        return []
+
+    log_files = [os.path.join(log_dir, f) for f in files if f.endswith(".log") or f.endswith(".jsonl")]
+
     for file_path in log_files:
         try:
             with open(file_path, "r", encoding="utf-8") as f:
@@ -93,7 +102,7 @@ def load_partner_log_entries(log_dir: str) -> List[Dict[str, Any]]:
         except OSError:
             continue
 
-    entries.sort(key=lambda x: str(x.get("sim_ts", "")))
+    entries.sort(key=lambda x: parse_rfc3339_to_seconds(str(x.get("sim_ts", ""))))
     return entries
 
 
@@ -137,7 +146,7 @@ def build_timeline_rows(
             params = detail.get("params", {})
 
             if action == "inject":
-                val = params.get("value") or params.get("spoofed_value")
+                val = params.get("value") if params.get("value") is not None else params.get("spoofed_value")
                 val_txt = f" (spoofed to {val})" if val is not None else ""
                 summary = f"Attack injected: {cap} on {target_dev or target_zone}{val_txt}"
                 rows.append(
@@ -206,7 +215,7 @@ def build_timeline_rows(
                     )
                 )
             elif action == "resolved":
-                resolved_by = detail.get("resolved_by", "mitigation")
+                resolved_by = detail.get("resolved_by", "expired")
                 summary = f"Physical event resolved: {etype} by {resolved_by}"
                 rows.append(
                     TimelineRow(
@@ -308,35 +317,39 @@ def build_timeline_rows(
                     )
                 )
 
-    # 2. Correlate first attacked reading per attack
-    # An attack in Twin lane (attack_inject) can have a matching reading in attacked_readings
+    # 2. Correlate first attacked reading per attack (Finding 1)
     attacks = [r for r in rows if r.event_type == "attack_inject" and r.device_id]
     used_reading_ids: Set[str] = set()
 
     for atk in attacks:
         atk_ts_sec = parse_rfc3339_to_seconds(atk.sim_ts)
-        matched_reading = None
+        # Find candidates matching this device, attacked flag, and ts >= injection ts
+        candidates = []
         for r_truth in attacked_readings:
             rid = str(r_truth.get("reading_id", ""))
             if rid in used_reading_ids:
                 continue
             r_dev = str(r_truth.get("device_id", ""))
+            if r_dev != atk.device_id:
+                continue
             r_ts = str(r_truth.get("ts", ""))
-            if r_dev == atk.device_id and r_ts:
-                try:
-                    r_ts_sec = parse_rfc3339_to_seconds(r_ts)
-                except Exception:
-                    continue
-                if r_ts_sec >= atk_ts_sec:
-                    matched_reading = r_truth
-                    used_reading_ids.add(rid)
-                    break
+            r_sec = parse_rfc3339_to_seconds(r_ts)
+            if r_sec >= atk_ts_sec:
+                # Store tuple for deterministic earliest sorting: (timestamp, id, seq, record)
+                r_id_num = r_truth.get("id") or 0
+                r_seq = r_truth.get("seq") or 0
+                candidates.append((r_sec, r_id_num, r_seq, r_truth))
 
-        if matched_reading:
+        if candidates:
+            # Sort ascending: earliest reading first (finding 1)
+            candidates.sort(key=lambda c: (c[0], c[1], c[2]))
+            matched_reading = candidates[0][3]
             r_id = matched_reading.get("reading_id")
+            used_reading_ids.add(r_id)
+
             d_id = matched_reading.get("device_id")
-            t_val = matched_reading.get("true_value", 0.0)
-            b_val = matched_reading.get("broadcast_value", 0.0)
+            t_val = float(matched_reading.get("true_value", 0.0))
+            b_val = float(matched_reading.get("broadcast_value", 0.0))
             unit = matched_reading.get("unit", "")
             r_ts = matched_reading.get("ts", atk.sim_ts)
             r_zone = extract_zone_from_device(d_id, device_zone_map)
@@ -390,12 +403,13 @@ def build_timeline_rows(
                 )
             )
 
-    # 4. Form Chains (Link Guardian actions and Brain commands to attacks or physical events)
-    # Origin events are attack_inject and event_start in the Twin lane
+    # 4. Form Chains (Findings 2, 3, 4)
+    # Origins are attack_inject and event_start in the Twin lane
     origin_rows = [r for r in rows if r.lane == "Twin" and r.event_type in ("attack_inject", "event_start")]
-    
-    # Sort all rows by sim_ts first to guarantee temporal order
-    rows.sort(key=lambda r: parse_rfc3339_to_seconds(r.sim_ts) if r.sim_ts else 0.0)
+    origin_rows.sort(key=lambda r: parse_rfc3339_to_seconds(r.sim_ts) if r.sim_ts else 0.0)
+
+    # Pre-calculate maximum timestamp across all rows for open-ended chains
+    max_sim_sec = max((parse_rfc3339_to_seconds(r.sim_ts) for r in rows), default=0.0)
 
     for chain_num, origin in enumerate(origin_rows, start=1):
         chain_id = f"chain-{chain_num}"
@@ -406,92 +420,160 @@ def build_timeline_rows(
         target_dev = origin.device_id
         target_zone = origin.zone_id
 
-        # Also link associated attacked_reading if one exists
-        for r in rows:
-            if r.event_type == "attacked_reading" and r.device_id == target_dev and r.chain_id is None:
-                r_ts_sec = parse_rfc3339_to_seconds(r.sim_ts)
-                if origin_ts_sec <= r_ts_sec <= origin_ts_sec + 600.0:
-                    r.chain_id = chain_id
-                    r.reaction_time_s = r_ts_sec - origin_ts_sec
-                    break
+        # Determine end of incident window: attack_clear for attack_id, event_resolved for event_id + 120s (finding 2)
+        end_ts_sec = max_sim_sec + 120.0
+        if origin.event_type == "attack_inject":
+            aid = origin.raw_json.get("detail", {}).get("attack_id") if origin.raw_json else None
+            if aid:
+                # Find corresponding attack_clear
+                for r in rows:
+                    if r.event_type == "attack_clear" and r.raw_json:
+                        if r.raw_json.get("detail", {}).get("attack_id") == aid:
+                            c_sec = parse_rfc3339_to_seconds(r.sim_ts)
+                            end_ts_sec = c_sec + 120.0
+                            if r.chain_id is None:
+                                r.chain_id = chain_id
+                                r.reaction_time_s = max(0.0, c_sec - origin_ts_sec)
+                            break
+        elif origin.event_type == "event_start":
+            eid = origin.raw_json.get("detail", {}).get("event_id") if origin.raw_json else None
+            if eid:
+                for r in rows:
+                    if r.raw_json and r.raw_json.get("detail", {}).get("event_id") == eid:
+                        if r.event_type == "event_escalated" and r.chain_id is None:
+                            r.chain_id = chain_id
+                            r.reaction_time_s = max(0.0, parse_rfc3339_to_seconds(r.sim_ts) - origin_ts_sec)
+                        elif r.event_type == "event_resolved":
+                            res_sec = parse_rfc3339_to_seconds(r.sim_ts)
+                            end_ts_sec = res_sec + 120.0
+                            if r.chain_id is None:
+                                r.chain_id = chain_id
+                                r.reaction_time_s = max(0.0, res_sec - origin_ts_sec)
 
-        # Search for Guardian action in [origin_ts, origin_ts + 600s]
-        linked_guardian: Optional[TimelineRow] = None
+        # Link first attacked reading associated with this attack
+        if origin.event_type == "attack_inject" and target_dev:
+            for r in rows:
+                if r.event_type == "attacked_reading" and r.device_id == target_dev and r.chain_id is None:
+                    r_sec = parse_rfc3339_to_seconds(r.sim_ts)
+                    if origin_ts_sec <= r_sec <= end_ts_sec:
+                        r.chain_id = chain_id
+                        r.reaction_time_s = max(0.0, r_sec - origin_ts_sec)
+                        break
+
+        # Link ALL matching Guardian rows in window [origin_ts_sec, end_ts_sec] (finding 3)
         for r in rows:
             if r.lane == "Guardian" and r.chain_id is None:
-                r_ts_sec = parse_rfc3339_to_seconds(r.sim_ts)
-                if origin_ts_sec <= r_ts_sec <= origin_ts_sec + 600.0:
-                    dev_match = target_dev and (r.device_id == target_dev or (r.raw_json and target_dev in str(r.raw_json.get("detail", {}).get("target", ""))))
-                    zone_match = target_zone and (r.zone_id == target_zone)
+                r_sec = parse_rfc3339_to_seconds(r.sim_ts)
+                if origin_ts_sec <= r_sec <= end_ts_sec:
+                    g_target = str(r.raw_json.get("detail", {}).get("target", "")) if r.raw_json else ""
+                    # Match exact device, rollback reading targeting r-<dev>-, or zone
+                    dev_match = bool(target_dev and (r.device_id == target_dev or g_target == target_dev or g_target.startswith(f"r-{target_dev}-")))
+                    zone_match = bool(target_zone and (r.zone_id == target_zone or (not target_dev and target_zone in g_target)))
                     if dev_match or zone_match:
-                        linked_guardian = r
                         r.chain_id = chain_id
-                        r.reaction_time_s = r_ts_sec - origin_ts_sec
-                        break
+                        r.reaction_time_s = max(0.0, r_sec - origin_ts_sec)
 
-        # Search for Brain command in [origin_ts, origin_ts + 600s]
-        linked_brain: Optional[TimelineRow] = None
-        linked_actuator: Optional[TimelineRow] = None
+        # Link ALL matching Brain rows and their Actuator pairs in window (finding 3)
         for r in rows:
             if r.lane == "Brain" and r.chain_id is None:
-                r_ts_sec = parse_rfc3339_to_seconds(r.sim_ts)
-                if origin_ts_sec <= r_ts_sec <= origin_ts_sec + 600.0:
-                    dev_match = target_dev and (r.device_id == target_dev)
-                    zone_match = target_zone and (r.zone_id == target_zone)
+                r_sec = parse_rfc3339_to_seconds(r.sim_ts)
+                if origin_ts_sec <= r_sec <= end_ts_sec:
+                    dev_match = bool(target_dev and r.device_id == target_dev)
+                    zone_match = bool(target_zone and r.zone_id == target_zone)
                     if dev_match or zone_match:
-                        linked_brain = r
                         r.chain_id = chain_id
-                        r.reaction_time_s = r_ts_sec - origin_ts_sec
+                        r.reaction_time_s = max(0.0, r_sec - origin_ts_sec)
 
-                        # Find corresponding Actuator row
+                        # Pair Actuator row follows its Brain row
                         pair_key = r.row_id.replace(":brain", ":actuator")
                         for act_r in rows:
-                            if act_r.row_id == pair_key:
+                            if act_r.row_id == pair_key and act_r.chain_id is None:
                                 act_r.chain_id = chain_id
                                 act_r.reaction_time_s = r.reaction_time_s
-                                linked_actuator = act_r
                                 break
-                        break
 
-        # Build human-readable chain summary
-        # Example: "z2-wl1 spoofed to 9.5 m -> Guardian isolate_device +20 s -> no Brain action needed"
-        parts = []
+        # Build formatted chain summary (finding 4)
+        # Expected:
+        # "rain_storm in zone-2 -> no Guardian action -> Brain set_valve +862 s (+1 more) -> Actuator executed"
+        # "z1-pl1 device_key spoofed to 180.0 -> Guardian quarantine_device +2 s (+1 more) -> no Brain action"
         if origin.event_type == "attack_inject":
-            val = origin.raw_json.get("detail", {}).get("params", {}).get("value") if origin.raw_json else None
-            val_txt = f" spoofed to {val}" if val is not None else f" {origin.raw_json.get('detail', {}).get('capability', 'attacked')}" if origin.raw_json else ""
-            parts.append(f"{target_dev or target_zone}{val_txt}")
+            params = origin.raw_json.get("detail", {}).get("params", {}) if origin.raw_json else {}
+            val = params.get("value") if params.get("value") is not None else params.get("spoofed_value")
+            cap = origin.raw_json.get("detail", {}).get("capability", "attack") if origin.raw_json else "attack"
+            spoofed_txt = f" spoofed to {val}" if val is not None else ""
+            origin_txt = f"{target_dev or target_zone} {cap}{spoofed_txt}"
         else:
             etype = origin.raw_json.get("detail", {}).get("type", "incident") if origin.raw_json else "incident"
-            parts.append(f"{etype} in {target_zone or 'city'}")
+            origin_txt = f"{etype} in {target_zone or 'city'}"
 
-        if linked_guardian:
-            g_tool = linked_guardian.raw_json.get("detail", {}).get("tool", "containment") if linked_guardian.raw_json else "containment"
-            parts.append(f"Guardian {g_tool} {format_reaction_delta(linked_guardian.reaction_time_s or 0.0)}")
+        g_chain_rows = [r for r in rows if r.chain_id == chain_id and r.lane == "Guardian"]
+        if g_chain_rows:
+            g_chain_rows.sort(key=lambda x: parse_rfc3339_to_seconds(x.sim_ts))
+            first_g = g_chain_rows[0]
+            g_tool = first_g.raw_json.get("detail", {}).get("tool", first_g.event_type) if first_g.raw_json else first_g.event_type
+            g_delta = format_reaction_delta(first_g.reaction_time_s or 0.0)
+            g_more = f" (+{len(g_chain_rows) - 1} more)" if len(g_chain_rows) > 1 else ""
+            guardian_txt = f"Guardian {g_tool} {g_delta}{g_more}"
         else:
-            parts.append("no Guardian action needed")
+            guardian_txt = "no Guardian action"
 
-        if linked_brain:
-            b_tool = linked_brain.raw_json.get("detail", {}).get("tool", "command") if linked_brain.raw_json else "command"
-            parts.append(f"Brain {b_tool} {format_reaction_delta(linked_brain.reaction_time_s or 0.0)}")
-            if linked_actuator:
-                is_exec = linked_actuator.raw_json.get("detail", {}).get("executed", True) if linked_actuator.raw_json else True
-                ref_code = linked_actuator.raw_json.get("detail", {}).get("refused_code") if linked_actuator.raw_json else None
-                act_txt = "executed" if is_exec else f"refused {ref_code}"
-                parts.append(f"Actuator {act_txt}")
+        b_chain_rows = [r for r in rows if r.chain_id == chain_id and r.lane == "Brain"]
+        if b_chain_rows:
+            b_chain_rows.sort(key=lambda x: parse_rfc3339_to_seconds(x.sim_ts))
+            first_b = b_chain_rows[0]
+            b_tool = first_b.raw_json.get("detail", {}).get("tool", first_b.event_type) if first_b.raw_json else first_b.event_type
+            b_delta = format_reaction_delta(first_b.reaction_time_s or 0.0)
+            b_more = f" (+{len(b_chain_rows) - 1} more)" if len(b_chain_rows) > 1 else ""
+            brain_txt = f"Brain {b_tool} {b_delta}{b_more}"
+
+            # Actuator result follows Brain commands
+            a_chain_rows = [r for r in rows if r.chain_id == chain_id and r.lane == "Actuator"]
+            any_refused = any(not r.raw_json.get("detail", {}).get("executed", True) for r in a_chain_rows if r.raw_json)
+            if any_refused:
+                first_ref = next(r for r in a_chain_rows if not r.raw_json.get("detail", {}).get("executed", True))
+                ref_code = first_ref.raw_json.get("detail", {}).get("refused_code") if first_ref.raw_json else None
+                actuator_txt = f"Actuator refused {ref_code}" if ref_code else "Actuator refused"
+            else:
+                actuator_txt = "Actuator executed"
         else:
-            parts.append("no Brain action needed")
+            brain_txt = "no Brain action"
+            actuator_txt = None
 
-        chain_str = " -> ".join(parts)
-        origin.chain_summary = chain_str
-        if linked_guardian:
-            linked_guardian.chain_summary = chain_str
-        if linked_brain:
-            linked_brain.chain_summary = chain_str
-        if linked_actuator:
-            linked_actuator.chain_summary = chain_str
+        chain_parts = [origin_txt, guardian_txt, brain_txt]
+        if actuator_txt:
+            chain_parts.append(actuator_txt)
+        chain_summary_str = " -> ".join(chain_parts)
 
-    # Final sort: sim_ts in ascending order, preserving original index on ties
-    rows.sort(key=lambda r: parse_rfc3339_to_seconds(r.sim_ts) if r.sim_ts else 0.0)
+        # Distribute chain_summary string to all rows in this chain
+        for r in rows:
+            if r.chain_id == chain_id:
+                r.chain_summary = chain_summary_str
+
+    # Deterministic sorting:
+    # 1. sim_ts in ascending order
+    # 2. Within identical sim_ts, order lanes: Twin attack_inject -> attacked_reading -> Guardian -> Brain -> Actuator -> others
+    lane_rank = {
+        ("Twin", "attack_inject"): 0,
+        ("Twin", "event_start"): 0,
+        ("Twin", "attacked_reading"): 1,
+        ("Guardian", "containment"): 2,
+        ("Guardian", "verdict"): 2,
+        ("Brain", "command"): 3,
+        ("Brain", "verdict"): 3,
+        ("Actuator", "actuation_result"): 4,
+        ("Twin", "attack_clear"): 5,
+        ("Twin", "event_escalated"): 5,
+        ("Twin", "event_resolved"): 5,
+        ("Test harness", "command"): 6,
+        ("Test harness", "containment"): 6,
+    }
+
+    rows.sort(
+        key=lambda r: (
+            parse_rfc3339_to_seconds(r.sim_ts) if r.sim_ts else 0.0,
+            lane_rank.get((r.lane, r.event_type), 9),
+        )
+    )
     return rows
 
 
@@ -526,4 +608,3 @@ def filter_timeline_rows(
         filtered = [r for r in filtered if r.device_id == device_id or (r.device_id is None and device_id in str(r.summary))]
 
     return filtered
-

@@ -12,9 +12,11 @@ from datetime import datetime, timezone
 import json
 import logging
 import os
+import socket
 import sqlite3
 import time
 from typing import Any, Dict, List, Optional, Tuple
+import urllib.parse
 
 import altair as alt
 import pandas as pd
@@ -22,6 +24,13 @@ import pydeck as pdk
 import requests
 import streamlit as st
 from streamlit.runtime.scriptrunner import get_script_run_ctx
+
+# 1. First Streamlit call: Set page configuration immediately (Finding 11)
+st.set_page_config(
+    page_title="Twin operations console",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
 
 try:
     from twin.console.timeline import (
@@ -47,7 +56,8 @@ logger = logging.getLogger("twin.console")
 # Environment and Connection Configuration
 DB_PATH = os.getenv("GROUND_TRUTH_DB_PATH", "ground_truth.db")
 TWIN_API_URL = os.getenv("TWIN_API_URL", "http://localhost:8100").rstrip("/")
-TIMELINE_LOG_DIR = os.getenv("TIMELINE_LOG_DIR", "logs")
+MCP_URL = os.getenv("TWIN_MCP_URL", os.getenv("MCP_URL", "http://localhost:8000")).rstrip("/")
+TIMELINE_LOG_DIR = os.getenv("TIMELINE_LOG_DIR")  # Off unless explicitly set (Finding 8)
 
 NEIGHBORHOODS = [
     {"zone_id": "zone-1", "name": "Downtown Financial", "lat": 36.800, "lon": 10.180},
@@ -58,6 +68,53 @@ NEIGHBORHOODS = [
     {"zone_id": "zone-6", "name": "South Logistics Hub", "lat": 36.755, "lon": 10.220},
 ]
 ZONE_NAME_MAP = {n["zone_id"]: n["name"] for n in NEIGHBORHOODS}
+
+# 2. Modern, clean CSS block under 60 lines (Finding 12)
+CUSTOM_CSS = """
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap');
+html, body, [class*="css"], .stMarkdown, p, div, span, label {
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+}
+code, pre, .mono, [data-testid="stMetricValue"] {
+    font-family: 'JetBrains Mono', monospace !important;
+}
+.status-bar {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    gap: 1.5rem;
+    padding: 0.6rem 1rem;
+    background: #121821;
+    border: 1px solid #1e293b;
+    border-radius: 6px;
+    margin-bottom: 1rem;
+    font-size: 0.88rem;
+}
+@media (max-width: 900px) {
+    .status-bar { flex-wrap: wrap; gap: 0.75rem; }
+}
+.status-bar .item { display: flex; align-items: center; gap: 0.4rem; white-space: nowrap; }
+.status-bar .lbl { color: #94a3b8; }
+.status-bar .val { font-family: 'JetBrains Mono', monospace; font-weight: 500; color: #e6edf3; }
+.state-nominal { color: #22c55e !important; }
+.state-contained { color: #f59e0b !important; }
+.state-attack { color: #ef4444 !important; }
+.state-refused { color: #a855f7 !important; }
+.legend-swatch {
+    display: inline-block;
+    width: 12px;
+    height: 12px;
+    border-radius: 2px;
+    margin-right: 6px;
+    vertical-align: middle;
+}
+.swatch-nominal { background: #dce2eb; }
+.swatch-contained { background: #f59e0b; }
+.swatch-attack { background: #ef4444; }
+.swatch-refused { background: #a855f7; }
+</style>
+"""
 
 
 # ==============================================================================
@@ -117,13 +174,27 @@ def get_red_team_headers() -> Dict[str, str]:
     return headers
 
 
-def check_twin_daemon_online() -> bool:
-    """Check connectivity to the Twin red-team REST API."""
+def check_mcp_connection() -> bool:
+    """Probe MCP command server via 0.5s TCP connection check (Finding 10)."""
     try:
-        resp = requests.get(f"{TWIN_API_URL}/api/status", headers=get_red_team_headers(), timeout=1.5)
-        return resp.status_code == 200
-    except requests.RequestException:
+        parsed = urllib.parse.urlparse(MCP_URL)
+        host = parsed.hostname or "localhost"
+        port = parsed.port or 8000
+        with socket.create_connection((host, port), timeout=0.5):
+            return True
+    except Exception:
         return False
+
+
+def fetch_api_status() -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    """Fetch status from red-team REST API on port 8100."""
+    try:
+        resp = requests.get(f"{TWIN_API_URL}/api/status", headers=get_red_team_headers(), timeout=1.0)
+        if resp.status_code == 200:
+            return resp.json(), None
+        return None, f"HTTP {resp.status_code}"
+    except requests.RequestException as e:
+        return None, f"connection failed ({e})"
 
 
 # ==============================================================================
@@ -135,1096 +206,623 @@ def _fetch_scoreboard_metrics_cached(db_path: str, mtime: float) -> Dict[str, An
     metrics: Dict[str, Any] = {
         "total_readings": 0,
         "attacked_readings": 0,
-        "active_incidents": 0,  # Backward compatibility for existing tests
+        "active_incidents": 0,
         "active_attacks": 0,
         "contained_devices": 0,
         "latest_sim_time": "2026-10-17T12:00:00Z",
         "sim_speed": 1.0,
         "msgs_per_sec": 0.0,
-        "kafka_state": "Offline",
-        "mcp_state": "Offline",
+        "kafka_state": "unknown",
+        "mcp_state": "unknown",
+        "twin_api_online": False,
         "recent_callers": "None",
     }
+
+    # 1. Check real MCP server status via TCP
+    metrics["mcp_state"] = "ok" if check_mcp_connection() else "down"
+
+    # 2. Check real Twin API status
+    status_data, api_err = fetch_api_status()
+    if status_data:
+        metrics["twin_api_online"] = True
+        metrics["latest_sim_time"] = status_data.get("sim_time", metrics["latest_sim_time"])
+        metrics["sim_speed"] = float(status_data.get("sim_speed", 1.0))
+        st_info = status_data.get("stream", {})
+        metrics["msgs_per_sec"] = float(st_info.get("throughput_msgs_sec", 0.0))
+        metrics["kafka_state"] = st_info.get("kafka_state", "unknown")
+    else:
+        metrics["twin_api_online"] = False
+        metrics["kafka_state"] = "unknown"
 
     if not os.path.isfile(db_path):
         return metrics
 
+    conn = None
     try:
-        abs_path = os.path.abspath(db_path)
-        conn = sqlite3.connect(f"file:{abs_path}?mode=ro", uri=True)
-        conn.row_factory = sqlite3.Row
-        try:
-            # 1. Total readings via MAX(id) instead of COUNT(*)
-            r_max = conn.execute("SELECT COALESCE(MAX(id), 0) FROM readings_truth").fetchone()
-            if r_max:
-                metrics["total_readings"] = int(r_max[0])
+        conn = get_db_connection()
 
-            # 2. Attacked readings count
-            r_atk = conn.execute("SELECT COUNT(*) FROM readings_truth WHERE is_attacked = 1").fetchone()
-            if r_atk:
-                metrics["attacked_readings"] = int(r_atk[0])
-                metrics["active_incidents"] = int(r_atk[0])
+        # O(1) query using MAX(id) on indexed primary key
+        r_row = conn.execute("SELECT MAX(id) AS max_id, MAX(ts) AS max_ts FROM readings_truth").fetchone()
+        if r_row and r_row["max_id"]:
+            metrics["total_readings"] = int(r_row["max_id"])
+            if not metrics["twin_api_online"] and r_row["max_ts"]:
+                metrics["latest_sim_time"] = str(r_row["max_ts"])
 
-            # 3. Active attacks from attacks_injected
-            r_act = conn.execute("SELECT COUNT(*) FROM attacks_injected WHERE active = 1").fetchone()
-            if r_act:
-                metrics["active_attacks"] = int(r_act[0])
+        # Indexed count of attacked readings
+        r_atk = conn.execute("SELECT COUNT(*) AS c FROM readings_truth WHERE is_attacked = 1").fetchone()
+        if r_atk:
+            metrics["attacked_readings"] = int(r_atk["c"])
+            metrics["active_incidents"] = metrics["attacked_readings"]
 
-            # 4. Devices contained count
-            r_cnt = conn.execute(
-                "SELECT COUNT(*) FROM devices WHERE status IN ('isolated', 'quarantined')"
-            ).fetchone()
-            if r_cnt:
-                metrics["contained_devices"] = int(r_cnt[0])
+        # Active attacks from attacks_injected (column name is active, not is_active)
+        r_live_atk = conn.execute("SELECT COUNT(*) AS c FROM attacks_injected WHERE active = 1").fetchone()
+        if r_live_atk:
+            metrics["active_attacks"] = int(r_live_atk["c"])
 
-            # 5. Latest sim time
-            r_time = conn.execute("SELECT ts FROM readings_truth ORDER BY id DESC LIMIT 1").fetchone()
-            if r_time and r_time[0]:
-                metrics["latest_sim_time"] = str(r_time[0])
+        # Contained devices (quarantined or isolated)
+        r_cont = conn.execute("SELECT COUNT(*) AS c FROM devices WHERE status IN ('isolated', 'quarantined')").fetchone()
+        if r_cont:
+            metrics["contained_devices"] = int(r_cont["c"])
 
-            # 6. Recent callers in the last 5 sim-min
-            try:
-                latest_sec = parse_rfc3339_to_seconds(metrics["latest_sim_time"])
-                five_min_ago = latest_sec - 300.0
-                cutoff_iso = datetime.fromtimestamp(five_min_ago, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-                callers = set()
-                cur = conn.execute("SELECT DISTINCT caller FROM commands_log WHERE sim_ts >= ?", (cutoff_iso,))
-                for r in cur.fetchall():
-                    if r[0]:
-                        callers.add(r[0])
-                cur = conn.execute("SELECT DISTINCT caller FROM containment_log WHERE sim_ts >= ?", (cutoff_iso,))
-                for r in cur.fetchall():
-                    if r[0]:
-                        callers.add(r[0])
-                if callers:
-                    metrics["recent_callers"] = ", ".join(sorted(callers))
-            except Exception:
-                pass
-        finally:
-            conn.close()
-    except sqlite3.Error as e:
+    except Exception as e:
         logger.warning(f"Error reading scoreboard metrics from ledger: {e}")
-
-    # Query API status for live sim speed, msgs/s, and active attacks
-    try:
-        resp = requests.get(f"{TWIN_API_URL}/api/status", headers=get_red_team_headers(), timeout=1.5)
-        if resp.status_code == 200:
-            data = resp.json()
-            if "active_attacks_count" in data:
-                metrics["active_attacks"] = data["active_attacks_count"]
-            metrics["sim_speed"] = data.get("sim_speed", 1.0)
-            if data.get("sim_time"):
-                metrics["latest_sim_time"] = data["sim_time"]
-            stream = data.get("stream", {})
-            metrics["msgs_per_sec"] = stream.get("msgs_per_sec", 0.0)
-            metrics["kafka_state"] = "Streaming" if stream.get("produced", 0) > 0 or metrics["msgs_per_sec"] > 0 else "Ready"
-            metrics["mcp_state"] = "Listening"
-    except requests.RequestException:
-        pass
+    finally:
+        if conn:
+            conn.close()
 
     return metrics
 
 
 def fetch_scoreboard_metrics() -> Dict[str, Any]:
-    """Retrieve KPI metrics and system status (cached with DB_PATH keying)."""
+    """Retrieve fast headline metrics for the status bar and KPI cards."""
     return _fetch_scoreboard_metrics_cached(DB_PATH, _get_db_mtime(DB_PATH))
 
 
-@st.cache_data(ttl=2)
-def _fetch_active_attacks_cached(db_path: str, mtime: float) -> List[Dict[str, Any]]:
-    """Internal cached active attacks query."""
+def fetch_active_attacks() -> List[Dict[str, Any]]:
+    """Retrieve currently active red-team attacks from API or ledger."""
     try:
-        resp = requests.get(f"{TWIN_API_URL}/api/attack/active", headers=get_red_team_headers(), timeout=1.5)
+        resp = requests.get(f"{TWIN_API_URL}/api/attack/active", headers=get_red_team_headers(), timeout=1.0)
         if resp.status_code == 200:
             return resp.json().get("active_attacks", [])
     except requests.RequestException:
         pass
 
-    if not os.path.isfile(db_path):
+    if not os.path.isfile(DB_PATH):
         return []
+    conn = None
     try:
-        abs_path = os.path.abspath(db_path)
-        conn = sqlite3.connect(f"file:{abs_path}?mode=ro", uri=True)
-        conn.row_factory = sqlite3.Row
-        try:
-            cur = conn.execute(
-                "SELECT attack_id, capability, target_device_id, target_zone_id, params_json, start_sim_time, description "
-                "FROM attacks_injected WHERE active = 1 ORDER BY start_sim_time DESC"
-            )
-            rows = []
-            for r in cur.fetchall():
+        conn = get_db_connection()
+        rows = conn.execute(
+            "SELECT attack_id, capability, target_device_id, target_zone_id, start_sim_time, params_json "
+            "FROM attacks_injected WHERE active = 1 ORDER BY rowid DESC"
+        ).fetchall()
+        active = []
+        for r in rows:
+            p_val = {}
+            if r["params_json"]:
                 try:
-                    params = json.loads(r["params_json"]) if r["params_json"] else {}
+                    p_val = json.loads(r["params_json"])
                 except Exception:
-                    params = {}
-                rows.append({
-                    "attack_id": r["attack_id"],
-                    "capability": r["capability"],
-                    "target_device_id": r["target_device_id"],
-                    "target_zone_id": r["target_zone_id"],
-                    "params": params,
-                    "start_sim_time": r["start_sim_time"],
-                    "description": r["description"],
-                })
-            return rows
-        finally:
-            conn.close()
-    except sqlite3.Error:
+                    pass
+            active.append({
+                "attack_id": r["attack_id"],
+                "capability": r["capability"],
+                "target_device_id": r["target_device_id"],
+                "target_zone_id": r["target_zone_id"],
+                "start_sim_time": r["start_sim_time"],
+                "params": p_val,
+            })
+        return active
+    except Exception:
         return []
+    finally:
+        if conn:
+            conn.close()
 
 
-def fetch_active_attacks() -> List[Dict[str, Any]]:
-    """Retrieve currently active cyber-physical attacks."""
-    return _fetch_active_attacks_cached(DB_PATH, _get_db_mtime(DB_PATH))
-
-
-@st.cache_data(ttl=2)
-def _fetch_active_events_cached(db_path: str, mtime: float) -> List[Dict[str, Any]]:
-    """Internal cached active physical events query."""
+def fetch_active_physical_events() -> List[Dict[str, Any]]:
+    """Retrieve currently active physical environmental events."""
     try:
-        resp = requests.get(f"{TWIN_API_URL}/api/event/active", headers=get_red_team_headers(), timeout=1.5)
+        resp = requests.get(f"{TWIN_API_URL}/api/event/active", headers=get_red_team_headers(), timeout=1.0)
         if resp.status_code == 200:
             return resp.json().get("active_events", [])
     except requests.RequestException:
         pass
 
-    if not os.path.isfile(db_path):
-        return []
-    try:
-        abs_path = os.path.abspath(db_path)
-        conn = sqlite3.connect(f"file:{abs_path}?mode=ro", uri=True)
-        conn.row_factory = sqlite3.Row
-        try:
-            cur = conn.execute(
-                "SELECT event_id, type, zone_id, device_id, params_json, start_sim_ts "
-                "FROM physical_events WHERE resolved_sim_ts IS NULL ORDER BY start_sim_ts DESC"
-            )
-            rows = []
-            for r in cur.fetchall():
-                try:
-                    params = json.loads(r["params_json"]) if r["params_json"] else {}
-                except Exception:
-                    params = {}
-                rows.append({
-                    "event_id": r["event_id"],
-                    "type": r["type"],
-                    "zone_id": r["zone_id"],
-                    "device_id": r["device_id"],
-                    "params": params,
-                    "start_sim_ts": r["start_sim_ts"],
-                })
-            return rows
-        finally:
-            conn.close()
-    except sqlite3.Error:
-        return []
-
-
-def fetch_active_events() -> List[Dict[str, Any]]:
-    """Retrieve currently active physical events."""
-    return _fetch_active_events_cached(DB_PATH, _get_db_mtime(DB_PATH))
-
-
-@st.cache_data(ttl=2)
-def _fetch_geospatial_sensors_cached(db_path: str, mtime: float) -> pd.DataFrame:
-    """Internal cached geospatial sensors query with normalised elevations."""
-    if not os.path.isfile(db_path):
-        return pd.DataFrame()
-
-    try:
-        abs_path = os.path.abspath(db_path)
-        conn = sqlite3.connect(f"file:{abs_path}?mode=ro", uri=True)
-        try:
-            query = """
-            SELECT d.device_id, d.zone_id, d.device_type, d.unit, d.lat, d.lon, d.status, d.min_val, d.max_val,
-                   COALESCE(r.true_value, 0.0) AS true_value,
-                   COALESCE(r.broadcast_value, 0.0) AS broadcast_value,
-                   COALESCE(r.is_attacked, 0) AS is_attacked,
-                   COALESCE(r.attack_type, 'none') AS attack_type
-            FROM devices d
-            LEFT JOIN (
-                SELECT r1.*
-                FROM readings_truth r1
-                JOIN (
-                    SELECT device_id, MAX(id) as max_id
-                    FROM readings_truth
-                    GROUP BY device_id
-                ) r2 ON r1.id = r2.max_id
-            ) r ON d.device_id = r.device_id
-            WHERE d.device_id LIKE 'z%'
-            ORDER BY d.device_id ASC
-            """
-            df = pd.read_sql_query(query, conn)
-        finally:
-            conn.close()
-
-        if df.empty:
-            return df
-
-        df["zone_name"] = df["zone_id"].map(ZONE_NAME_MAP).fillna(df["zone_id"])
-
-        # Cross reference with active attacks
-        active_atks = fetch_active_attacks()
-        targeted_devices = {a["target_device_id"]: a for a in active_atks if a.get("target_device_id")}
-        targeted_zones = {a["target_zone_id"]: a for a in active_atks if a.get("target_zone_id")}
-
-        def evaluate_discrepancy(r: pd.Series) -> Tuple[bool, str]:
-            dev_id = str(r["device_id"])
-            zone_id = str(r["zone_id"])
-            if dev_id in targeted_devices:
-                atk = targeted_devices[dev_id]
-                return True, atk.get("capability", "attack")
-            if zone_id in targeted_zones:
-                atk = targeted_zones[zone_id]
-                return True, atk.get("capability", "attack")
-            is_atk = bool(r.get("is_attacked", 0))
-            drift = abs(float(r.get("broadcast_value", 0.0)) - float(r.get("true_value", 0.0))) > 0.05
-            return (is_atk or drift), str(r.get("attack_type", "none"))
-
-        eval_res = [evaluate_discrepancy(r) for _, r in df.iterrows()]
-        df["discrepancy"] = [e[0] for e in eval_res]
-        df["attack_type"] = [e[1] for e in eval_res]
-
-        # Height normalisation to device's own [min_val, max_val]
-        def calc_elevation(row: pd.Series) -> float:
-            val = float(row["broadcast_value"])
-            min_v = float(row.get("min_val", 0.0))
-            max_v = float(row.get("max_val", 100.0))
-            denom = max(max_v - min_v, 1e-6)
-            norm = (val - min_v) / denom
-            norm = max(0.0, min(1.0, norm))
-            return 50.0 + norm * 450.0
-
-        def calc_color(row: pd.Series) -> List[int]:
-            st_val = str(row.get("status", "ok"))
-            if bool(row.get("discrepancy")):
-                return [239, 68, 68, 240]  # Attack red #ef4444
-            if st_val in ("isolated", "quarantined"):
-                return [245, 158, 11, 240]  # Contained amber #f59e0b
-            return [148, 163, 184, 210]  # Neutral slate-400
-
-        def calc_radius(row: pd.Series) -> int:
-            st_val = str(row.get("status", "ok"))
-            if bool(row.get("discrepancy")):
-                return 90
-            if st_val in ("isolated", "quarantined"):
-                return 75
-            return 45
-
-        df["elevation"] = [calc_elevation(r) for _, r in df.iterrows()]
-        df["fill_color"] = [calc_color(r) for _, r in df.iterrows()]
-        df["radius"] = [calc_radius(r) for _, r in df.iterrows()]
-        return df
-    except sqlite3.Error as e:
-        logger.warning(f"Error fetching geospatial sensors: {e}")
-        return pd.DataFrame()
-
-
-def fetch_geospatial_sensors() -> pd.DataFrame:
-    """Retrieve device registry with latest readings and normalised heights."""
-    return _fetch_geospatial_sensors_cached(DB_PATH, _get_db_mtime(DB_PATH))
-
-
-def fetch_neighborhood_summaries(sensors_df: pd.DataFrame) -> List[Dict[str, Any]]:
-    """Compute summary statistics per zone."""
-    summaries = []
-    for n in NEIGHBORHOODS:
-        zid = n["zone_id"]
-        z_df = sensors_df[sensors_df["zone_id"] == zid] if not sensors_df.empty else pd.DataFrame()
-        threats = int(z_df["discrepancy"].sum()) if not z_df.empty else 0
-        contained = int(z_df["status"].isin(["isolated", "quarantined"]).sum()) if not z_df.empty else 0
-        summaries.append({
-            "zone_id": zid,
-            "name": n["name"],
-            "total_sensors": len(z_df),
-            "active_threats": threats,
-            "contained": contained,
-            "status": "threat" if threats > 0 else "contained" if contained > 0 else "nominal",
-        })
-    return summaries
-
-
-def fetch_device_time_series(device_id: str, limit: int = 60) -> pd.DataFrame:
-    """Retrieve historical time series for truth vs broadcast comparison."""
-    if not os.path.isfile(DB_PATH):
-        return pd.DataFrame()
-
-    try:
-        conn = get_db_connection()
-        try:
-            query = """
-            SELECT id, seq, ts, true_value, broadcast_value, is_attacked, attack_type, unit, status
-            FROM readings_truth
-            WHERE device_id = ?
-            ORDER BY id DESC
-            LIMIT ?
-            """
-            df = pd.read_sql_query(query, conn, params=(device_id, limit))
-        finally:
-            conn.close()
-
-        if df.empty:
-            return df
-        df = df.iloc[::-1].reset_index(drop=True)
-        df["discrepancy"] = (df["broadcast_value"] - df["true_value"]).abs()
-        return df
-    except sqlite3.Error as e:
-        logger.warning(f"Error fetching time series: {e}")
-        return pd.DataFrame()
-
-
-def fetch_registered_devices() -> List[str]:
-    """Retrieve list of device identifiers."""
     if not os.path.isfile(DB_PATH):
         return []
+    conn = None
     try:
         conn = get_db_connection()
-        try:
-            cur = conn.execute("SELECT device_id FROM devices ORDER BY zone_id, device_id")
-            return [r[0] for r in cur.fetchall()]
-        finally:
-            conn.close()
-    except sqlite3.Error:
+        rows = conn.execute(
+            "SELECT event_id, event_type, zone_id, intensity, start_sim_time "
+            "FROM physical_events WHERE is_active = 1 ORDER BY id DESC"
+        ).fetchall()
+        return [dict(r) for r in rows]
+    except Exception:
         return []
-
-
-def fetch_truth_ledger(limit: int = 50) -> pd.DataFrame:
-    """Retrieve raw ground truth ledger entries."""
-    if not os.path.isfile(DB_PATH):
-        return pd.DataFrame()
-    try:
-        conn = get_db_connection()
-        try:
-            query = """
-            SELECT id, reading_id, device_id, ts, seq, true_value, broadcast_value, unit, status, attack_type, is_attacked
-            FROM readings_truth
-            ORDER BY id DESC
-            LIMIT ?
-            """
-            return pd.read_sql_query(query, conn, params=(limit,))
-        finally:
+    finally:
+        if conn:
             conn.close()
-    except sqlite3.Error:
-        return pd.DataFrame()
 
 
-def fetch_timeline_events(limit: int = 100, since_sim_ts: Optional[str] = None) -> Tuple[List[Dict[str, Any]], Optional[str]]:
-    """Retrieve journal entries from the red-team REST API or local database fallback."""
+def fetch_journal_entries(
+    since_sim_ts: Optional[str] = None, limit: int = 1000
+) -> Tuple[Optional[List[Dict[str, Any]]], Optional[str]]:
+    """Fetch journal entries from red-team REST API.
+
+    Finding 7: Strictly never falls back to the database. If unreachable or non-200,
+    returns (None, clear_error_message).
+    """
+    token_val = get_red_team_token()
+    token_state = "set" if token_val else "missing"
+
+    headers = get_red_team_headers()
+    url = f"{TWIN_API_URL}/api/journal"
     params: Dict[str, Any] = {"limit": limit}
     if since_sim_ts:
         params["since_sim_ts"] = since_sim_ts
 
     try:
-        resp = requests.get(f"{TWIN_API_URL}/api/journal", headers=get_red_team_headers(), params=params, timeout=2.5)
+        resp = requests.get(url, headers=headers, params=params, timeout=2.0)
         if resp.status_code == 200:
             data = resp.json()
             return data.get("journal", []), None
-        elif resp.status_code == 401:
-            return [], f"Authentication failed (401). Check RED_TEAM_TOKEN or RED_TEAM_TOKEN_FILE for {TWIN_API_URL}."
-    except requests.RequestException:
-        pass
-
-    # Read-only SQLite fallback for tests and offline inspections
-    if os.path.isfile(DB_PATH):
-        try:
-            conn = get_db_connection()
-            try:
-                entries: List[Dict[str, Any]] = []
-                # commands_log
-                cur = conn.execute("SELECT id, sim_ts, caller, tool, args_json, executed, refused_code FROM commands_log ORDER BY id DESC LIMIT ?", (limit,))
-                for r in cur.fetchall():
-                    try:
-                        args = json.loads(r["args_json"]) if r["args_json"] else {}
-                    except Exception:
-                        args = {}
-                    entries.append({
-                        "key": f"command:{r['id']}",
-                        "sim_ts": r["sim_ts"],
-                        "source": "command",
-                        "detail": {
-                            "caller": r["caller"],
-                            "tool": r["tool"],
-                            "args": args,
-                            "executed": bool(r["executed"]),
-                            "refused_code": r["refused_code"],
-                        },
-                    })
-                # containment_log
-                cur = conn.execute("SELECT id, sim_ts, caller, tool, target, from_status, to_status FROM containment_log ORDER BY id DESC LIMIT ?", (limit,))
-                for r in cur.fetchall():
-                    entries.append({
-                        "key": f"containment:{r['id']}",
-                        "sim_ts": r["sim_ts"],
-                        "source": "containment",
-                        "detail": {
-                            "caller": r["caller"],
-                            "tool": r["tool"],
-                            "target": r["target"],
-                            "from_status": r["from_status"],
-                            "to_status": r["to_status"],
-                        },
-                    })
-                # physical_events
-                cur = conn.execute("SELECT event_id, type, zone_id, device_id, params_json, start_sim_ts, resolved_sim_ts, resolved_by, escalated_sim_ts, escalated_to FROM physical_events ORDER BY event_id DESC LIMIT ?", (limit,))
-                for r in cur.fetchall():
-                    try:
-                        p = json.loads(r["params_json"]) if r["params_json"] else {}
-                    except Exception:
-                        p = {}
-                    entries.append({
-                        "key": f"event_start:{r['event_id']}",
-                        "sim_ts": r["start_sim_ts"],
-                        "source": "event",
-                        "detail": {
-                            "event_id": r["event_id"],
-                            "action": "start",
-                            "type": r["type"],
-                            "zone_id": r["zone_id"],
-                            "device_id": r["device_id"],
-                            "params": p,
-                        },
-                    })
-                # attacks_injected
-                cur = conn.execute("SELECT attack_id, capability, target_device_id, target_zone_id, params_json, start_sim_time, end_sim_time, description FROM attacks_injected ORDER BY start_sim_time DESC LIMIT ?", (limit,))
-                for r in cur.fetchall():
-                    try:
-                        p = json.loads(r["params_json"]) if r["params_json"] else {}
-                    except Exception:
-                        p = {}
-                    entries.append({
-                        "key": f"attack_inject:{r['attack_id']}",
-                        "sim_ts": r["start_sim_time"],
-                        "source": "attack",
-                        "detail": {
-                            "attack_id": r["attack_id"],
-                            "action": "inject",
-                            "capability": r["capability"],
-                            "target_device_id": r["target_device_id"],
-                            "target_zone_id": r["target_zone_id"],
-                            "params": p,
-                            "description": r["description"],
-                        },
-                    })
-                entries.sort(key=lambda x: str(x.get("sim_ts", "")))
-                return entries, None
-            finally:
-                conn.close()
-        except sqlite3.Error:
-            pass
-
-    return [], f"Cannot connect to journal API at {TWIN_API_URL}. Ensure the Twin engine is running (PYTHONPATH=src python -m twin.main) and TWIN_API_URL is configured."
+        else:
+            msg = (
+                f"Cannot connect to journal API: Twin API returned HTTP {resp.status_code} ({resp.text.strip()}). "
+                f"Check TWIN_API_URL ({TWIN_API_URL}) and RED_TEAM_TOKEN / RED_TEAM_TOKEN_FILE ({token_state})."
+            )
+            return None, msg
+    except requests.RequestException as e:
+        msg = (
+            f"Cannot connect to journal API: Cannot reach Twin red-team API at {TWIN_API_URL} ({e}). "
+            f"Check TWIN_API_URL ({TWIN_API_URL}) and RED_TEAM_TOKEN or RED_TEAM_TOKEN_FILE ({token_state})."
+        )
+        return None, msg
 
 
-def fetch_attacked_ledger_readings(limit: int = 100) -> List[Dict[str, Any]]:
-    """Retrieve attacked readings from the ledger."""
-    if not os.path.isfile(DB_PATH):
+def fetch_timeline_events(limit: int = 50) -> Tuple[List[Dict[str, Any]], Optional[str]]:
+    """Compatibility wrapper for tests and external callers."""
+    entries, err = fetch_journal_entries(limit=limit)
+    if err:
+        return [], err
+    return entries or [], None
+
+
+def fetch_first_attacked_readings_for_attacks(
+    db_path: str, attacks: List[TimelineRow]
+) -> List[Dict[str, Any]]:
+    """Query ledger for the FIRST attacked reading for each attack in the window (Finding 1).
+
+    Uses idx_readings_device_ts index:
+    device_id = target AND is_attacked = 1 AND ts >= inject_sim_ts ORDER BY id ASC LIMIT 1.
+    """
+    if not os.path.isfile(db_path):
         return []
+
+    conn = None
+    first_readings: List[Dict[str, Any]] = []
     try:
         conn = get_db_connection()
-        try:
-            cur = conn.execute(
-                "SELECT reading_id, device_id, ts, seq, true_value, broadcast_value, unit, status, attack_type, is_attacked "
-                "FROM readings_truth WHERE is_attacked = 1 ORDER BY id DESC LIMIT ?",
-                (limit,),
-            )
-            return [dict(r) for r in cur.fetchall()]
-        finally:
+        for atk in attacks:
+            target_dev = atk.device_id
+            if not target_dev:
+                continue
+            row = conn.execute(
+                """
+                SELECT id, seq, reading_id, device_id, ts, true_value, broadcast_value, unit, is_attacked, attack_type
+                FROM readings_truth
+                WHERE device_id = ? AND is_attacked = 1 AND ts >= ?
+                ORDER BY id ASC
+                LIMIT 1
+                """,
+                (target_dev, atk.sim_ts),
+            ).fetchone()
+            if row:
+                first_readings.append(dict(row))
+    except Exception as e:
+        logger.warning(f"Error querying first attacked reading: {e}")
+    finally:
+        if conn:
             conn.close()
-    except sqlite3.Error:
-        return []
+    return first_readings
 
 
-# ==============================================================================
-# Red Team Control Actions (Interfacing with port 8100 REST API)
-# ==============================================================================
 def inject_attack_to_simulator(
     capability: str,
     target_device_id: Optional[str] = None,
     target_zone_id: Optional[str] = None,
     params: Optional[Dict[str, Any]] = None,
-    description: Optional[str] = None,
+    description: str = "",
 ) -> Tuple[bool, str]:
-    """Inject an attack via the isolated Red Team REST API."""
-    if not params:
-        params = {}
+    """Inject attack via red team REST API."""
     payload = {
         "capability": capability,
         "target_device_id": target_device_id,
         "target_zone_id": target_zone_id,
-        "params": params,
-        "description": description or f"Console injection: {capability}",
-    }
-    try:
-        resp = requests.post(f"{TWIN_API_URL}/api/attack/inject", headers=get_red_team_headers(), json=payload, timeout=2.0)
-        if resp.status_code == 200:
-            aid = resp.json().get("attack_id", "atk-unknown")
-            return True, f"Attack {aid} injected successfully."
-        else:
-            err = resp.json().get("message", resp.text)
-            return False, f"[ALERT] API error ({resp.status_code}): {err}"
-    except requests.RequestException as e:
-        return False, f"[ALERT] Connection refused: {e}"
-
-
-def clear_attacks_in_simulator(attack_id: str = "all") -> Tuple[bool, str]:
-    """Clear active attacks via the isolated Red Team REST API."""
-    payload = {"attack_id": attack_id}
-    try:
-        resp = requests.post(f"{TWIN_API_URL}/api/attack/clear", headers=get_red_team_headers(), json=payload, timeout=2.0)
-        if resp.status_code == 200:
-            return True, "Attacks cleared successfully."
-        else:
-            err = resp.json().get("message", resp.text)
-            return False, f"[ALERT] API error ({resp.status_code}): {err}"
-    except requests.RequestException as e:
-        return False, f"[ALERT] Connection refused: {e}"
-
-
-def inject_event_to_simulator(
-    event_type: str,
-    zone_id: str,
-    intensity: float = 1.0,
-    duration_s: int = 180,
-    params: Optional[Dict[str, Any]] = None,
-) -> Tuple[bool, str]:
-    """Inject a physical event via the Red Team REST API."""
-    payload = {
-        "type": event_type,
-        "zone_id": zone_id,
-        "intensity": intensity,
-        "duration_s": duration_s,
         "params": params or {},
+        "description": description,
     }
     try:
-        resp = requests.post(f"{TWIN_API_URL}/api/event/inject", headers=get_red_team_headers(), json=payload, timeout=2.0)
+        resp = requests.post(
+            f"{TWIN_API_URL}/api/attack/inject",
+            headers=get_red_team_headers(),
+            json=payload,
+            timeout=2.0,
+        )
         if resp.status_code == 200:
-            eid = resp.json().get("event_id", "ev-unknown")
-            return True, f"Physical event {eid} injected successfully."
-        else:
-            err = resp.json().get("message", resp.text)
-            return False, f"[ALERT] API error ({resp.status_code}): {err}"
-    except requests.RequestException as e:
+            return True, f"Injected {capability} on {target_device_id}"
+        return False, f"[ALERT] Injection failed: HTTP {resp.status_code}"
+    except Exception as e:
         return False, f"[ALERT] Connection refused: {e}"
 
 
-def clear_events_in_simulator(event_id: str = "all") -> Tuple[bool, str]:
-    """Clear physical events via the Red Team REST API."""
-    payload = {"event_id": event_id}
+def clear_attacks_in_simulator(attack_id: Optional[str] = None) -> Tuple[bool, str]:
+    """Clear one or all attacks via red team REST API."""
+    payload: Dict[str, Any] = {"attack_id": attack_id} if attack_id else {"clear_all": True}
     try:
-        resp = requests.post(f"{TWIN_API_URL}/api/event/clear", headers=get_red_team_headers(), json=payload, timeout=2.0)
+        resp = requests.post(
+            f"{TWIN_API_URL}/api/attack/clear",
+            headers=get_red_team_headers(),
+            json=payload,
+            timeout=2.0,
+        )
         if resp.status_code == 200:
-            return True, "Physical events cleared successfully."
-        else:
-            err = resp.json().get("message", resp.text)
-            return False, f"[ALERT] API error ({resp.status_code}): {err}"
-    except requests.RequestException as e:
+            return True, "All attacks cleared successfully"
+        return False, f"[ALERT] Clear failed: HTTP {resp.status_code}"
+    except Exception as e:
         return False, f"[ALERT] Connection refused: {e}"
 
 
-# ==============================================================================
-# PyDeck 3D Map Visualisation Builder
-# ==============================================================================
+@st.cache_data(ttl=3)
+def _fetch_geospatial_sensors_cached(db_path: str, mtime: float) -> pd.DataFrame:
+    """Load latest sensor readings and compute normalised 3D heights."""
+    cols = ["device_id", "zone_id", "device_type", "unit", "lat", "lon", "min_val", "max_val", "status"]
+    if not os.path.isfile(db_path):
+        return pd.DataFrame(columns=cols + ["broadcast_value", "true_value", "discrepancy", "zone_name", "attack_type", "elevation", "fill_color", "radius"])
+
+    conn = None
+    try:
+        conn = get_db_connection()
+        devices = conn.execute(
+            "SELECT device_id, zone_id, device_type, unit, lat, lon, min_val, max_val, status FROM devices"
+        ).fetchall()
+        if not devices:
+            return pd.DataFrame(columns=cols + ["broadcast_value", "true_value", "discrepancy", "zone_name", "attack_type", "elevation", "fill_color", "radius"])
+
+        dev_list = [dict(d) for d in devices]
+        df = pd.DataFrame(dev_list)
+
+        # Get latest broadcast reading per device
+        latest_rows = conn.execute(
+            """
+            SELECT r.device_id, r.true_value, r.broadcast_value, r.is_attacked, r.attack_type
+            FROM readings_truth r
+            INNER JOIN (
+                SELECT device_id, MAX(id) AS max_id
+                FROM readings_truth
+                GROUP BY device_id
+            ) latest ON r.id = latest.max_id
+            """
+        ).fetchall()
+        readings_map = {r["device_id"]: dict(r) for r in latest_rows}
+
+        true_vals = []
+        vals = []
+        is_atks = []
+        atk_types = []
+        zone_names = []
+        discrepancies = []
+        elevations = []
+        colors = []
+        radii = []
+
+        for _, row in df.iterrows():
+            did = row["device_id"]
+            min_v = float(row["min_val"])
+            max_v = float(row["max_val"])
+            st_val = str(row["status"]).lower()
+
+            r_info = readings_map.get(did, {})
+            t_val = float(r_info.get("true_value", min_v))
+            b_val = float(r_info.get("broadcast_value", min_v))
+            is_atk = int(r_info.get("is_attacked", 0))
+            atk_type = str(r_info.get("attack_type", "") or "")
+            zone_name = ZONE_NAME_MAP.get(row["zone_id"], row["zone_id"])
+            discrepancy = abs(b_val - t_val)
+
+            # Normalised height formula: 50.0 + norm * 450.0 (Finding 14 & test compatibility)
+            norm = 0.0
+            if max_v > min_v:
+                clamped = max(min_v, min(max_v, b_val))
+                norm = (clamped - min_v) / (max_v - min_v)
+            elevation = 50.0 + (norm * 450.0)
+
+            # Colors (RGBA): nominal light neutral with alpha >= 200 (Finding 14)
+            if is_atk or st_val == "tampered":
+                c = [239, 68, 68, 230]      # Red (attacked)
+            elif st_val in ("isolated", "quarantined"):
+                c = [245, 158, 11, 230]     # Amber (contained)
+            elif st_val == "refused":
+                c = [168, 85, 247, 230]     # Purple (refused)
+            else:
+                c = [220, 226, 235, 215]     # Light neutral with alpha 215
+
+            true_vals.append(t_val)
+            vals.append(b_val)
+            is_atks.append(is_atk)
+            atk_types.append(atk_type)
+            zone_names.append(zone_name)
+            discrepancies.append(discrepancy)
+            elevations.append(elevation)
+            colors.append(c)
+            radii.append(100.0)             # 100m radius (Finding 14)
+
+        df["true_value"] = true_vals
+        df["broadcast_value"] = vals
+        df["is_attacked"] = is_atks
+        df["attack_type"] = atk_types
+        df["zone_name"] = zone_names
+        df["discrepancy"] = discrepancies
+        df["elevation"] = elevations
+        df["fill_color"] = colors
+        df["radius"] = radii
+        df["halo_radius"] = [r * 1.5 for r in radii]
+        return df
+    except Exception as e:
+        logger.warning(f"Error fetching geospatial sensors: {e}")
+        return pd.DataFrame(columns=cols + ["broadcast_value", "true_value", "discrepancy", "zone_name", "attack_type", "elevation", "fill_color", "radius"])
+    finally:
+        if conn:
+            conn.close()
+
+
+def fetch_geospatial_sensors() -> pd.DataFrame:
+    """Retrieve sensor telemetry formatted for PyDeck geospatial map."""
+    return _fetch_geospatial_sensors_cached(DB_PATH, _get_db_mtime(DB_PATH))
+
+
+def fetch_neighborhood_summaries(sensors_df: pd.DataFrame) -> List[Dict[str, Any]]:
+    """Summarise sensor metrics and active threat state per municipal sector."""
+    summaries = []
+    for n in NEIGHBORHOODS:
+        zid = n["zone_id"]
+        z_df = sensors_df[sensors_df["zone_id"] == zid] if not sensors_df.empty else pd.DataFrame()
+        total = len(z_df)
+        active_threats = int(z_df["is_attacked"].sum()) if not z_df.empty else 0
+        contained = len(z_df[z_df["status"].isin(["isolated", "quarantined"])]) if not z_df.empty else 0
+        status = "threat" if active_threats > 0 else ("contained" if contained > 0 else "nominal")
+        summaries.append({
+            "zone_id": zid,
+            "name": n["name"],
+            "total_sensors": total,
+            "active_threats": active_threats,
+            "contained": contained,
+            "status": status,
+        })
+    return summaries
+
+
+def fetch_device_time_series(device_id: str, limit: int = 120) -> pd.DataFrame:
+    """Retrieve recent ground truth vs broadcast telemetry records for device."""
+    cols = ["ts", "true_value", "broadcast_value", "discrepancy", "is_attacked"]
+    if not os.path.isfile(DB_PATH) or not device_id:
+        return pd.DataFrame(columns=cols)
+
+    conn = None
+    try:
+        conn = get_db_connection()
+        rows = conn.execute(
+            """
+            SELECT ts, true_value, broadcast_value, is_attacked
+            FROM readings_truth
+            WHERE device_id = ?
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (device_id, limit),
+        ).fetchall()
+        if not rows:
+            return pd.DataFrame(columns=cols)
+
+        data = [dict(r) for r in reversed(rows)]
+        df = pd.DataFrame(data)
+        df["discrepancy"] = (df["broadcast_value"] - df["true_value"]).abs()
+        return df
+    except Exception as e:
+        logger.warning(f"Error fetching time series for {device_id}: {e}")
+        return pd.DataFrame(columns=cols)
+    finally:
+        if conn:
+            conn.close()
+
+
+def fetch_truth_ledger(limit: int = 200, offset: int = 0) -> pd.DataFrame:
+    """Retrieve audit rows from readings_truth ledger."""
+    cols = ["id", "reading_id", "device_id", "ts", "true_value", "broadcast_value", "unit", "status", "is_attacked", "attack_type"]
+    if not os.path.isfile(DB_PATH):
+        return pd.DataFrame(columns=cols)
+
+    conn = None
+    try:
+        conn = get_db_connection()
+        rows = conn.execute(
+            """
+            SELECT id, reading_id, device_id, ts, true_value, broadcast_value, unit, status, is_attacked, attack_type
+            FROM readings_truth
+            ORDER BY id DESC
+            LIMIT ? OFFSET ?
+            """,
+            (limit, offset),
+        ).fetchall()
+        if not rows:
+            return pd.DataFrame(columns=cols)
+        return pd.DataFrame([dict(r) for r in rows])
+    except Exception as e:
+        logger.warning(f"Error querying readings_truth: {e}")
+        return pd.DataFrame(columns=cols)
+    finally:
+        if conn:
+            conn.close()
+
+
+def normalise_elevation(val: float, min_val: float, max_val: float) -> float:
+    """Calculate normalised 3D column height [50.0, 500.0] for sensor value."""
+    if max_val <= min_val:
+        return 50.0
+    clamped = max(min_val, min(max_val, val))
+    norm = (clamped - min_val) / (max_val - min_val)
+    return 50.0 + (norm * 450.0)
+
+
 def build_spatial_twin_deck(sensors_df: pd.DataFrame, map_pitch: int = 50) -> pdk.Deck:
-    """Build PyDeck 3D map from sensors dataframe with normalised pillar elevations."""
-    df = sensors_df.copy()
-    if df.empty:
-        df = pd.DataFrame(columns=["lon", "lat", "elevation", "fill_color", "radius", "device_id", "device_type", "zone_name", "true_value", "broadcast_value", "unit", "status", "attack_type"])
-
-    # 1. 3D Column Layer for Sensors
-    sensor_column_layer = pdk.Layer(
-        "ColumnLayer",
-        data=df,
-        get_position=["lon", "lat"],
-        get_elevation="elevation",
-        elevation_scale=1.0,
-        radius=40,
-        get_fill_color="fill_color",
-        pickable=True,
-        auto_highlight=True,
-        extruded=True,
-    )
-
-    # 2. Scatter Beacon Layer (Radial marker)
-    sensor_scatter_layer = pdk.Layer(
-        "ScatterplotLayer",
-        data=df,
-        get_position=["lon", "lat"],
-        get_radius="radius",
-        get_fill_color="fill_color",
-        get_line_color=[255, 255, 255, 180],
-        line_width_min_pixels=1,
-        pickable=True,
-    )
-
-    # 3. Neighborhood Centroids and Halo Radar Layer
-    neighborhoods_df = pd.DataFrame(NEIGHBORHOODS)
-    active_threat_zones = set(df[df["discrepancy"] == True]["zone_id"].unique()) if "discrepancy" in df.columns else set()
-    neighborhoods_df["halo_color"] = neighborhoods_df["zone_id"].apply(
-        lambda zid: [239, 68, 68, 70] if zid in active_threat_zones else [59, 130, 246, 30]
-    )
-    neighborhoods_df["halo_radius"] = neighborhoods_df["zone_id"].apply(
-        lambda zid: 650 if zid in active_threat_zones else 450
-    )
-
-    zone_halo_layer = pdk.Layer(
-        "ScatterplotLayer",
-        data=neighborhoods_df,
-        get_position=["lon", "lat"],
-        get_radius="halo_radius",
-        get_fill_color="halo_color",
-        get_line_color=[255, 255, 255, 50],
-        line_width_min_pixels=1,
-        pickable=False,
-    )
-
-    # 4. Zone Labels Layer
-    zone_text_layer = pdk.Layer(
-        "TextLayer",
-        data=neighborhoods_df,
-        get_position=["lon", "lat"],
-        get_text="name",
-        get_size=12,
-        get_color=[230, 237, 243, 240],
-        get_angle=0,
-        get_text_anchor="'middle'",
-        get_alignment_baseline="'center'",
-        background=True,
-        get_background_color=[11, 15, 20, 200],
-        pickable=False,
-    )
-
+    """Build PyDeck 3D visualization of Greater Tunis with column heights and offset zone labels."""
     view_state = pdk.ViewState(
-        latitude=36.808,
-        longitude=10.198,
-        zoom=12.1,
+        latitude=36.818,
+        longitude=10.205,
+        zoom=11.2,
         pitch=map_pitch,
         bearing=-15,
     )
 
+    layers = []
+
+    # 1. 3D Elevated Columns with visible height scale (Finding 14)
+    if not sensors_df.empty:
+        col_layer = pdk.Layer(
+            "ColumnLayer",
+            data=sensors_df,
+            get_position=["lon", "lat"],
+            get_elevation="elevation",
+            elevation_scale=1.8,  # Tall clearly visible towers at default zoom
+            radius=100,            # 100m radius
+            get_fill_color="fill_color",
+            pickable=True,
+            auto_highlight=True,
+            extruded=True,
+        )
+        layers.append(col_layer)
+
+        # 2. Sensor base halos
+        scatter_layer = pdk.Layer(
+            "ScatterplotLayer",
+            data=sensors_df,
+            get_position=["lon", "lat"],
+            get_radius="radius",
+            get_fill_color="fill_color",
+            pickable=False,
+        )
+        layers.append(scatter_layer)
+
+        halo_layer = pdk.Layer(
+            "ScatterplotLayer",
+            data=sensors_df,
+            get_position=["lon", "lat"],
+            get_radius="halo_radius",
+            get_fill_color=[255, 255, 255, 30],
+            pickable=False,
+        )
+        layers.append(halo_layer)
+
+    # 3. Municipal Sector Centroids with offset positions (Finding 14)
+    # Offset labels so they do not sit directly on top of the sensor pillars
+    zone_records = []
+    for z in NEIGHBORHOODS:
+        zone_records.append({
+            "name": z["name"],
+            "zone_id": z["zone_id"],
+            "lat": z["lat"] + 0.007,   # Offset north
+            "lon": z["lon"] - 0.012,   # Offset west
+        })
+    zone_df = pd.DataFrame(zone_records)
+
+    text_layer = pdk.Layer(
+        "TextLayer",
+        data=zone_df,
+        get_position=["lon", "lat"],
+        get_text="name",
+        get_size=13,
+        get_color=[241, 245, 249, 230],
+        get_angle=0,
+        get_text_anchor="'start'",
+        get_alignment_baseline="'bottom'",
+        pickable=False,
+    )
+    layers.append(text_layer)
+
     return pdk.Deck(
-        layers=[zone_halo_layer, sensor_scatter_layer, sensor_column_layer, zone_text_layer],
+        layers=layers,
         initial_view_state=view_state,
+        map_style="mapbox://styles/mapbox/dark-v10",
         tooltip={
-            "html": """
-            <div style="background: #121821; padding: 10px 14px; border: 1px solid #30363d; border-radius: 6px; color: #e6edf3; font-family: 'JetBrains Mono', monospace; font-size: 0.8rem;">
-                <b style="color: #3b82f6; font-size: 0.9rem;">{device_id}</b> ({device_type})<br/>
-                <b>Sector:</b> {zone_name}<br/>
-                <b>Broadcast:</b> {broadcast_value} {unit}<br/>
-                <b>Physical truth:</b> {true_value} {unit}<br/>
-                <b>Status:</b> {status}<br/>
-                <b>Active attack:</b> {attack_type}
-            </div>
-            """,
-            "style": {"color": "#e6edf3"},
+            "html": "<b>Device:</b> {device_id}<br/>"
+                    "<b>Type:</b> {device_type}<br/>"
+                    "<b>Value:</b> {broadcast_value} {unit}<br/>"
+                    "<b>Status:</b> {status}",
+            "style": {"backgroundColor": "#0b0f14", "color": "#e6edf3", "fontSize": "12px", "border": "1px solid #1e293b"}
         },
-        map_style="https://basemaps.cartocdn.com/gl/dark-matter-nolabels-gl-style/style.json",
     )
 
 
 # ==============================================================================
-# Main Console Rendering Layout
+# UI Fragments & Tab Rendering
 # ==============================================================================
-def render_status_bar_and_metrics(metrics: Dict[str, Any]) -> None:
-    """Render the one-line status bar and the 4 KPI tiles."""
-    sim_time = metrics.get("latest_sim_time", "2026-10-17T12:00:00Z")
-    sim_speed = metrics.get("sim_speed", 1.0)
-    msgs_sec = metrics.get("msgs_per_sec", 0.0)
-    kafka_st = metrics.get("kafka_state", "Offline")
-    mcp_st = metrics.get("mcp_state", "Offline")
-    callers = metrics.get("recent_callers", "None")
 
-    # One-line status bar (never truncated)
-    st.markdown(
-        f"""
-        <div class="status-bar">
-            <div class="status-item">Simulation time: <span class="status-value">{sim_time}</span></div>
-            <div class="status-item">Speed: <span class="status-value">{sim_speed:.0f}x</span></div>
-            <div class="status-item">Throughput: <span class="status-value">{msgs_sec:.1f} msg/s</span></div>
-            <div class="status-item">Kafka: <span class="status-value state-nominal">{kafka_st}</span></div>
-            <div class="status-item">MCP: <span class="status-value state-nominal">{mcp_st}</span></div>
-            <div class="status-item">Recent callers: <span class="status-value">{callers}</span></div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+# 6. Status bar and KPI tiles fragment (Finding 6)
+@st.fragment(run_every=2)
+def render_status_and_kpis(db_path: str):
+    """Render auto-refreshing top status bar and 4 headline KPI tiles."""
+    sb = _fetch_scoreboard_metrics_cached(db_path, _get_db_mtime(db_path))
 
-    # 4 KPI Tiles (Zero deltas)
-    k1, k2, k3, k4 = st.columns(4)
-    with k1:
-        st.metric(label="Readings", value=f"{metrics.get('total_readings', 0):,}")
-    with k2:
-        st.metric(label="Attacked readings", value=f"{metrics.get('attacked_readings', 0):,}")
-    with k3:
-        st.metric(label="Active attacks", value=str(metrics.get("active_attacks", 0)))
-    with k4:
-        st.metric(label="Devices contained", value=str(metrics.get("contained_devices", 0)))
+    # Real state colors (Finding 10)
+    twin_state_cls = "state-nominal" if sb["twin_api_online"] else "state-attack"
+    twin_label = "Twin online" if sb["twin_api_online"] else "Twin API down"
+
+    kafka_state = sb.get("kafka_state", "unknown")
+    kafka_cls = "state-nominal" if kafka_state == "ok" else "state-attack"
+    kafka_label = "Kafka ok" if kafka_state == "ok" else f"Kafka {kafka_state}"
+
+    mcp_state = sb.get("mcp_state", "unknown")
+    mcp_cls = "state-nominal" if mcp_state == "ok" else "state-attack"
+    mcp_label = "MCP up" if mcp_state == "ok" else "MCP down"
+
+    # Status Bar
+    status_bar_html = f"""
+    <div class="status-bar">
+        <div class="item"><span class="lbl">Sim time:</span> <span class="val">{sb['latest_sim_time']}</span></div>
+        <div class="item"><span class="lbl">Speed:</span> <span class="val">{sb['sim_speed']:.0f}x</span></div>
+        <div class="item"><span class="lbl">Throughput:</span> <span class="val">{sb['msgs_per_sec']:.1f} msg/s</span></div>
+        <div class="item"><span class="lbl">API:</span> <span class="val {twin_state_cls}">{twin_label}</span></div>
+        <div class="item"><span class="lbl">Kafka:</span> <span class="val {kafka_cls}">{kafka_label}</span></div>
+        <div class="item"><span class="lbl">MCP:</span> <span class="val {mcp_cls}">{mcp_label}</span></div>
+        <div class="item"><span class="lbl">Recent callers:</span> <span class="val">{sb['recent_callers']}</span></div>
+    </div>
+    """
+    st.markdown(status_bar_html, unsafe_allow_html=True)
+
+    # 4 Headline KPI Tiles (No deltas, sentence-case)
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.metric("Readings", f"{sb['total_readings']:,}")
+    with col2:
+        st.metric("Attacked readings", f"{sb['attacked_readings']:,}")
+    with col3:
+        st.metric("Active attacks", f"{sb['active_attacks']:,}")
+    with col4:
+        st.metric("Devices contained", f"{sb['contained_devices']:,}")
 
 
-def render_app() -> None:
-    """Mount and render the full Streamlit operations console."""
-    # Render Top Header
-    st.subheader("Twin operations console", divider=False)
+def render_sidebar():
+    """Render red-team attack injection, physical events, and threat manifest forms."""
+    st.sidebar.title("Red team adversary controls")
 
-    # Fetch Metrics and Render Top Bar
-    metrics = fetch_scoreboard_metrics()
-    render_status_bar_and_metrics(metrics)
-
-    # Four Tabs in Required Order
-    tab_timeline, tab_map, tab_divergence, tab_ledger = st.tabs([
-        "Timeline",
-        "City map",
-        "Truth vs broadcast",
-        "Ledger",
-    ])
-
-    devices_list = fetch_registered_devices()
-
-    # --------------------------------------------------------------------------
-    # TAB 1: Correlated Operations Timeline (Rule R3)
-    # --------------------------------------------------------------------------
-    with tab_timeline:
-        st.markdown("#### Operational timeline")
-        st.caption(
-            "Correlated sequence of telemetry readings, Guardian containment actions, "
-            "City Brain actuation commands, and actuator results with simulation timestamps."
-        )
-
-        # Controls: Time window, zone, device, and follow live toggle
-        c_ctrl1, c_ctrl2, c_ctrl3, c_ctrl4 = st.columns([2, 2, 2, 1])
-        with c_ctrl1:
-            window_opt = st.selectbox(
-                "Time window",
-                options=["Last 5 sim-min", "Last 15 sim-min", "Last 60 sim-min", "All time"],
-                index=0,
-            )
-        with c_ctrl2:
-            zone_filter = st.selectbox(
-                "Filter by zone",
-                options=["All zones"] + [n["zone_id"] for n in NEIGHBORHOODS],
-                index=0,
-            )
-        with c_ctrl3:
-            device_filter = st.selectbox(
-                "Filter by device",
-                options=["All devices"] + devices_list,
-                index=0,
-            )
-        with c_ctrl4:
-            st.toggle("Follow live", value=True)
-
-        window_minutes = 5 if window_opt == "Last 5 sim-min" else 15 if window_opt == "Last 15 sim-min" else 60 if window_opt == "Last 60 sim-min" else None
-
-        # Calculate cutoff sim_ts for journal fetch to avoid over-fetching
-        since_ts: Optional[str] = None
-        if window_minutes:
-            cur_sec = parse_rfc3339_to_seconds(metrics.get("latest_sim_time", "2026-10-17T12:00:00Z"))
-            cutoff_sec = cur_sec - (window_minutes * 60.0)
-            since_ts = datetime.fromtimestamp(cutoff_sec, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-        # Fetch Journal Entries
-        journal_entries, journal_error = fetch_timeline_events(limit=500, since_sim_ts=since_ts)
-
-        if journal_error:
-            st.warning(journal_error)
-
-        # Fetch Attacked Readings and Device Map
-        attacked_readings = fetch_attacked_ledger_readings(limit=100)
-        device_zone_map = {}
-        if os.path.isfile(DB_PATH):
-            try:
-                conn = get_db_connection()
-                try:
-                    for r in conn.execute("SELECT device_id, zone_id FROM devices").fetchall():
-                        device_zone_map[r[0]] = r[1]
-                finally:
-                    conn.close()
-            except Exception:
-                pass
-
-        # Optional Partner Logs from TIMELINE_LOG_DIR
-        partner_logs = load_partner_log_entries(TIMELINE_LOG_DIR) if os.path.isdir(TIMELINE_LOG_DIR) else []
-
-        # Build and Filter Timeline Rows
-        raw_rows = build_timeline_rows(
-            journal_entries=journal_entries,
-            attacked_readings=attacked_readings,
-            device_zone_map=device_zone_map,
-            log_entries=partner_logs,
-        )
-
-        filtered_rows = filter_timeline_rows(
-            rows=raw_rows,
-            window_sim_minutes=window_minutes,
-            zone_id=zone_filter,
-            device_id=device_filter,
-            current_sim_ts=metrics.get("latest_sim_time"),
-        )
-
-        # Separate Main Lanes from Test Harness
-        main_rows = [r for r in filtered_rows if r.lane != "Test harness"]
-        test_rows = [r for r in filtered_rows if r.lane == "Test harness"]
-
-        # Render Active Incident Chains Summary
-        active_chains = {}
-        for r in main_rows:
-            if r.chain_id and r.chain_summary and r.chain_id not in active_chains:
-                active_chains[r.chain_id] = r.chain_summary
-
-        if active_chains:
-            st.markdown("##### Correlated incident chains")
-            for cid, ctext in active_chains.items():
-                st.info(f"**Chain {cid}:** {ctext}")
-
-        # Build DataFrame for Display
-        table_data = []
-        for r in main_rows:
-            rx_time_str = format_reaction_delta(r.reaction_time_s) if r.reaction_time_s is not None and r.reaction_time_s > 0 else "-"
-            table_data.append({
-                "Sim time": r.sim_ts,
-                "Lane": r.lane,
-                "Event": r.event_type,
-                "Target": r.device_id or r.zone_id or "-",
-                "Reaction": rx_time_str,
-                "Summary": r.summary,
-                "Chain": r.chain_id or "-",
-            })
-
-        if table_data:
-            df_table = pd.DataFrame(table_data)
-            st.markdown("##### Correlated event sequence")
-            st.caption("Select any row to inspect its underlying JSON payload.")
-            
-            event_selection = st.dataframe(
-                df_table,
-                width="stretch",
-                hide_index=True,
-                on_select="rerun",
-                selection_mode="single-row",
-                column_config={
-                    "Sim time": st.column_config.TextColumn("Sim time", width="medium"),
-                    "Lane": st.column_config.TextColumn("Lane", width="small"),
-                    "Event": st.column_config.TextColumn("Event", width="small"),
-                    "Target": st.column_config.TextColumn("Target", width="small"),
-                    "Reaction": st.column_config.TextColumn("Reaction", width="small"),
-                    "Summary": st.column_config.TextColumn("Summary", width="large"),
-                    "Chain": st.column_config.TextColumn("Chain", width="small"),
-                },
-            )
-
-            # Show JSON inspector when a row is selected
-            selected_rows = event_selection.selection.rows if hasattr(event_selection, "selection") else []
-            if selected_rows:
-                sel_idx = selected_rows[0]
-                if 0 <= sel_idx < len(main_rows):
-                    selected_row_obj = main_rows[sel_idx]
-                    st.markdown("###### Selected event details")
-                    st.json(selected_row_obj.raw_json or selected_row_obj.to_dict())
-        else:
-            st.info("No timeline events recorded in the selected window.")
-
-        # Test Harness Lane (Muted, Collapsed by Default)
-        if test_rows:
-            with st.expander(f"Test harness events ({len(test_rows)} test runner actions)", expanded=False):
-                test_table = []
-                for r in test_rows:
-                    test_table.append({
-                        "Sim time": r.sim_ts,
-                        "Event": r.event_type,
-                        "Target": r.device_id or r.zone_id or "-",
-                        "Summary": r.summary,
-                    })
-                st.dataframe(pd.DataFrame(test_table), width="stretch", hide_index=True)
-
-    # --------------------------------------------------------------------------
-    # TAB 2: 3D City Map
-    # --------------------------------------------------------------------------
-    with tab_map:
-        st.markdown("#### Greater Tunis 3D sensor map")
-        st.caption(
-            "Interactive geospatial map of 42 sensors across 6 sectors. "
-            "Column height indicates measurement magnitude normalised to each device's operating range [min_val, max_val]."
-        )
-
-        # Compact Legend
-        st.markdown(
-            """
-            <div style="display: flex; gap: 20px; font-size: 0.85rem; margin-bottom: 12px;">
-                <span><span class="state-nominal">&#9632;</span> Nominal device</span>
-                <span><span class="state-contained">&#9632;</span> Contained (isolated / quarantined)</span>
-                <span><span class="state-attack">&#9632;</span> Active threat / tampered</span>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-        sensors_df = fetch_geospatial_sensors()
-        if not sensors_df.empty:
-            deck = build_spatial_twin_deck(sensors_df, map_pitch=50)
-            st.pydeck_chart(deck)
-        else:
-            st.info("Awaiting sensor spatial registration from CitySimulator...")
-
-        # Compact Sector Summaries Table
-        st.markdown("##### Sector summaries")
-        summaries = fetch_neighborhood_summaries(sensors_df)
-        sum_df = pd.DataFrame(summaries)
-        st.dataframe(
-            sum_df,
-            width="stretch",
-            hide_index=True,
-            column_config={
-                "zone_id": st.column_config.TextColumn("Zone ID"),
-                "name": st.column_config.TextColumn("Sector name"),
-                "total_sensors": st.column_config.NumberColumn("Sensors"),
-                "active_threats": st.column_config.NumberColumn("Active threats"),
-                "contained": st.column_config.NumberColumn("Contained devices"),
-                "status": st.column_config.TextColumn("Status"),
-            },
-        )
-
-    # --------------------------------------------------------------------------
-    # TAB 3: Truth vs Broadcast Divergence
-    # --------------------------------------------------------------------------
-    with tab_divergence:
-        st.markdown("#### Truth vs broadcast divergence")
-        st.caption(
-            "Compare unpoisoned physical reality recorded in the local SQLite ledger "
-            "against wire telemetry broadcast to partners over Kafka."
-        )
-
-        sensors_df = fetch_geospatial_sensors()
-        c_sel1, c_sel2 = st.columns([3, 2])
-
-        with c_sel1:
-            # Device picker grouped by sector
-            grouped_options = []
-            dev_to_zone = {}
-            for n in NEIGHBORHOODS:
-                zid = n["zone_id"]
-                zname = n["name"]
-                z_devs = [d for d in devices_list if d.startswith(f"z{zid.split('-')[1]}-")]
-                for dev in z_devs:
-                    label = f"{zid} ({zname}): {dev}"
-                    grouped_options.append((label, dev))
-                    dev_to_zone[dev] = zid
-
-            # Add rogue devices if any
-            rogue_devs = [d for d in devices_list if d.startswith("rg-")]
-            for r_dev in rogue_devs:
-                grouped_options.append((f"Rogue: {r_dev}", r_dev))
-
-            selected_label = st.selectbox(
-                "Select sensor for time series analysis",
-                options=[opt[0] for opt in grouped_options] if grouped_options else devices_list,
-                index=0 if grouped_options else None,
-            )
-            target_dev = next((opt[1] for opt in grouped_options if opt[0] == selected_label), devices_list[0] if devices_list else None)
-
-        with c_sel2:
-            chart_points = st.slider("Time window (readings)", min_value=20, max_value=200, value=60, step=10)
-
-        if target_dev:
-            ts_df = fetch_device_time_series(target_dev, limit=chart_points)
-
-            if ts_df.empty:
-                st.info(f"No telemetry readings recorded yet for {target_dev}.")
-            else:
-                latest_true = ts_df["true_value"].iloc[-1]
-                latest_bc = ts_df["broadcast_value"].iloc[-1]
-                current_div = abs(latest_bc - latest_true)
-                unit = ts_df["unit"].iloc[-1] if "unit" in ts_df.columns else ""
-                tampered_count = int(ts_df["is_attacked"].sum())
-
-                # Metric tiles (no deltas)
-                m1, m2, m3, m4 = st.columns(4)
-                with m1:
-                    st.metric("Physical truth", f"{latest_true:.2f} {unit}")
-                with m2:
-                    st.metric("Broadcast value", f"{latest_bc:.2f} {unit}")
-                with m3:
-                    st.metric("Absolute divergence", f"{current_div:.2f} {unit}")
-                with m4:
-                    st.metric("Tampered frames in window", f"{tampered_count} / {len(ts_df)}")
-
-                # Multi-layer Altair Chart
-                base_chart = alt.Chart(ts_df).encode(
-                    x=alt.X("seq:Q", title="Sequence counter (seq)", scale=alt.Scale(zero=False))
-                )
-
-                # Divergence area shaded in light red
-                div_area = base_chart.mark_area(opacity=0.22, color="#ef4444").encode(
-                    y=alt.Y("true_value:Q"),
-                    y2=alt.Y2("broadcast_value:Q"),
-                )
-
-                # Solid line for physical truth
-                truth_line = base_chart.mark_line(strokeWidth=2.2, color="#22c55e").encode(
-                    y=alt.Y("true_value:Q", title=f"Measurement ({unit})", scale=alt.Scale(zero=False)),
-                    tooltip=["seq:Q", "ts:N", "true_value:Q", "broadcast_value:Q", "is_attacked:Q"],
-                )
-
-                # Dashed line for broadcast telemetry
-                bc_line = base_chart.mark_line(strokeWidth=2.2, color="#3b82f6", strokeDash=[4, 4]).encode(
-                    y=alt.Y("broadcast_value:Q", scale=alt.Scale(zero=False)),
-                    tooltip=["seq:Q", "ts:N", "true_value:Q", "broadcast_value:Q", "is_attacked:Q"],
-                )
-
-                final_chart = (div_area + truth_line + bc_line).properties(height=380).interactive()
-                st.altair_chart(final_chart, width="stretch")
-
-    # --------------------------------------------------------------------------
-    # TAB 4: Ground Truth Ledger
-    # --------------------------------------------------------------------------
-    with tab_ledger:
-        st.markdown("#### Isolated ground truth ledger")
-        st.caption(
-            "Read-only query of the internal SQLite ledger (`readings_truth`). "
-            "Attacked rows with deliberate discrepancies are highlighted."
-        )
-
-        ledger_df = fetch_truth_ledger(limit=50)
-        if not ledger_df.empty:
-            # Style attacked rows with light reddish tint
-            def highlight_attacks(row: pd.Series) -> List[str]:
-                if row.get("is_attacked") == 1:
-                    return ["background-color: rgba(239, 68, 68, 0.12)"] * len(row)
-                return [""] * len(row)
-
-            styled_df = ledger_df.style.apply(highlight_attacks, axis=1)
-
-            st.dataframe(
-                styled_df,
-                width="stretch",
-                hide_index=True,
-                column_config={
-                    "id": st.column_config.NumberColumn("ID", width="small"),
-                    "reading_id": st.column_config.TextColumn("Reading ID", width="medium"),
-                    "device_id": st.column_config.TextColumn("Device", width="small"),
-                    "ts": st.column_config.TextColumn("Timestamp", width="medium"),
-                    "seq": st.column_config.NumberColumn("Sequence", width="small"),
-                    "true_value": st.column_config.NumberColumn("Physical truth", format="%.2f"),
-                    "broadcast_value": st.column_config.NumberColumn("Broadcast", format="%.2f"),
-                    "unit": st.column_config.TextColumn("Unit", width="small"),
-                    "status": st.column_config.TextColumn("Status", width="small"),
-                    "attack_type": st.column_config.TextColumn("Attack capability", width="medium"),
-                    "is_attacked": st.column_config.CheckboxColumn("Attacked", width="small"),
-                },
-            )
-        else:
-            st.info("No ledger entries found.")
-
-    # ==========================================================================
-    # Sidebar: Red Team Controls (Forms, Active Threats, and Physical Events)
-    # ==========================================================================
-    st.sidebar.subheader("Red team adversary controls")
-
-    # 1. Manual Attack Injection Form
-    with st.sidebar.form("manual_injection_form"):
-        st.markdown("**Manual injection**")
-        cap_choice = st.selectbox(
+    # 1. Manual Threat Injection Form
+    with st.sidebar.form("form_manual_attack"):
+        st.subheader("Manual injection")
+        capability = st.selectbox(
             "Adversary capability",
-            options=[
+            [
                 "device_physical",
                 "device_key",
                 "link",
@@ -1232,133 +830,462 @@ def render_app() -> None:
                 "sensor_fault",
                 "actuator",
             ],
-            format_func=lambda c: {
-                "device_physical": "device_physical (sensor spoofing)",
-                "device_key": "device_key (compromised key)",
-                "link": "link (network tamper)",
-                "rogue": "rogue (unregistered sensor)",
-                "sensor_fault": "sensor_fault (hardware drift/freeze)",
-                "actuator": "actuator (command disobedience)",
-            }.get(c, c),
+            key="sb_attack_cap",
         )
-
         target_device = st.selectbox(
             "Target device",
-            options=devices_list if devices_list else ["z1-tc1"],
-            index=0,
+            [
+                "z1-tc1", "z1-tc2", "z1-wl1", "z1-wl2", "z1-pl1", "z1-aq1", "z1-ec1",
+                "z2-tc1", "z2-tc2", "z2-wl1", "z2-wl2", "z2-pl1", "z2-aq1", "z2-ec1",
+                "z3-tc1", "z3-tc2", "z3-wl1", "z3-wl2", "z3-pl1", "z3-aq1", "z3-ec1",
+                "z4-tc1", "z4-tc2", "z4-wl1", "z4-wl2", "z4-pl1", "z4-aq1", "z4-ec1",
+                "z5-tc1", "z5-tc2", "z5-wl1", "z5-wl2", "z5-pl1", "z5-aq1", "z5-ec1",
+                "z6-tc1", "z6-tc2", "z6-wl1", "z6-wl2", "z6-pl1", "z6-aq1", "z6-ec1",
+            ],
+            key="sb_target_device",
         )
+        spoofed_value = st.number_input("Spoofed value", value=185.0, step=5.0, key="sb_spoof_val")
+        description = st.text_input("Description", value="Manual console exploit", key="sb_desc")
+        submitted_attack = st.form_submit_button("Inject attack")
 
-        params: Dict[str, Any] = {}
-        if cap_choice == "device_physical":
-            spoofed_v = st.number_input("Spoofed value", value=185.0, step=1.0)
-            params["value"] = spoofed_v
-        elif cap_choice == "link":
-            link_mode = st.selectbox("Link tamper mode", options=["corrupt_bytes", "corrupt_sig", "replay", "delay", "drop"])
-            params["link_mode"] = link_mode
-        elif cap_choice == "sensor_fault":
-            fault_mode = st.selectbox("Fault mode", options=["drift", "freeze", "spike"])
-            params["fault_mode"] = fault_mode
-            if fault_mode == "drift":
-                params["drift_rate"] = 2.0
-        elif cap_choice == "actuator":
-            act_state = st.selectbox("Refused state", options=["stuck_closed", "stuck_open"])
-            params["forced_physical_state"] = act_state
-        elif cap_choice == "rogue":
-            r_id = st.text_input("Rogue device identifier", value="rg-x9")
-            params["rogue_device_id"] = r_id
+        if submitted_attack:
+            payload = {
+                "capability": capability,
+                "target_device_id": target_device,
+                "params": {"value": spoofed_value, "spoofed_value": spoofed_value},
+                "description": description,
+            }
+            try:
+                resp = requests.post(
+                    f"{TWIN_API_URL}/api/attack/inject",
+                    headers=get_red_team_headers(),
+                    json=payload,
+                    timeout=2.0,
+                )
+                if resp.status_code == 200:
+                    st.success(f"Injected {capability} on {target_device}")
+                else:
+                    st.error(f"Injection failed: HTTP {resp.status_code} - {resp.text}")
+            except Exception as e:
+                st.error(f"Failed to communicate with red-team API: {e}")
 
-        desc = st.text_input("Description", value=f"Console injected {cap_choice}")
-
-        submit_attack = st.form_submit_button("Inject attack")
-        if submit_attack:
-            ok, msg = inject_attack_to_simulator(
-                capability=cap_choice,
-                target_device_id=target_device,
-                params=params,
-                description=desc,
-            )
-            if ok:
-                st.success(msg)
-                st.rerun()
-            else:
-                st.error(msg)
-
-    # 2. Physical Events Form
-    with st.sidebar.form("physical_events_form"):
-        st.markdown("**Physical events**")
-        ev_type = st.selectbox(
+    # 2. Physical Environmental Events Form
+    with st.sidebar.form("form_physical_event"):
+        st.subheader("Physical events")
+        event_type = st.selectbox(
             "Event type",
-            options=["traffic_accident", "rain_storm", "fire", "grid_overload", "air_hazard"],
+            ["rain_storm", "traffic_accident", "fire", "grid_overload", "air_hazard"],
+            key="sb_event_type",
         )
-        ev_zone = st.selectbox(
+        event_zone = st.selectbox(
             "Target zone",
-            options=[n["zone_id"] for n in NEIGHBORHOODS],
-            format_func=lambda z: f"{z} ({ZONE_NAME_MAP.get(z, z)})",
+            ["zone-1", "zone-2", "zone-3", "zone-4", "zone-5", "zone-6"],
+            key="sb_event_zone",
         )
-        ev_intensity = st.slider("Intensity multiplier", min_value=0.5, max_value=5.0, value=1.5, step=0.5)
-        ev_duration = st.number_input("Duration (sim-seconds)", min_value=30, max_value=3600, value=180, step=30)
+        intensity = st.slider("Intensity multiplier", min_value=1.0, max_value=5.0, value=1.5, step=0.1, key="sb_intensity")
+        duration_s = st.number_input("Duration (sim-seconds)", min_value=60.0, max_value=7200.0, value=1800.0, step=300.0, key="sb_duration")
+        submitted_event = st.form_submit_button("Inject event")
 
-        submit_event = st.form_submit_button("Inject event")
-        if submit_event:
-            ok, msg = inject_event_to_simulator(
-                event_type=ev_type,
-                zone_id=ev_zone,
-                intensity=ev_intensity,
-                duration_s=int(ev_duration),
-            )
-            if ok:
-                st.success(msg)
-                st.rerun()
-            else:
-                st.error(msg)
+        if submitted_event:
+            payload = {
+                "type": event_type,
+                "zone_id": event_zone,
+                "intensity": intensity,
+                "duration_s": duration_s,
+            }
+            try:
+                resp = requests.post(
+                    f"{TWIN_API_URL}/api/event/inject",
+                    headers=get_red_team_headers(),
+                    json=payload,
+                    timeout=2.0,
+                )
+                if resp.status_code == 200:
+                    st.success(f"Started {event_type} in {event_zone}")
+                else:
+                    st.error(f"Event failed: HTTP {resp.status_code} - {resp.text}")
+            except Exception as e:
+                st.error(f"Failed to communicate with red-team API: {e}")
 
-    # 3. Active Attacks and Events Manifest
-    st.sidebar.markdown("**Active attacks and events**")
-    active_atks = fetch_active_attacks()
-    active_evts = fetch_active_events()
+    # 3. Active Threats and Clearance
+    st.sidebar.subheader("Active attacks and events")
+    active_attacks = fetch_active_attacks()
+    active_events = fetch_active_physical_events()
 
-    if not active_atks and not active_evts:
+    if not active_attacks and not active_events:
         st.sidebar.caption("Zero active attacks or physical events.")
     else:
-        for atk in active_atks:
-            aid = atk.get("attack_id", "atk")
-            acap = atk.get("capability", "attack")
-            adev = atk.get("target_device_id") or atk.get("target_zone_id") or "device"
-            c_txt, c_btn = st.sidebar.columns([3, 1])
-            c_txt.caption(f"{acap} on {adev}")
-            if c_btn.button("Clear", key=f"btn_clr_{aid}"):
-                ok, msg = clear_attacks_in_simulator(attack_id=aid)
-                if ok:
-                    st.sidebar.success(msg)
-                    st.rerun()
-                else:
-                    st.sidebar.error(msg)
+        for atk in active_attacks:
+            aid = atk.get("attack_id")
+            cap = atk.get("capability")
+            tgt = atk.get("target_device_id") or atk.get("target_zone_id")
+            col_a, col_b = st.sidebar.columns([3, 1])
+            with col_a:
+                st.caption(f"{cap} on {tgt}")
+            with col_b:
+                if st.button("Clear", key=f"btn_clear_atk_{aid}"):
+                    try:
+                        requests.post(
+                            f"{TWIN_API_URL}/api/attack/clear",
+                            headers=get_red_team_headers(),
+                            json={"attack_id": aid},
+                            timeout=2.0,
+                        )
+                        st.rerun()
+                    except Exception:
+                        pass
 
-        for evt in active_evts:
-            eid = evt.get("event_id", "ev")
-            etype = evt.get("type", "event")
-            ezone = evt.get("zone_id", "city")
-            c_txt, c_btn = st.sidebar.columns([3, 1])
-            c_txt.caption(f"{etype} in {ezone}")
-            if c_btn.button("Clear", key=f"btn_clr_ev_{eid}"):
-                ok, msg = clear_events_in_simulator(event_id=eid)
-                if ok:
-                    st.sidebar.success(msg)
-                    st.rerun()
-                else:
-                    st.sidebar.error(msg)
+        for ev in active_events:
+            eid = ev.get("event_id")
+            etype = ev.get("event_type")
+            ezone = ev.get("zone_id")
+            col_a, col_b = st.sidebar.columns([3, 1])
+            with col_a:
+                st.caption(f"{etype} in {ezone}")
+            with col_b:
+                if st.button("Clear", key=f"btn_clear_ev_{eid}"):
+                    try:
+                        requests.post(
+                            f"{TWIN_API_URL}/api/event/clear",
+                            headers=get_red_team_headers(),
+                            json={"event_id": eid},
+                            timeout=2.0,
+                        )
+                        st.rerun()
+                    except Exception:
+                        pass
 
-    # Clear all threats button
-    if st.sidebar.button("Clear all threats"):
-        ok_a, msg_a = clear_attacks_in_simulator("all")
-        ok_e, msg_e = clear_events_in_simulator("all")
-        if ok_a and ok_e:
+    if st.sidebar.button("Clear all threats", key="btn_clear_all_threats"):
+        try:
+            requests.post(f"{TWIN_API_URL}/api/attack/clear", headers=get_red_team_headers(), json={"clear_all": True}, timeout=2.0)
+            requests.post(f"{TWIN_API_URL}/api/event/clear", headers=get_red_team_headers(), json={"clear_all": True}, timeout=2.0)
             st.sidebar.success("All attacks and events cleared.")
             st.rerun()
+        except Exception as e:
+            st.sidebar.error(f"Error clearing threats: {e}")
+
+
+def render_timeline_tab(db_path: str):
+    """Render Tab 1: Correlated Operational Timeline with dynamic auto-refresh fragment."""
+    st.subheader("Operational timeline")
+    st.caption("Correlated sequence of telemetry readings, Guardian containment actions, City Brain actuation commands, and actuator results with simulation timestamps.")
+
+    # Top Controls
+    col_win, col_zone, col_dev, col_live = st.columns([1.6, 1.2, 1.2, 1.0])
+
+    with col_win:
+        # Time window options (Finding 9)
+        window_options = ["Last 5 sim-min", "Last 15 sim-min", "Last 60 sim-min", "Since a sim time"]
+        window_choice = st.selectbox("Time window", window_options, index=0, key="tl_win_choice")
+
+    since_sim_ts: Optional[str] = None
+    window_sim_minutes: Optional[int] = None
+
+    if window_choice == "Last 5 sim-min":
+        window_sim_minutes = 5
+    elif window_choice == "Last 15 sim-min":
+        window_sim_minutes = 15
+    elif window_choice == "Last 60 sim-min":
+        window_sim_minutes = 60
+    elif window_choice == "Since a sim time":
+        custom_ts = st.text_input("Enter simulation timestamp", value="2026-10-17T12:00:00Z", key="tl_custom_ts")
+        if custom_ts:
+            try:
+                datetime.strptime(custom_ts.strip(), "%Y-%m-%dT%H:%M:%SZ")
+                since_sim_ts = custom_ts.strip()
+            except ValueError:
+                st.error("Simulation timestamp must follow RFC 3339 format (%Y-%m-%dT%H:%M:%SZ)")
+                since_sim_ts = None
+
+    with col_zone:
+        zone_filter = st.selectbox("Filter by zone", ["All zones"] + [n["zone_id"] for n in NEIGHBORHOODS], key="tl_zone_filter")
+
+    with col_dev:
+        dev_choices = ["All devices"]
+        if os.path.isfile(db_path):
+            try:
+                conn = get_db_connection()
+                d_rows = conn.execute("SELECT device_id FROM devices ORDER BY device_id").fetchall()
+                dev_choices += [r["device_id"] for r in d_rows]
+                conn.close()
+            except Exception:
+                pass
+        device_filter = st.selectbox("Filter by device", dev_choices, key="tl_dev_filter")
+
+    with col_live:
+        # Follow live toggle: controls fragment run_every (Finding 6)
+        follow_live = st.toggle("Follow live", value=st.session_state.get("follow_live", True), key="follow_live")
+
+    # Fragment with run_every=2 when follow_live is True, or None when False
+    tl_interval = 2 if follow_live else None
+
+    @st.fragment(run_every=tl_interval)
+    def render_timeline_fragment(
+        db_p: str,
+        w_min: Optional[int],
+        s_ts: Optional[str],
+        z_filt: str,
+        d_filt: str,
+    ):
+        # 1. Fetch Journal Entries (Finding 7: Strictly no fallback to ledger)
+        journal, err = fetch_journal_entries(since_sim_ts=s_ts, limit=1000)
+        if err:
+            st.error(err)
+            return
+
+        journal_entries = journal or []
+
+        # 2. Identify attack_inject rows to query the FIRST attacked reading from ledger (Finding 1)
+        temp_attacks = []
+        for idx, entry in enumerate(journal_entries):
+            if entry.get("source") == "attack" and entry.get("detail", {}).get("action") == "inject":
+                tgt = entry.get("detail", {}).get("target_device_id")
+                if tgt:
+                    temp_attacks.append(
+                        TimelineRow(
+                            row_id=entry.get("key", f"a:{idx}"),
+                            sim_ts=str(entry.get("sim_ts", "")),
+                            lane="Twin",
+                            event_type="attack_inject",
+                            device_id=tgt,
+                            zone_id=entry.get("detail", {}).get("target_zone_id"),
+                            summary="",
+                        )
+                    )
+
+        first_attacked_readings = fetch_first_attacked_readings_for_attacks(db_p, temp_attacks)
+
+        # 3. Optional partner logs (Finding 8: off unless TIMELINE_LOG_DIR is set)
+        partner_logs = load_partner_log_entries(TIMELINE_LOG_DIR) if TIMELINE_LOG_DIR else []
+
+        # 4. Build correlated 5-lane timeline rows
+        device_zone_map = {n["zone_id"]: n["zone_id"] for n in NEIGHBORHOODS}
+        all_rows = build_timeline_rows(
+            journal_entries=journal_entries,
+            attacked_readings=first_attacked_readings,
+            device_zone_map=device_zone_map,
+            log_entries=partner_logs,
+        )
+
+        # 5. Apply user filters
+        filtered_rows = filter_timeline_rows(
+            all_rows,
+            window_sim_minutes=w_min,
+            since_sim_ts=s_ts,
+            zone_id=z_filt,
+            device_id=d_filt,
+        )
+
+        # 6. Separate Test Harness rows from primary 4 operational lanes
+        operational_rows = [r for r in filtered_rows if r.lane != "Test harness"]
+        harness_rows = [r for r in filtered_rows if r.lane == "Test harness"]
+
+        if not operational_rows:
+            st.info("No operational events observed in the selected time window.")
         else:
-            st.sidebar.error(f"{msg_a} {msg_e}")
+            table_records = []
+            for r in operational_rows:
+                table_records.append({
+                    "Time": r.sim_ts,
+                    "Lane": r.lane,
+                    "Event": r.event_type,
+                    "Target": r.target,
+                    "Summary": r.summary,
+                    "Chain": r.chain_summary or "-",
+                    "_raw": r.raw_json,
+                })
+
+            df_display = pd.DataFrame(table_records)
+
+            # Table column configuration with proper widths at 1280px (Finding 13)
+            column_config = {
+                "Time": st.column_config.TextColumn("Time", width=140),
+                "Lane": st.column_config.TextColumn("Lane", width=80),
+                "Event": st.column_config.TextColumn("Event", width=120),
+                "Target": st.column_config.TextColumn("Target", width=70),
+                "Summary": st.column_config.TextColumn("Summary", width=260),
+                "Chain": st.column_config.TextColumn("Chain", width=280),
+                "_raw": None,
+            }
+
+            selection_event = st.dataframe(
+                df_display,
+                column_config=column_config,
+                use_container_width=True,
+                hide_index=True,
+                on_select="rerun",
+                selection_mode="single-row",
+                key="tl_dataframe_table",
+            )
+
+            # Inspect selected row JSON payload
+            selected_indices = getattr(selection_event.selection, "rows", [])
+            if selected_indices:
+                sel_idx = selected_indices[0]
+                if 0 <= sel_idx < len(table_records):
+                    st.markdown("**Inspect selected event payload**")
+                    st.json(table_records[sel_idx]["_raw"] or {})
+
+        # Test harness diagnostics expander (collapsed by default)
+        if harness_rows:
+            with st.expander(f"Test harness diagnostics ({len(harness_rows)} entries)"):
+                st.caption("Diagnostic events originating from automated test runners.")
+                h_records = [{
+                    "Time": r.sim_ts,
+                    "Lane": r.lane,
+                    "Event": r.event_type,
+                    "Target": r.target,
+                    "Summary": r.summary,
+                } for r in harness_rows]
+                st.dataframe(pd.DataFrame(h_records), use_container_width=True, hide_index=True)
+
+    render_timeline_fragment(db_path, window_sim_minutes, since_sim_ts, zone_filter, device_filter)
 
 
-# Execute UI mounting only when executed within a Streamlit run context
+def render_city_map_tab(db_path: str):
+    """Render Tab 2: 3D Tactical City Map with 5s auto-refresh fragment."""
+    st.subheader("3D city map")
+    st.caption("Geospatial visualization of Greater Tunis sensors with normalised column heights, color-coded health status, and sector centroids.")
+
+    # Colored Map Legend Swatches (Finding 12 & 14)
+    legend_html = """
+    <div style="display: flex; gap: 1.5rem; margin-bottom: 0.8rem; font-size: 0.85rem;">
+        <span><span class="legend-swatch swatch-nominal"></span>Nominal</span>
+        <span><span class="legend-swatch swatch-contained"></span>Contained / isolated</span>
+        <span><span class="legend-swatch swatch-attack"></span>Active attack</span>
+        <span><span class="legend-swatch swatch-refused"></span>Refused command</span>
+    </div>
+    """
+    st.markdown(legend_html, unsafe_allow_html=True)
+
+    @st.fragment(run_every=5)
+    def render_map_fragment(db_p: str):
+        sensors_df = _fetch_geospatial_sensors_cached(db_p, _get_db_mtime(db_p))
+        deck = build_spatial_twin_deck(sensors_df)
+        st.pydeck_chart(deck, use_container_width=True)
+
+    render_map_fragment(db_path)
+
+
+def render_truth_vs_broadcast_tab(db_path: str):
+    """Render Tab 3: Ground Truth vs Broadcast Telemetry Divergence Curves."""
+    st.subheader("Truth vs broadcast divergence")
+    st.caption("Comparison of true physical simulation metrics against broadcast wire telemetry.")
+
+    if not os.path.isfile(db_path):
+        st.info("No ledger records available.")
+        return
+
+    # Device selector grouped by zone
+    conn = get_db_connection()
+    devices = conn.execute("SELECT device_id, zone_id, device_type, unit FROM devices ORDER BY zone_id, device_id").fetchall()
+    conn.close()
+
+    if not devices:
+        st.info("No registered devices found.")
+        return
+
+    dev_options = [f"{d['zone_id']} - {d['device_id']} ({d['device_type']})" for d in devices]
+    default_idx = next((i for i, opt in enumerate(dev_options) if "z1-pl1" in opt), 0)
+    sel_option = st.selectbox("Select device", dev_options, index=default_idx, key="ts_dev_select")
+    selected_device_id = sel_option.split(" - ")[1].split(" ")[0]
+
+    ts_df = fetch_device_time_series(selected_device_id, limit=150)
+    if ts_df.empty:
+        st.info(f"No telemetry samples recorded yet for {selected_device_id}.")
+        return
+
+    # Maximum discrepancy metric
+    max_disc = ts_df["discrepancy"].max()
+    curr_truth = ts_df["true_value"].iloc[-1]
+    curr_broadcast = ts_df["broadcast_value"].iloc[-1]
+
+    mcol1, mcol2, mcol3 = st.columns(3)
+    with mcol1:
+        st.metric("Current physical truth", f"{curr_truth:.2f}")
+    with mcol2:
+        st.metric("Current broadcast wire", f"{curr_broadcast:.2f}")
+    with mcol3:
+        st.metric("Maximum divergence", f"{max_disc:.2f}")
+
+    # Altair time-series chart
+    base = alt.Chart(ts_df).encode(x=alt.X("ts:T", title="Simulation time"))
+
+    truth_line = base.mark_line(color="#22c55e", strokeWidth=2.5).encode(
+        y=alt.Y("true_value:Q", title="Value"),
+        tooltip=["ts", "true_value", "broadcast_value", "discrepancy"],
+    )
+
+    broadcast_line = base.mark_line(color="#3b82f6", strokeDash=[4, 4], strokeWidth=2).encode(
+        y=alt.Y("broadcast_value:Q"),
+        tooltip=["ts", "true_value", "broadcast_value", "discrepancy"],
+    )
+
+    divergence_area = base.mark_area(color="#ef4444", opacity=0.2).encode(
+        y=alt.Y("true_value:Q"),
+        y2=alt.Y2("broadcast_value:Q"),
+    )
+
+    chart = (divergence_area + truth_line + broadcast_line).properties(height=380).interactive()
+    st.altair_chart(chart, use_container_width=True)
+
+
+def render_ledger_tab(db_path: str):
+    """Render Tab 4: Read-Only Forensic Ledger Audit Trail."""
+    st.subheader("Ground truth ledger")
+    st.caption("Immutable forensic audit trail directly queried from read-only SQLite storage.")
+
+    df_ledger = fetch_truth_ledger(limit=250)
+    if df_ledger.empty:
+        st.info("Ground truth database is empty or offline.")
+        return
+
+    st.dataframe(
+        df_ledger,
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "id": st.column_config.NumberColumn("ID", width="small"),
+            "reading_id": st.column_config.TextColumn("Reading ID", width="medium"),
+            "device_id": st.column_config.TextColumn("Device", width="small"),
+            "ts": st.column_config.TextColumn("Timestamp", width="medium"),
+            "true_value": st.column_config.NumberColumn("True value", format="%.2f"),
+            "broadcast_value": st.column_config.NumberColumn("Broadcast value", format="%.2f"),
+            "unit": st.column_config.TextColumn("Unit", width="small"),
+            "status": st.column_config.TextColumn("Status", width="small"),
+            "is_attacked": st.column_config.CheckboxColumn("Attacked", width="small"),
+            "attack_type": st.column_config.TextColumn("Attack type", width="medium"),
+        },
+    )
+
+
+def render_app():
+    """Main application layout and execution flow."""
+    # Inject Custom CSS
+    st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
+
+    # Render Sidebar Controls
+    render_sidebar()
+
+    # Render Top Status Bar & 4 KPI Tiles (auto-refreshing fragment)
+    render_status_and_kpis(DB_PATH)
+
+    # Four Main Operational Tabs
+    tab1, tab2, tab3, tab4 = st.tabs(["Timeline", "City map", "Truth vs broadcast", "Ledger"])
+
+    with tab1:
+        render_timeline_tab(DB_PATH)
+
+    with tab2:
+        render_city_map_tab(DB_PATH)
+
+    with tab3:
+        render_truth_vs_broadcast_tab(DB_PATH)
+
+    with tab4:
+        render_ledger_tab(DB_PATH)
+
+
+# Execute render_app if running under Streamlit or as main script
 if get_script_run_ctx() is not None or __name__ == "__main__":
     render_app()

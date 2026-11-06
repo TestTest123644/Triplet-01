@@ -9,6 +9,7 @@ Tests:
 6. First attacked reading per attack linked with reading_id and true vs broadcast values.
 7. Partner log loading from TIMELINE_LOG_DIR.
 8. Time window, zone, and device filtering.
+9. Reviewer live cases: Port flood chain with (+1 more) Brain command, and Stolen key chain with earliest reading and rollback correlation.
 """
 
 import json
@@ -70,6 +71,8 @@ def test_chain_linking_and_reaction_times():
 
     attacked_readings = [
         {
+            "id": 101,
+            "seq": 10,
             "reading_id": "r-z2-wl1-101",
             "device_id": "z2-wl1",
             "ts": "2026-10-17T13:10:28Z",
@@ -104,10 +107,10 @@ def test_chain_linking_and_reaction_times():
     assert guardian_row.chain_id == atk_row.chain_id
     assert guardian_row.reaction_time_s == 20.0  # 13:10:46 - 13:10:26
 
-    # Verify chain summary matches expected format
-    assert "z2-wl1 spoofed to 9.5" in atk_row.chain_summary
+    # Verify chain summary matches expected format without 'needed'
+    assert "z2-wl1 device_physical spoofed to 9.5" in atk_row.chain_summary
     assert "Guardian isolate_device +20 s" in atk_row.chain_summary
-    assert "no Brain action needed" in atk_row.chain_summary
+    assert "no Brain action" in atk_row.chain_summary
 
 
 def test_brain_command_and_actuator_lanes():
@@ -157,6 +160,7 @@ def test_brain_command_and_actuator_lanes():
     assert actuator_row.reaction_time_s == 18.0
 
     assert "traffic_accident in zone-1" in event_row.chain_summary
+    assert "no Guardian action" in event_row.chain_summary
     assert "Brain dispatch +18 s" in event_row.chain_summary
     assert "Actuator executed" in event_row.chain_summary
 
@@ -337,3 +341,212 @@ def test_filter_timeline_rows():
     w_rows = filter_timeline_rows(rows, window_sim_minutes=5, current_sim_ts="2026-10-17T12:12:00Z")
     assert len(w_rows) == 1
     assert w_rows[0].row_id == "2"
+
+
+def test_reviewer_live_port_flood_chain():
+    """Finding 5: Rebuild exact reviewer live case for rain_storm in zone-2 with multiple Brain commands."""
+    device_zone_map = {"z2-wl1": "zone-2", "z2-wl2": "zone-2"}
+
+    # Storm started 12:02:54, Brain commands at 12:17:16 (+862s), resolved 12:32:52
+    journal_entries = [
+        {
+            "key": "event_start:ev-storm-1",
+            "sim_ts": "2026-10-17T12:02:54Z",
+            "source": "event",
+            "detail": {
+                "event_id": "ev-storm-1",
+                "action": "start",
+                "type": "rain_storm",
+                "zone_id": "zone-2",
+            },
+        },
+        {
+            "key": "command:1",
+            "sim_ts": "2026-10-17T12:17:16Z",
+            "source": "command",
+            "detail": {
+                "caller": "brain",
+                "tool": "set_valve",
+                "args": {"device_id": "z2-wl1", "target_state": "open"},
+                "executed": True,
+                "refused_code": None,
+            },
+        },
+        {
+            "key": "command:2",
+            "sim_ts": "2026-10-17T12:17:16Z",
+            "source": "command",
+            "detail": {
+                "caller": "brain",
+                "tool": "set_valve",
+                "args": {"device_id": "z2-wl2", "target_state": "open"},
+                "executed": True,
+                "refused_code": None,
+            },
+        },
+        {
+            "key": "event_resolved:ev-storm-1",
+            "sim_ts": "2026-10-17T12:32:52Z",
+            "source": "event",
+            "detail": {
+                "event_id": "ev-storm-1",
+                "action": "resolved",
+                "type": "rain_storm",
+                "zone_id": "zone-2",
+                "resolved_by": "expired",
+            },
+        },
+    ]
+
+    rows = build_timeline_rows(journal_entries, device_zone_map=device_zone_map)
+
+    # 1 event_start, 2 brain commands, 2 actuator executions, 1 event_resolved = 6 rows
+    assert len(rows) == 6
+
+    start_row = next(r for r in rows if r.event_type == "event_start")
+    assert start_row.chain_id == "chain-1"
+
+    brain_rows = [r for r in rows if r.lane == "Brain"]
+    assert len(brain_rows) == 2
+    for b in brain_rows:
+        assert b.chain_id == "chain-1"
+        assert b.reaction_time_s == 862.0
+
+    actuator_rows = [r for r in rows if r.lane == "Actuator"]
+    assert len(actuator_rows) == 2
+    for a in actuator_rows:
+        assert a.chain_id == "chain-1"
+        assert a.reaction_time_s == 862.0
+
+    resolved_row = next(r for r in rows if r.event_type == "event_resolved")
+    assert resolved_row.chain_id == "chain-1"
+
+    # Exactly matching reviewer expected chain summary:
+    expected_summary = "rain_storm in zone-2 -> no Guardian action -> Brain set_valve +862 s (+1 more) -> Actuator executed"
+    assert start_row.chain_summary == expected_summary
+    for b in brain_rows:
+        assert b.chain_summary == expected_summary
+
+
+def test_reviewer_live_stolen_key_chain():
+    """Finding 5: Rebuild exact reviewer live case for stolen key on z1-pl1 with DESC ledger readings,
+
+    earliest reading picked, placed before Guardian row, and rollback carrying the chain id.
+    """
+    device_zone_map = {"z1-pl1": "zone-1"}
+
+    # Attack injected 12:38:00Z, Guardian quarantine +2s (12:38:02Z), rollback +2s (12:38:02Z), clear at 12:39:06Z
+    journal_entries = [
+        {
+            "key": "attack_inject:atk-key-1",
+            "sim_ts": "2026-10-17T12:38:00Z",
+            "source": "attack",
+            "detail": {
+                "attack_id": "atk-key-1",
+                "action": "inject",
+                "capability": "device_key",
+                "target_device_id": "z1-pl1",
+                "params": {"spoofed_value": 180.0},
+            },
+        },
+        {
+            "key": "containment:1",
+            "sim_ts": "2026-10-17T12:38:02Z",
+            "source": "containment",
+            "detail": {
+                "caller": "guardian",
+                "tool": "quarantine_device",
+                "target": "z1-pl1",
+                "from_status": "ok",
+                "to_status": "quarantined",
+            },
+        },
+        {
+            "key": "containment:2",
+            "sim_ts": "2026-10-17T12:38:02Z",
+            "source": "containment",
+            "detail": {
+                "caller": "guardian",
+                "tool": "rollback_reading",
+                "target": "r-z1-pl1-1128",
+                "from_status": "ok",
+                "to_status": "rolled_back",
+            },
+        },
+        {
+            "key": "attack_clear:atk-key-1",
+            "sim_ts": "2026-10-17T12:39:06Z",
+            "source": "attack",
+            "detail": {
+                "attack_id": "atk-key-1",
+                "action": "clear",
+                "target_device_id": "z1-pl1",
+            },
+        },
+    ]
+
+    # Ledger rows provided in DESC order as the old fetch returned them:
+    # 1142 (+28s), 1130 (+5s), 1128 (+1s)
+    ledger_readings_desc = [
+        {
+            "id": 1142,
+            "seq": 1142,
+            "reading_id": "r-z1-pl1-1142",
+            "device_id": "z1-pl1",
+            "ts": "2026-10-17T12:38:28Z",
+            "true_value": 103.22,
+            "broadcast_value": 180.00,
+            "unit": "MW",
+            "is_attacked": 1,
+            "attack_type": "device_key",
+        },
+        {
+            "id": 1130,
+            "seq": 1130,
+            "reading_id": "r-z1-pl1-1130",
+            "device_id": "z1-pl1",
+            "ts": "2026-10-17T12:38:05Z",
+            "true_value": 102.50,
+            "broadcast_value": 180.00,
+            "unit": "MW",
+            "is_attacked": 1,
+            "attack_type": "device_key",
+        },
+        {
+            "id": 1128,
+            "seq": 1128,
+            "reading_id": "r-z1-pl1-1128",
+            "device_id": "z1-pl1",
+            "ts": "2026-10-17T12:38:01Z",
+            "true_value": 102.10,
+            "broadcast_value": 180.00,
+            "unit": "MW",
+            "is_attacked": 1,
+            "attack_type": "device_key",
+        },
+    ]
+
+    rows = build_timeline_rows(journal_entries, attacked_readings=ledger_readings_desc, device_zone_map=device_zone_map)
+
+    # Must pick earliest reading r-z1-pl1-1128
+    reading_row = next(r for r in rows if r.event_type == "attacked_reading")
+    assert "r-z1-pl1-1128" in reading_row.summary
+    assert reading_row.chain_id == "chain-1"
+    assert reading_row.reaction_time_s == 1.0  # 12:38:01 - 12:38:00
+
+    # Ensure reading row is placed BEFORE the Guardian quarantine row in sorted rows
+    reading_idx = rows.index(reading_row)
+    quarantine_row = next(r for r in rows if r.event_type == "containment" and "quarantine_device" in r.summary)
+    quarantine_idx = rows.index(quarantine_row)
+    assert reading_idx < quarantine_idx, "Attacked reading must appear before Guardian quarantine in row ordering"
+
+    # Ensure rollback row carries the chain id
+    rollback_row = next(r for r in rows if r.event_type == "containment" and "rollback_reading" in r.summary)
+    assert rollback_row.chain_id == "chain-1"
+    assert rollback_row.reaction_time_s == 2.0  # 12:38:02 - 12:38:00
+
+    # Verify chain summary matches expected format exactly:
+    expected_summary = "z1-pl1 device_key spoofed to 180.0 -> Guardian quarantine_device +2 s (+1 more) -> no Brain action"
+    atk_row = next(r for r in rows if r.event_type == "attack_inject")
+    assert atk_row.chain_summary == expected_summary
+    assert rollback_row.chain_summary == expected_summary
