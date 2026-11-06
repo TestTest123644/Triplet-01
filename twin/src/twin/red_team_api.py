@@ -523,6 +523,29 @@ def build_red_team_app(sim: CitySimulator, token: str, streamer: Optional[Any] =
                     status_code=400,
                 )
 
+            if not isinstance(params, dict):
+                params = {}
+            else:
+                params = dict(params)
+
+            # Accept params.value as an alias of spoofed_value (spoofed_value wins if both)
+            val = params.get("spoofed_value")
+            if val is None:
+                val = params.get("value")
+            if val is not None:
+                try:
+                    num_val = float(val)
+                    params["spoofed_value"] = num_val
+                except (ValueError, TypeError):
+                    return JSONResponse(
+                        {
+                            "status": "error",
+                            "code": "INVALID_ARGUMENT",
+                            "message": f"Value '{val}' must be numeric.",
+                        },
+                        status_code=400,
+                    )
+
             attack_id = sim.inject_attack(
                 capability=capability,
                 target_device_id=target_device_id,

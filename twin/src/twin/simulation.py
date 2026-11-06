@@ -446,6 +446,19 @@ class CitySimulator:
         # Batch insert all 42 devices into SQLite ledger
         self.ledger.register_devices_batch(device_records)
 
+        # Restore persisted containment statuses across restarts before first tick
+        saved_statuses = self.ledger.get_device_statuses()
+        for dev_id, st in saved_statuses.items():
+            if dev_id in self.devices and st:
+                self.devices[dev_id].status = st
+
+        # Restore rogue containment blocks from containment_log
+        contained_rogues = self.ledger.get_contained_rogue_ids(set(self.devices.keys()))
+        for rogue_id in contained_rogues:
+            self.blocked_rogue_ids.add(rogue_id)
+            if rogue_id not in self.blocked_rogue_frames:
+                self.blocked_rogue_frames[rogue_id] = 0
+
     def get_sim_time(self) -> str:
         """Return simulation time."""
         return self.clock.get_sim_time()
@@ -973,6 +986,12 @@ class CitySimulator:
             priv_b64, pub_b64 = generate_keypair()
             self._rogue_keys[rogue_dev_id] = (priv_b64, pub_b64)
 
+        if "spoofed_value" not in params_dict and "value" in params_dict:
+            try:
+                params_dict["spoofed_value"] = float(params_dict["value"])
+            except (ValueError, TypeError):
+                pass
+
         attack_id = f"atk-{uuid.uuid4().hex[:8]}"
         sim_time = self.get_sim_time()
 
@@ -1147,7 +1166,8 @@ class CitySimulator:
                 cap = a.get("capability")
                 params = a.get("params", {})
                 if cap == "device_physical":
-                    broadcast_val = params.get("spoofed_value", round(broadcast_val * 2.5, 2))
+                    sp = params.get("spoofed_value") if params.get("spoofed_value") is not None else params.get("value")
+                    broadcast_val = float(sp) if sp is not None else round(broadcast_val * 2.5, 2)
                 elif cap == "sensor_fault":
                     fault_mode = params.get("fault_mode", "drift")
                     if fault_mode == "stuck":
@@ -1162,7 +1182,8 @@ class CitySimulator:
             for a in dev.active_attacks:
                 if a.get("capability") == "device_key":
                     params = a.get("params", {})
-                    broadcast_val = params.get("spoofed_value", round(broadcast_val + 50.0, 2))
+                    sp = params.get("spoofed_value") if params.get("spoofed_value") is not None else params.get("value")
+                    broadcast_val = float(sp) if sp is not None else round(broadcast_val + 50.0, 2)
 
             # 3. Link layer: link
             for a in dev.active_attacks:

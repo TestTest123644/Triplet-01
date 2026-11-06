@@ -37,6 +37,8 @@ To launch the triplet infrastructure (Kafka broker, Twin Layer simulation, and O
 
 ```bash
 # 1. Start infrastructure (pass SIM_SPEED=20 for scenario pace):
+# For demo runs with MCP auth enabled (routes test commands to Test harness lane):
+# MCP_AUTH_TOKENS="brain:tok-b,guardian:tok-g,scenario:tok-s" SIM_SPEED=20 docker compose up -d --build
 SIM_SPEED=20 docker compose up -d --build
 
 # 2. Export the red-team token generated inside the container:

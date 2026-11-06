@@ -465,6 +465,27 @@ class ScenarioContext:
 
     def __enter__(self) -> "ScenarioContext":
         print(f"=== Starting Scenario {self.scenario_id}: {self.name} ===", flush=True)
+        # Ensure clean state between sequential scenarios
+        if not self.partners:
+            try:
+                self.rest.clear_event("all")
+                self.rest.clear_attack("all")
+                dev_list = self.mcp.list_devices()
+                for d in dev_list:
+                    did = d.get("device_id")
+                    if did and d.get("status") in ("isolated", "quarantined"):
+                        self.mcp.call_tool("reinstate_device", {"device_id": did})
+                    act = d.get("actuator_state", {})
+                    dtype = d.get("device_type")
+                    if dtype == "water_level" and act.get("valve_position") != "half":
+                        self.mcp.call_tool("set_valve", {"device_id": did, "target_state": "half"})
+                    elif dtype == "power_load" and act.get("grid_state") != "grid_a":
+                        self.mcp.call_tool("switch_grid", {"device_id": did, "target_state": "grid_a"})
+                    elif dtype == "traffic_camera" and act.get("signal_plan") != "normal":
+                        self.mcp.call_tool("set_signal_plan", {"device_id": did, "target_state": "normal"})
+            except Exception as e:
+                logger.debug(f"Pre-scenario reset notice: {e}")
+
         # 1. Fetch initial status to get sim_speed and sim_time
         st = self.rest.get_status()
         self.sim_speed = float(st.get("sim_speed", 1.0))
@@ -497,6 +518,7 @@ class ScenarioContext:
             sys.executable,
             "-m", "mocks.mock_guardian",
             "--live",
+            "--exit-with-parent",
             "--mcp-url", self.mcp_url,
             "--kafka-bootstrap", self.kafka_bootstrap,
             "--log-file", self._guardian_log,
@@ -513,6 +535,7 @@ class ScenarioContext:
                 sys.executable,
                 "-m", "mocks.mock_brain",
                 "--live",
+                "--exit-with-parent",
                 "--mcp-url", self.mcp_url,
                 "--kafka-bootstrap", self.kafka_bootstrap,
                 "--log-file", self._brain_log,
@@ -523,6 +546,22 @@ class ScenarioContext:
             self._brain_proc = subprocess.Popen(b_cmd, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             self.log_event("", "scenario", "mock_started", {"component": "brain", "pid": self._brain_proc.pid})
 
+        # Register termination handlers to clean up mock subprocesses on exit or interrupt
+        import atexit
+        atexit.register(self._stop_mocks_processes)
+
+        def _sig_handler(signum, frame):
+            self._stop_mocks_processes()
+            if signum == signal.SIGINT:
+                raise KeyboardInterrupt
+            sys.exit(128 + signum)
+
+        for s in (signal.SIGINT, signal.SIGTERM):
+            try:
+                signal.signal(s, _sig_handler)
+            except (ValueError, AttributeError):
+                pass
+
         # Allow mocks 2 seconds to connect and establish baseline stream
         time.sleep(2.0)
 
@@ -531,21 +570,29 @@ class ScenarioContext:
             ("guardian", self._guardian_proc, self._guardian_log),
             ("brain", self._brain_proc, self._brain_log),
         ):
-            if proc is not None:
+            if proc is not None and proc.poll() is None:
                 try:
-                    proc.send_signal(signal.SIGINT)
-                    proc.wait(timeout=5.0)
+                    proc.terminate()
+                    proc.wait(timeout=3.0)
                 except Exception:
-                    proc.kill()
-                    proc.wait(timeout=2.0)
+                    try:
+                        proc.kill()
+                        proc.wait(timeout=1.0)
+                    except Exception:
+                        pass
                 self.log_event("", "scenario", "mock_stopped", {"component": name})
+        self._guardian_proc = None
+        self._brain_proc = None
 
     def _stop_mocks(self) -> None:
         self._stop_mocks_processes()
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
-        if not self._finished:
-            self.finish()
+        try:
+            if not self._finished:
+                self.finish()
+        finally:
+            self._stop_mocks_processes()
 
     def wait_for_journal(
         self,
@@ -677,7 +724,7 @@ class ScenarioContext:
                     did = d.get("device_id")
                     if not did:
                         continue
-                    if did in contained_during_scenario and d.get("status") in ("isolated", "quarantined"):
+                    if d.get("status") in ("isolated", "quarantined"):
                         self.mcp.call_tool("reinstate_device", {"device_id": did})
 
                     act = d.get("actuator_state", {})

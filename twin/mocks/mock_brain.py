@@ -89,6 +89,7 @@ class MockCityBrain:
         self.latest_camera_vals: Dict[str, float] = {}  # dev_id/zone_id -> latest val
         self.dispatched_medical: Set[str] = set()
         self.dispatched_fire: Set[str] = set()
+        self.latest_aqi: Dict[str, float] = {}
         self.grid_states: Dict[str, str] = {}  # dev_id -> "shed" | "grid_a"
 
         # Zone to camera mapping initialized with standard schema
@@ -274,7 +275,9 @@ class MockCityBrain:
 
         # 4. Air Quality: AQI > 150 -> dispatch fire
         elif dtype == "air_quality":
-            if val > 150.0:
+            prev_aqi = self.latest_aqi.get(device_id)
+            self.latest_aqi[device_id] = val
+            if prev_aqi is not None and val > 150.0 and val > prev_aqi:
                 if zone_id not in self.dispatched_fire:
                     succ, res = await self._safe_call_tool(
                         "dispatch",
@@ -324,12 +327,23 @@ class MockCityBrain:
         """Synchronous wrapper for evaluate_reading_async."""
         return run_sync(self.evaluate_reading_async(payload_input))
 
-    async def run_live(self) -> None:
+    async def run_live(self, exit_with_parent: bool = False) -> None:
         """Run continuous live decision loop."""
         logger.info(f"[BRAIN] Running live decision engine. Writing to {self.log_file}")
+        start_ppid = os.getppid()
+        last_ppid_check = time.monotonic()
         try:
             await self.refresh_zone_cameras()
             while True:
+                if exit_with_parent:
+                    now = time.monotonic()
+                    if now - last_ppid_check >= 2.0:
+                        last_ppid_check = now
+                        curr_ppid = os.getppid()
+                        if curr_ppid != start_ppid or curr_ppid <= 1:
+                            logger.info("[BRAIN] Parent process died. Exiting mock brain.")
+                            break
+
                 reading = self.reading_source.get_reading(timeout=1.0)
                 if reading is not None:
                     await self.evaluate_reading_async(reading)
@@ -345,6 +359,7 @@ class MockCityBrain:
 def main():
     parser = argparse.ArgumentParser(description="Layer 2 Mock City Brain Client")
     parser.add_argument("--live", action="store_true", help="Run live decision loop")
+    parser.add_argument("--exit-with-parent", action="store_true", help="Exit if parent process dies")
     parser.add_argument("--mcp-url", default=os.getenv("TWIN_MCP_URL", "http://localhost:8000"), help="Twin MCP server URL")
     parser.add_argument("--mcp-token", default=os.getenv("MCP_AUTH_TOKEN"), help="Bearer token for MCP")
     parser.add_argument("--kafka-bootstrap", default=os.getenv("KAFKA_BOOTSTRAP", "localhost:9092"), help="Kafka bootstrap broker")
@@ -362,7 +377,7 @@ def main():
     )
     if args.live:
         try:
-            asyncio.run(brain.run_live())
+            asyncio.run(brain.run_live(exit_with_parent=args.exit_with_parent))
         except (KeyboardInterrupt, SystemExit):
             pass
     else:

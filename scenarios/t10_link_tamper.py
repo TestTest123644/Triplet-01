@@ -204,37 +204,60 @@ def run(ctx: ScenarioContext, mode: str = "all") -> bool:
 
     for idx, m in enumerate(modes_to_run):
         run_mode(ctx, m)
-        # Clear attack and restore device before running next mode
-        if idx < len(modes_to_run) - 1:
-            try:
-                ctx.rest.clear_event("all")
-                ctx.rest.clear_attack("all")
-                if m == "delay":
-                    # Before reinstating after delay mode, wait (sim-time deadline)
-                    # until z3-tc1 frames on the wire are within 2 sim-s of stream head, then reinstate
-                    start_sim = ctx.get_sim_time_seconds()
-                    max_sim_wait = 30.0
-                    deadline_sim = start_sim + max_sim_wait
-                    wall_deadline = time.time() + (max_sim_wait / max(0.1, ctx.sim_speed)) + 15.0
-                    head_ts = 0.0
-                    tc1_ts = 0.0
-                    while ctx.get_sim_time_seconds() < deadline_sim and time.time() < wall_deadline:
-                        frames = ctx.wire.drain(max_seconds=0.5)
-                        for _, p in frames:
-                            t = _parse_ts(p.get("ts", ""))
-                            if t > head_ts:
-                                head_ts = t
-                            if p.get("device_id") == "z3-tc1":
-                                if t > tc1_ts:
-                                    tc1_ts = t
-                        if head_ts > 0 and tc1_ts > 0 and (head_ts - tc1_ts) <= 2.0:
-                            break
-                    ctx.reinstate_if_needed("z3-tc1")
-                else:
-                    ctx.reinstate_if_needed("z3-tc1")
-                ctx.sim_sleep(1.0)
-            except Exception as e:
-                ctx.log_event("", "scenario", "mode_transition_error", {"error": str(e)})
+        # Clear attack and restore device after running mode
+        try:
+            ctx.rest.clear_event("all")
+            ctx.rest.clear_attack("all")
+            if m == "delay":
+                # Before reinstating after delay mode, wait (sim-time deadline)
+                # until z3-tc1 frames on the wire are within 2 sim-s of stream head, then reinstate
+                start_sim = ctx.get_sim_time_seconds()
+                max_sim_wait = 30.0
+                deadline_sim = start_sim + max_sim_wait
+                wall_deadline = time.time() + (max_sim_wait / max(0.1, ctx.sim_speed)) + 15.0
+                head_ts = 0.0
+                tc1_ts = 0.0
+                while ctx.get_sim_time_seconds() < deadline_sim and time.time() < wall_deadline:
+                    frames = ctx.wire.drain(max_seconds=0.5)
+                    for _, p in frames:
+                        t = _parse_ts(p.get("ts", ""))
+                        if t > head_ts:
+                            head_ts = t
+                        if p.get("device_id") == "z3-tc1":
+                            if t > tc1_ts:
+                                tc1_ts = t
+                    if head_ts > 0 and tc1_ts > 0 and (head_ts - tc1_ts) <= 2.0:
+                        break
+                ctx.sim_sleep(6.0)
+                ctx.reinstate_if_needed("z3-tc1")
+            else:
+                ctx.reinstate_if_needed("z3-tc1")
+            ctx.sim_sleep(1.0)
+        except Exception as e:
+            ctx.log_event("", "scenario", "mode_transition_error", {"error": str(e)})
+
+    # Settle and sync z3-tc1 wire stream before completing scenario
+    try:
+        ctx.rest.clear_event("all")
+        ctx.rest.clear_attack("all")
+        sync_start = time.time()
+        clear_sim_time = ctx.get_sim_time_seconds()
+        head_ts = 0.0
+        tc1_ts = 0.0
+        while time.time() - sync_start < 10.0:
+            frames = ctx.wire.drain(max_seconds=0.5)
+            for _, p in frames:
+                t = _parse_ts(p.get("ts", ""))
+                if t > head_ts:
+                    head_ts = t
+                if p.get("device_id") == "z3-tc1":
+                    if t > tc1_ts:
+                        tc1_ts = t
+            if head_ts > 0 and tc1_ts > 0 and (head_ts - tc1_ts) < 2.0 and (tc1_ts >= clear_sim_time + 20.0):
+                break
+        ctx.reinstate_if_needed("z3-tc1")
+    except Exception as e:
+        ctx.log_event("", "scenario", "post_scenario_sync_error", {"error": str(e)})
 
     # False-positive guard: no other devices contained, no commands
     fp_ok, fp_msg = ctx.verify_false_positive_guard(allowed_devices={"z3-tc1"}, allowed_zones=set())

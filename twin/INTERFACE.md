@@ -128,3 +128,4 @@ Reload secrets without restarting via `POST http://localhost:8100/api/secrets/re
 13. `reinstate_device` and `release_device` both restore devices to status `ok`.
 14. Diurnal physical kinetics: power load peaks at mid-day, traffic peaks at rush hours, water valves affect water levels.
 15. Water level is continuous without artificial sensor jitter.
+16. Containment state persists across restarts.

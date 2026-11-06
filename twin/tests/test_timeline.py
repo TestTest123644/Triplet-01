@@ -422,7 +422,7 @@ def test_reviewer_live_port_flood_chain():
     assert resolved_row.chain_id == "chain-1"
 
     # Exactly matching reviewer expected chain summary:
-    expected_summary = "rain_storm in zone-2 -> no Guardian action -> Brain set_valve +862 s (+1 more) -> Actuator executed"
+    expected_summary = "rain_storm in zone-2 -> no Guardian action -> Brain set_valve +862 s (+1 more) -> Actuator executed -> resolved by expired"
     assert start_row.chain_summary == expected_summary
     for b in brain_rows:
         assert b.chain_summary == expected_summary
@@ -724,3 +724,69 @@ def test_filter_timeline_rows_with_current_sim_ts():
         current_sim_ts="2026-10-17T12:46:00Z",
     )
     assert len(filtered_15) == 1
+
+
+def test_event_escalated_chain_summary():
+    """Verify chain summary includes '-> escalated to <to>' after Brain part."""
+    journal_entries = [
+        {
+            "key": "event_start:ev-1",
+            "sim_ts": "2026-10-17T12:00:00Z",
+            "source": "event",
+            "detail": {
+                "event_id": "ev-1",
+                "action": "start",
+                "type": "grid_overload",
+                "zone_id": "zone-3",
+            },
+        },
+        {
+            "key": "event_escalated:ev-1",
+            "sim_ts": "2026-10-17T12:02:00Z",
+            "source": "event",
+            "detail": {
+                "event_id": "ev-1",
+                "action": "escalated",
+                "type": "grid_overload",
+                "zone_id": "zone-3",
+                "to": "blackout",
+            },
+        },
+    ]
+    rows = build_timeline_rows(journal_entries)
+    start_row = next(r for r in rows if r.event_type == "event_start")
+    expected = "grid_overload in zone-3 -> no Guardian action -> no Brain action -> escalated to blackout"
+    assert start_row.chain_summary == expected
+
+
+def test_event_resolved_chain_summary():
+    """Verify chain summary includes '-> resolved by <resolved_by>' at the end."""
+    journal_entries = [
+        {
+            "key": "event_start:ev-2",
+            "sim_ts": "2026-10-17T12:00:00Z",
+            "source": "event",
+            "detail": {
+                "event_id": "ev-2",
+                "action": "start",
+                "type": "flood",
+                "zone_id": "zone-1",
+            },
+        },
+        {
+            "key": "event_resolved:ev-2",
+            "sim_ts": "2026-10-17T12:05:00Z",
+            "source": "event",
+            "detail": {
+                "event_id": "ev-2",
+                "action": "resolved",
+                "type": "flood",
+                "zone_id": "zone-1",
+                "resolved_by": "set_valve:v1",
+            },
+        },
+    ]
+    rows = build_timeline_rows(journal_entries)
+    start_row = next(r for r in rows if r.event_type == "event_start")
+    expected = "flood in zone-1 -> no Guardian action -> no Brain action -> resolved by set_valve:v1"
+    assert start_row.chain_summary == expected

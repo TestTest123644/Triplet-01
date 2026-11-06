@@ -461,11 +461,22 @@ class MockGuardian:
         """Synchronous wrapper for process_reading_async."""
         return run_sync(self.process_reading_async(payload_input))
 
-    async def run_live(self) -> None:
+    async def run_live(self, exit_with_parent: bool = False) -> None:
         """Run continuous live consumption loop."""
         logger.info(f"[GUARDIAN] Running live monitoring. Writing to {self.log_file}")
+        start_ppid = os.getppid()
+        last_ppid_check = time.monotonic()
         try:
             while True:
+                if exit_with_parent:
+                    now = time.monotonic()
+                    if now - last_ppid_check >= 2.0:
+                        last_ppid_check = now
+                        curr_ppid = os.getppid()
+                        if curr_ppid != start_ppid or curr_ppid <= 1:
+                            logger.info("[GUARDIAN] Parent process died. Exiting mock guardian.")
+                            break
+
                 reading = self.reading_source.get_reading(timeout=1.0)
                 if reading is not None:
                     await self.process_reading_async(reading)
@@ -481,6 +492,7 @@ class MockGuardian:
 def main():
     parser = argparse.ArgumentParser(description="Layer 3 Mock Guardian Client")
     parser.add_argument("--live", action="store_true", help="Run live monitoring loop")
+    parser.add_argument("--exit-with-parent", action="store_true", help="Exit if parent process dies")
     parser.add_argument("--mcp-url", default=os.getenv("TWIN_MCP_URL", "http://localhost:8000"), help="Twin MCP server URL")
     parser.add_argument("--mcp-token", default=os.getenv("MCP_AUTH_TOKEN"), help="Bearer token for MCP")
     parser.add_argument("--kafka-bootstrap", default=os.getenv("KAFKA_BOOTSTRAP", "localhost:9092"), help="Kafka bootstrap broker")
@@ -498,7 +510,7 @@ def main():
     )
     if args.live:
         try:
-            asyncio.run(guardian.run_live())
+            asyncio.run(guardian.run_live(exit_with_parent=args.exit_with_parent))
         except (KeyboardInterrupt, SystemExit):
             pass
     else:

@@ -41,6 +41,8 @@ services:
       KAFKA_TOPIC: "twin.sensors"
       MCP_HOST: "0.0.0.0"
       MCP_PORT: "8000"
+      MCP_AUTH_TOKENS: "${MCP_AUTH_TOKENS:-}"
+      MCP_AUTH_TOKENS_FILE: "${MCP_AUTH_TOKENS_FILE:-}"
       RED_TEAM_HOST: "0.0.0.0"
       RED_TEAM_PORT: "8100"
       WAIT_FOR_KAFKA: "true"

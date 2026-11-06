@@ -122,9 +122,9 @@ code, pre, .mono, [data-testid="stMetricValue"] {
 # ==============================================================================
 # Database Access Helpers (Strictly Read-Only SQLite)
 # ==============================================================================
-def get_db_connection() -> sqlite3.Connection:
+def get_db_connection(path: Optional[str] = None) -> sqlite3.Connection:
     """Open read-only SQLite URI connection to the ground truth database."""
-    abs_path = os.path.abspath(DB_PATH)
+    abs_path = os.path.abspath(path or DB_PATH)
     conn = sqlite3.connect(f"file:{abs_path}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
     return conn
@@ -241,7 +241,7 @@ def _fetch_scoreboard_metrics_cached(db_path: str, mtime: float) -> Dict[str, An
 
     conn = None
     try:
-        conn = get_db_connection()
+        conn = get_db_connection(db_path)
 
         # O(1) query using MAX(id) on indexed primary key
         r_row = conn.execute("SELECT MAX(id) AS max_id, MAX(ts) AS max_ts FROM readings_truth").fetchone()
@@ -510,7 +510,7 @@ def _fetch_geospatial_sensors_cached(db_path: str, mtime: float) -> pd.DataFrame
 
     conn = None
     try:
-        conn = get_db_connection()
+        conn = get_db_connection(db_path)
         devices = conn.execute(
             "SELECT device_id, zone_id, device_type, unit, lat, lon, min_val, max_val, status FROM devices"
         ).fetchall()
@@ -954,60 +954,66 @@ def render_sidebar():
 
     # 3. Active Threats and Clearance
     st.sidebar.subheader("Active attacks and events")
-    active_attacks = fetch_active_attacks()
-    active_events = fetch_active_physical_events()
 
-    if not active_attacks and not active_events:
-        st.sidebar.caption("Zero active attacks or physical events.")
-    else:
-        for atk in active_attacks:
-            aid = atk.get("attack_id")
-            cap = atk.get("capability")
-            tgt = atk.get("target_device_id") or atk.get("target_zone_id")
-            col_a, col_b = st.sidebar.columns([3, 1])
-            with col_a:
-                st.caption(f"{cap} on {tgt}")
-            with col_b:
-                if st.button("Clear", key=f"btn_clear_atk_{aid}"):
-                    try:
-                        requests.post(
-                            f"{TWIN_API_URL}/api/attack/clear",
-                            headers=get_red_team_headers(),
-                            json={"attack_id": aid},
-                            timeout=2.0,
-                        )
-                        st.rerun()
-                    except Exception:
-                        pass
+    @st.fragment(run_every=3)
+    def render_active_threats_fragment():
+        active_attacks = fetch_active_attacks()
+        active_events = fetch_active_physical_events()
 
-        for ev in active_events:
-            eid = ev.get("event_id")
-            etype = ev.get("event_type")
-            ezone = ev.get("zone_id")
-            col_a, col_b = st.sidebar.columns([3, 1])
-            with col_a:
-                st.caption(f"{etype} in {ezone}")
-            with col_b:
-                if st.button("Clear", key=f"btn_clear_ev_{eid}"):
-                    try:
-                        requests.post(
-                            f"{TWIN_API_URL}/api/event/clear",
-                            headers=get_red_team_headers(),
-                            json={"event_id": eid},
-                            timeout=2.0,
-                        )
-                        st.rerun()
-                    except Exception:
-                        pass
+        if not active_attacks and not active_events:
+            st.caption("Zero active attacks or physical events.")
+        else:
+            for atk in active_attacks:
+                aid = atk.get("attack_id")
+                cap = atk.get("capability")
+                tgt = atk.get("target_device_id") or atk.get("target_zone_id")
+                col_a, col_b = st.columns([2.0, 1.5])
+                with col_a:
+                    st.caption(f"{cap} on {tgt}")
+                with col_b:
+                    if st.button("Clear", key=f"btn_clear_atk_{aid}"):
+                        try:
+                            requests.post(
+                                f"{TWIN_API_URL}/api/attack/clear",
+                                headers=get_red_team_headers(),
+                                json={"attack_id": aid},
+                                timeout=2.0,
+                            )
+                            st.rerun()
+                        except Exception:
+                            pass
 
-    if st.sidebar.button("Clear all threats", key="btn_clear_all_threats"):
-        try:
-            requests.post(f"{TWIN_API_URL}/api/attack/clear", headers=get_red_team_headers(), json={"clear_all": True}, timeout=2.0)
-            requests.post(f"{TWIN_API_URL}/api/event/clear", headers=get_red_team_headers(), json={"clear_all": True}, timeout=2.0)
-            st.sidebar.success("All attacks and events cleared.")
-            st.rerun()
-        except Exception as e:
-            st.sidebar.error(f"Error clearing threats: {e}")
+            for ev in active_events:
+                eid = ev.get("event_id")
+                etype = ev.get("type") or ev.get("event_type")
+                ezone = ev.get("zone_id")
+                col_a, col_b = st.columns([2.0, 1.5])
+                with col_a:
+                    st.caption(f"{etype} in {ezone}")
+                with col_b:
+                    if st.button("Clear", key=f"btn_clear_ev_{eid}"):
+                        try:
+                            requests.post(
+                                f"{TWIN_API_URL}/api/event/clear",
+                                headers=get_red_team_headers(),
+                                json={"event_id": eid},
+                                timeout=2.0,
+                            )
+                            st.rerun()
+                        except Exception:
+                            pass
+
+        if st.button("Clear all threats", key="btn_clear_all_threats"):
+            try:
+                requests.post(f"{TWIN_API_URL}/api/attack/clear", headers=get_red_team_headers(), json={"clear_all": True}, timeout=2.0)
+                requests.post(f"{TWIN_API_URL}/api/event/clear", headers=get_red_team_headers(), json={"clear_all": True}, timeout=2.0)
+                st.success("All attacks and events cleared.")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Error clearing threats: {e}")
+
+    with st.sidebar:
+        render_active_threats_fragment()
 
 
 def render_timeline_tab(db_path: str):
@@ -1194,13 +1200,21 @@ def render_timeline_tab(db_path: str):
                 key="tl_dataframe_table",
             )
 
-            # Inspect selected row JSON payload
+            # Inspect selected row JSON payload (follow row_id across refreshes)
             selected_indices = getattr(selection_event.selection, "rows", [])
             if selected_indices:
                 sel_idx = selected_indices[0]
-                if 0 <= sel_idx < len(table_records):
+                if 0 <= sel_idx < len(operational_rows):
+                    st.session_state["selected_timeline_row_id"] = operational_rows[sel_idx].row_id
+
+            sel_row_id = st.session_state.get("selected_timeline_row_id")
+            if sel_row_id:
+                matching_row = next((r for r in operational_rows if r.row_id == sel_row_id), None)
+                if matching_row:
                     st.markdown("**Inspect selected event payload**")
-                    st.json(table_records[sel_idx]["_raw"] or {})
+                    st.json(matching_row.raw_json or {})
+                else:
+                    st.info("Selected row is outside the current window")
 
         # Test harness diagnostics expander (collapsed by default)
         if harness_rows:
@@ -1307,32 +1321,36 @@ def render_truth_vs_broadcast_tab(db_path: str):
 
 
 def render_ledger_tab(db_path: str):
-    """Render Tab 4: Read-Only Forensic Ledger Audit Trail."""
+    """Render Tab 4: Read-Only Forensic Ledger Audit Trail with auto-refresh fragment."""
     st.subheader("Ground truth ledger")
     st.caption("Immutable forensic audit trail directly queried from read-only SQLite storage.")
 
-    df_ledger = fetch_truth_ledger(limit=250)
-    if df_ledger.empty:
-        st.info("Ground truth database is empty or offline.")
-        return
+    @st.fragment(run_every=5)
+    def render_ledger_fragment(db_p: str):
+        df_ledger = fetch_truth_ledger(limit=250)
+        if df_ledger.empty:
+            st.info("Ground truth database is empty or offline.")
+            return
 
-    st.dataframe(
-        df_ledger,
-        use_container_width=True,
-        hide_index=True,
-        column_config={
-            "id": st.column_config.NumberColumn("ID", width="small"),
-            "reading_id": st.column_config.TextColumn("Reading ID", width="medium"),
-            "device_id": st.column_config.TextColumn("Device", width="small"),
-            "ts": st.column_config.TextColumn("Timestamp", width="medium"),
-            "true_value": st.column_config.NumberColumn("True value", format="%.2f"),
-            "broadcast_value": st.column_config.NumberColumn("Broadcast value", format="%.2f"),
-            "unit": st.column_config.TextColumn("Unit", width="small"),
-            "status": st.column_config.TextColumn("Status", width="small"),
-            "is_attacked": st.column_config.CheckboxColumn("Attacked", width="small"),
-            "attack_type": st.column_config.TextColumn("Attack type", width="medium"),
-        },
-    )
+        st.dataframe(
+            df_ledger,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "id": st.column_config.NumberColumn("ID", width="small"),
+                "reading_id": st.column_config.TextColumn("Reading ID", width="medium"),
+                "device_id": st.column_config.TextColumn("Device", width="small"),
+                "ts": st.column_config.TextColumn("Timestamp", width="medium"),
+                "true_value": st.column_config.NumberColumn("True value", format="%.2f"),
+                "broadcast_value": st.column_config.NumberColumn("Broadcast value", format="%.2f"),
+                "unit": st.column_config.TextColumn("Unit", width="small"),
+                "status": st.column_config.TextColumn("Status", width="small"),
+                "is_attacked": st.column_config.CheckboxColumn("Attacked", width="small"),
+                "attack_type": st.column_config.TextColumn("Attack type", width="medium"),
+            },
+        )
+
+    render_ledger_fragment(db_path)
 
 
 def render_app():
@@ -1342,6 +1360,9 @@ def render_app():
 
     # Render Sidebar Controls
     render_sidebar()
+
+    # Main Area Visible Heading
+    st.title("Twin operations console")
 
     # Render Top Status Bar & 4 KPI Tiles (auto-refreshing fragment)
     render_status_and_kpis(DB_PATH)

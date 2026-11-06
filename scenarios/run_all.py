@@ -50,6 +50,7 @@ def main() -> int:
         except Exception as e:
             print(f"[{sc_id}] UNHANDLED EXCEPTION: {e}", file=sys.stderr)
             results.append((sc_id, sc_mod_name, False, getattr(ctx, "log_file", "none")))
+        time.sleep(1.0)
 
     print("\n" + "=" * 70)
     print("  SCENARIO EXECUTION SUMMARY")

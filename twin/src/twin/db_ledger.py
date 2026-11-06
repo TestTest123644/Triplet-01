@@ -14,7 +14,7 @@ import sqlite3
 import threading
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 logger = logging.getLogger("twin.db_ledger")
 
@@ -209,6 +209,7 @@ class GroundTruthLedger:
                 self._writer_conn.execute("DELETE FROM commands_log;")
                 self._writer_conn.execute("DELETE FROM containment_log;")
                 self._writer_conn.execute("DELETE FROM physical_events;")
+                self._writer_conn.execute("UPDATE devices SET status = 'ok';")
                 self._writer_conn.commit()
 
     def _get_connection(self, read_only: bool = False) -> sqlite3.Connection:
@@ -370,7 +371,7 @@ class GroundTruthLedger:
                     lat=excluded.lat,
                     lon=excluded.lon,
                     public_key=excluded.public_key,
-                    status=excluded.status,
+                    status=devices.status,
                     min_val=excluded.min_val,
                     max_val=excluded.max_val;
                 """,
@@ -422,7 +423,7 @@ class GroundTruthLedger:
                     lat=excluded.lat,
                     lon=excluded.lon,
                     public_key=excluded.public_key,
-                    status=excluded.status,
+                    status=devices.status,
                     min_val=excluded.min_val,
                     max_val=excluded.max_val;
                 """,
@@ -633,7 +634,35 @@ class GroundTruthLedger:
                 """,
                 (run_id, sim_ts, caller, tool, target, from_status, to_status),
             )
+            # Update devices table in the same transaction if target is a registered device
+            self._writer_conn.execute(
+                "UPDATE devices SET status = ? WHERE device_id = ?",
+                (to_status, target),
+            )
             self._writer_conn.commit()
+
+    def get_device_statuses(self) -> Dict[str, str]:
+        """Fetch all device statuses from devices table."""
+        with self._get_connection(read_only=True) as conn:
+            cur = conn.execute("SELECT device_id, status FROM devices")
+            return {row["device_id"]: row["status"] for row in cur.fetchall()}
+
+    def get_contained_rogue_ids(self, registered_device_ids: Set[str]) -> Set[str]:
+        """Fetch rogue device IDs (not in registered devices) that are currently quarantined or isolated."""
+        contained_rogues: Set[str] = set()
+        with self._get_connection(read_only=True) as conn:
+            cur = conn.execute(
+                "SELECT target, to_status FROM containment_log ORDER BY id ASC"
+            )
+            for row in cur.fetchall():
+                target = str(row["target"])
+                to_status = str(row["to_status"])
+                if target not in registered_device_ids:
+                    if to_status in ("quarantined", "isolated"):
+                        contained_rogues.add(target)
+                    elif to_status == "ok":
+                        contained_rogues.discard(target)
+        return contained_rogues
 
     def get_recent_commands_log(self, limit: int = 30) -> List[Dict[str, Any]]:
         """Fetch recent entries from commands_log for verification."""

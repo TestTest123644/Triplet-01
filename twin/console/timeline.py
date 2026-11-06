@@ -68,6 +68,19 @@ def format_reaction_delta(delta_s: float) -> str:
     return f"+{int(round(delta_s))} s"
 
 
+def format_display_val(val: Any) -> str:
+    """Format numeric value rounded to 2 decimal places."""
+    if val is None:
+        return ""
+    if isinstance(val, int) and not isinstance(val, bool):
+        return str(val)
+    try:
+        fval = float(val)
+        return str(round(fval, 2))
+    except (ValueError, TypeError):
+        return str(val)
+
+
 def extract_zone_from_device(device_id: Optional[str], device_zone_map: Dict[str, str]) -> Optional[str]:
     """Resolve zone_id from device_id using lookup map or standard naming prefix."""
     if not device_id:
@@ -167,7 +180,8 @@ def build_timeline_rows(
                         "params": params,
                     }
                 val = params.get("value") if params.get("value") is not None else params.get("spoofed_value")
-                val_txt = f" (spoofed to {val})" if val is not None else ""
+                disp_val = format_display_val(val) if val is not None else None
+                val_txt = f" (spoofed to {disp_val})" if disp_val else ""
                 summary = f"Attack injected: {cap} on {target_dev or target_zone}{val_txt}"
                 rows.append(
                     TimelineRow(
@@ -556,8 +570,9 @@ def build_timeline_rows(
         if origin.event_type == "attack_inject":
             params = origin.raw_json.get("detail", {}).get("params", {}) if origin.raw_json else {}
             val = params.get("value") if params.get("value") is not None else params.get("spoofed_value")
+            disp_val = format_display_val(val) if val is not None else None
             cap = origin.raw_json.get("detail", {}).get("capability", "attack") if origin.raw_json else "attack"
-            spoofed_txt = f" spoofed to {val}" if val is not None else ""
+            spoofed_txt = f" spoofed to {disp_val}" if disp_val else ""
             dev_or_zone = target_dev or target_zone
             origin_txt = f"{dev_or_zone} {cap}{spoofed_txt}"
         else:
@@ -597,9 +612,33 @@ def build_timeline_rows(
             brain_txt = "no Brain action"
             actuator_txt = None
 
+        # Check for event escalation in this chain
+        esc_rows = [r for r in rows if r.chain_id == chain_id and r.event_type == "event_escalated"]
+        if esc_rows:
+            esc_rows.sort(key=lambda x: parse_rfc3339_to_seconds(x.sim_ts))
+            first_esc = esc_rows[0]
+            to_val = first_esc.raw_json.get("detail", {}).get("to", "escalated") if first_esc.raw_json else "escalated"
+            escalated_txt = f"escalated to {to_val}"
+        else:
+            escalated_txt = None
+
+        # Check for event resolution in this chain
+        res_rows = [r for r in rows if r.chain_id == chain_id and r.event_type == "event_resolved"]
+        if res_rows:
+            res_rows.sort(key=lambda x: parse_rfc3339_to_seconds(x.sim_ts))
+            first_res = res_rows[0]
+            resolved_by = first_res.raw_json.get("detail", {}).get("resolved_by", "expired") if first_res.raw_json else "expired"
+            resolved_txt = f"resolved by {resolved_by}"
+        else:
+            resolved_txt = None
+
         chain_parts = [origin_txt, guardian_txt, brain_txt]
         if actuator_txt:
             chain_parts.append(actuator_txt)
+        if escalated_txt:
+            chain_parts.append(escalated_txt)
+        if resolved_txt:
+            chain_parts.append(resolved_txt)
         chain_summary_str = " -> ".join(chain_parts)
 
         # Distribute chain_summary string to all rows in this chain
