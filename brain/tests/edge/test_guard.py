@@ -181,3 +181,34 @@ def test_verdict_bad_signature_tampered_and_wrong_key():
     vrejected(b({**v, "trust": 0.5}), "BAD_SIGNATURE")
     other = MockGuardian(derive_keypair("other")[0]).on_reading(WATER)[0]
     vrejected(other, "BAD_SIGNATURE")
+
+
+# ----- hardening -----
+
+def test_verdict_lowercase_rfc3339_is_rejected_not_raised():
+    v = json.loads(verdict_bytes())
+    v["issued_at"] = "2026-01-01t00:00:00z"
+    v["sig"] = sign(v, G_PRIV)
+    r = vrejected(b(v), "SCHEMA_VIOLATION")
+    assert "issued_at" in r.detail
+
+
+def test_deeply_nested_json_is_malformed_for_both_guards():
+    deep = b"[" * 3000
+    rejected(deep, "MALFORMED_JSON")
+    vrejected(deep, "MALFORMED_JSON")
+
+
+def test_non_finite_value_is_schema_violation():
+    payload = {k: v for k, v in WATER.items() if k != "sig"}
+    for literal in ("NaN", "Infinity", "-Infinity", "1e999"):
+        text = json.dumps({**payload, "value": 0.0, "sig": sign(payload, WATER_PRIV)})
+        raw = text.replace('"value": 0.0', f'"value": {literal}').encode()
+        r = rejected(raw, "SCHEMA_VIOLATION")
+        assert "value" in r.detail, literal
+
+
+def test_verdict_oversized():
+    v = json.loads(verdict_bytes())
+    r = vrejected(b(v) + b" " * 4096, "OVERSIZED")
+    assert r.device_id is None

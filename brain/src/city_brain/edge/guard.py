@@ -1,6 +1,7 @@
 """Edge guard: reason-coded validation of raw readings and Guardian verdicts (spec 5.1, 5.3, 7.3)."""
 
 import json
+import math
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
@@ -56,7 +57,7 @@ def _first_schema_error(validator: Draft7Validator, obj: Any) -> str | None:
 def _parse(raw: bytes) -> tuple[Any, str | None]:
     try:
         return json.loads(raw), None
-    except (ValueError, UnicodeDecodeError) as exc:
+    except (ValueError, UnicodeDecodeError, RecursionError) as exc:
         return None, str(exc)
 
 
@@ -79,6 +80,8 @@ class ReadingGuard:
         problem = _first_schema_error(self._validator, obj)
         if problem is not None:
             return Rejected("SCHEMA_VIOLATION", problem, device_id)
+        if not math.isfinite(obj["value"]):
+            return Rejected("SCHEMA_VIOLATION", f"value: {obj['value']!r} is not finite", device_id)
         device = self._registry.get(device_id)
         if device is None:
             return Rejected("UNKNOWN_DEVICE", f"device '{device_id}' is not in the registry", device_id)
@@ -118,6 +121,8 @@ class VerdictGuard:
         self._validator = Draft7Validator(schema, format_checker=FormatChecker())
 
     def check(self, raw: bytes) -> AcceptedVerdict | Rejected:
+        if len(raw) > MAX_BYTES:
+            return Rejected("OVERSIZED", f"{len(raw)} bytes exceeds {MAX_BYTES}")
         obj, err = _parse(raw)
         if err is not None:
             return Rejected("MALFORMED_JSON", err)
@@ -135,9 +140,13 @@ class VerdictGuard:
             return Rejected("BAD_SIGNATURE", str(exc), device_id)
         if not verify(obj, key):
             return Rejected("BAD_SIGNATURE", "verdict signature missing or invalid", device_id)
-        return AcceptedVerdict(Verdict(
-            verdict_id=obj["verdict_id"], reading_id=obj["reading_id"], sig_hash=obj["sig_hash"],
-            device_id=obj["device_id"], state=state, trust=obj.get("trust"),
-            reasons=frozenset(obj["reasons"]),
-            issued_at=datetime.fromisoformat(obj["issued_at"]),
-            expires_at=datetime.fromisoformat(obj["expires_at"])))
+        try:
+            verdict = Verdict(
+                verdict_id=obj["verdict_id"], reading_id=obj["reading_id"], sig_hash=obj["sig_hash"],
+                device_id=obj["device_id"], state=state, trust=obj.get("trust"),
+                reasons=frozenset(obj["reasons"]),
+                issued_at=datetime.fromisoformat(obj["issued_at"]),
+                expires_at=datetime.fromisoformat(obj["expires_at"]))
+        except (ValueError, TypeError) as exc:  # RFC 3339 forms fromisoformat cannot read
+            return Rejected("SCHEMA_VIOLATION", f"issued_at/expires_at: {exc}", device_id)
+        return AcceptedVerdict(verdict)
