@@ -12,6 +12,19 @@ def is_new_epoch(cursor: DeviceCursor | None, obs: Observation, seq_drop: int, t
     return (cursor.sim_time - obs.sim_time).total_seconds() > ts_back_s
 
 
+def confirm_candidate(state: BrainState, device_id: str, confirm_devices: int, confirm_ticks: int) -> bool:
+    """Count one device going backwards; True once enough distinct devices did so in the window.
+
+    One device alone proves nothing: a replayed or misrouted reading must not wipe safety state.
+    """
+    first = state.epoch_candidate_tick
+    if first is None or state.global_tick - first > confirm_ticks:
+        state.epoch_candidate_tick = state.global_tick
+        state.epoch_candidates.clear()
+    state.epoch_candidates.add(device_id)
+    return len(state.epoch_candidates) >= confirm_devices
+
+
 def start_new_epoch(state: BrainState) -> None:
     """Advance the epoch and clear per-epoch state.
 
@@ -35,4 +48,9 @@ def start_new_epoch(state: BrainState) -> None:
     state.below_low_since.clear()
     state.last_hold.clear()
     state.recent.clear()
+    state.epoch_candidates.clear()
+    state.epoch_candidate_tick = None
+    state.device_verdicts.clear()
+    state.last_heard.clear()
+    state.silent.clear()
     state.bucket = new_token_bucket(state.policy)

@@ -29,6 +29,8 @@ class WaterContext:
     now: datetime
     plan_version: int
     global_tick: int
+    target: str
+    untrusted: bool = False  # the device's latest Guardian verdict is UNTRUSTED
 
 
 def commanded_ratio(valve_state: str) -> float | None:
@@ -54,11 +56,13 @@ def _valve_class(valve_state: str) -> str:
 def water_hold_reason(ctx: WaterContext, policy: Mapping) -> str | None:
     """Why this channel must not be planned on, or None.
 
-    Order: STALE, INSUFFICIENT_EVIDENCE, STUCK, IMPLAUSIBLE_JUMP, MODEL_MISMATCH,
+    Order: STALE, UNTRUSTED_READINGS, INSUFFICIENT_EVIDENCE, STUCK, IMPLAUSIBLE_JUMP, MODEL_MISMATCH,
     UNKNOWN_VALVE_STATE.
     """
     if not ctx.filter.initialised or not ctx.recent or ctx.filter.is_stale(ctx.global_tick):
         return "STALE"
+    if ctx.untrusted:
+        return "UNTRUSTED_READINGS"
     if len(ctx.recent) < int(policy["water"]["evidence_count"]):
         return "INSUFFICIENT_EVIDENCE"
     flags = ctx.filter.flags
@@ -68,6 +72,15 @@ def water_hold_reason(ctx: WaterContext, policy: Mapping) -> str | None:
     if _valve_class(ctx.valve_state) == "unknown":
         return "UNKNOWN_VALVE_STATE"
     return None
+
+
+def matches_commanded(slope: float, valve_state: str, policy: Mapping) -> bool:
+    """Whether an observed level slope is what the commanded valve state should produce."""
+    verification = policy["verification"]
+    valve_class = _valve_class(valve_state)
+    if valve_class == OPEN:
+        return slope <= verification["open_rate_max"]
+    return valve_class == CLOSED and slope >= verification["close_rate_min"]
 
 
 def plan_water_t0(ctx: WaterContext, policy: Mapping) -> ActionIntent | None:
@@ -110,11 +123,11 @@ def plan_water_t0(ctx: WaterContext, policy: Mapping) -> ActionIntent | None:
 def _intent(ctx, water, state, risk, effect, rationale, alternative) -> ActionIntent:
     incident_id = f"flood-risk:{ctx.device_id}:{ctx.plan_version}"
     return ActionIntent(
-        action_id=action_id(incident_id, "valve", ctx.device_id, state, ctx.plan_version),
+        action_id=action_id(incident_id, "valve", ctx.target, state, ctx.plan_version),
         incident_id=incident_id,
         plan_version=ctx.plan_version,
         capability="valve",
-        target=ctx.device_id,
+        target=ctx.target,
         state=state,
         risk_class=risk,
         expected_effect=effect,

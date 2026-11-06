@@ -108,7 +108,8 @@
         },
         "twin_reply": {"type": ["object", "null"]},
         "reasons": {"type": "array", "items": {"type": "string"}},
-        "expected": {"$ref": "#/$defs/expected"}
+        "expected": {"$ref": "#/$defs/expected"},
+        "evidence": {"type": "array", "items": {"$ref": "#/$defs/evidence"}}
       }
     },
     "verification": {

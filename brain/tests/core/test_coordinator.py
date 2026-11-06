@@ -9,6 +9,7 @@ from city_brain.core.events import (
     CancelTimer,
     CommandResult,
     Publish,
+    RegistryLoaded,
     SendCommand,
     StartTimer,
     TimerFired,
@@ -24,6 +25,7 @@ from city_brain.domain.types import (
 )
 from tests.factories import T0
 from tests.helpers_coordinator import (
+    ALLOWLIST,
     CFG,
     PERIOD_S,
     apply,
@@ -36,11 +38,15 @@ from tests.helpers_coordinator import (
     seq_of,
     state_with_registry,
     verdict_for,
+    water_device,
 )
 
 DEVICE = "z1-wl1"
 COOLDOWN_S = CFG.policy["shield"]["cooldown_s"]["valve"]
 BURST = CFG.policy["shield"]["rate_limit"]["burst"]
+WAIT_S = CFG.policy["trust"]["verdict_wait_s"]
+OPEN_DUE_S = CFG.policy["verification"]["open_window_s"] + WAIT_S + 0.5
+CLOSE_DUE_S = CFG.policy["verification"]["close_window_s"] + WAIT_S + 0.5
 
 
 def alerts(effects, code):
@@ -237,15 +243,13 @@ def test_verdict_cited_then_expired_blocks_with_verdict_expired():
     assert not of_type(SendCommand, s.last_effects)
 
 
-def test_fresh_identical_verdict_replacing_an_expired_one_still_re_evaluates():
+def test_expired_verdict_on_a_pending_ref_reports_verdict_expired():
     s, record = awaiting_open()
     first, second, third = (seq_of(r) for r in record.intent.evidence)
     s = apply(s, VerdictReceived(verdict_for(DEVICE, first)))
     s = apply(s, VerdictReceived(verdict_for(DEVICE, second)))
     s = apply(s, VerdictReceived(verdict_for(DEVICE, third, expires_at=s.sim_now - timedelta(seconds=1))))
-    assert record.status is ActionStatus.AWAITING_TRUST
-    s = apply(s, VerdictReceived(verdict_for(DEVICE, third)))
-    assert record.status is ActionStatus.DISPATCHED
+    assert record.status is ActionStatus.BLOCKED and "VERDICT_EXPIRED" in record.reasons
 
 
 def test_contained_while_awaiting_fails_the_dispatch_time_check():
@@ -310,10 +314,9 @@ def test_identical_refusal_is_silent_and_a_different_one_is_not():
     s = feed_channel(s, DEVICE, seconds=1.0, rate=0.02)
     assert [c["data"]["reasons"] for c in commands(s.last_effects, "REFUSED")] == [["COOLDOWN"]]
     assert s.counters["REFUSED_REPEAT"] == 9
-    s.suspect.add(DEVICE)
-    s = feed_channel(s, DEVICE, seconds=0.2, rate=0.02)
+    s = feed_channel(s, DEVICE, seconds=0.2, rate=0.02, device_status=DeviceStatus.ISOLATED)
     assert [c["data"]["reasons"] for c in commands(s.last_effects, "REFUSED")] == [
-        ["COOLDOWN"], ["ACTUATOR_SUSPECT", "COOLDOWN"],
+        ["COOLDOWN"], ["TARGET_CONTAINED", "COOLDOWN"],
     ]
 
 
@@ -424,7 +427,7 @@ def test_lost_reply_frees_the_target_only_when_the_twin_restarts():
 
 def test_results_outside_dispatched_are_counted_and_ignored():
     s, send = verifying_open()
-    s = feed_falling_channel(s, DEVICE, seconds=3.5)
+    s = feed_falling_channel(s, DEVICE, seconds=OPEN_DUE_S)
     assert s.actions[send.action_id].status is ActionStatus.VERIFIED
     n = len(s.last_effects)
     s = apply(s, CommandResult(send.action_id, "UNKNOWN", {}))
@@ -438,7 +441,7 @@ def test_results_outside_dispatched_are_counted_and_ignored():
 
 def test_actuator_noop_is_unverified_with_two_alerts_and_no_resend():
     s, send = verifying_open()
-    s = feed_channel(s, DEVICE, seconds=3.5, rate=0.02)
+    s = feed_channel(s, DEVICE, seconds=OPEN_DUE_S, rate=0.02)
     assert s.actions[send.action_id].status is ActionStatus.UNVERIFIED
     assert alerts(s.last_effects, "ACTUATOR_NO_EFFECT") == ["operator", "guardian"]
     assert DEVICE in s.suspect and DEVICE not in s.in_flight
@@ -448,13 +451,13 @@ def test_actuator_noop_is_unverified_with_two_alerts_and_no_resend():
 
 def test_verification_waits_for_the_whole_window():
     s, send = verifying_open()
-    s = feed_falling_channel(s, DEVICE, seconds=2.9)
+    s = feed_falling_channel(s, DEVICE, seconds=OPEN_DUE_S - 0.6)
     assert s.actions[send.action_id].status is ActionStatus.VERIFYING
 
 
 def test_no_measurements_in_the_window_is_inconclusive_and_alerts():
     s, send = verifying_open()
-    s = feed_channel(s, DEVICE, seconds=3.5, rate=-0.025, device_status=DeviceStatus.ISOLATED)
+    s = feed_channel(s, DEVICE, seconds=OPEN_DUE_S, rate=-0.025, device_status=DeviceStatus.ISOLATED)
     assert s.actions[send.action_id].status is ActionStatus.UNVERIFIED
     [verification] = [e.event for e in of_type(Publish, s.last_effects)
                       if e.event["type"].endswith(".verification.v1")]
@@ -474,37 +477,38 @@ def alert_messages(effects):
 ], ids=["water", "other_kind"])
 def test_silent_sensor_ends_verification_on_any_other_reading(reading_fields):
     s, send = verifying_open()
-    for _ in range(35):
+    for _ in range(55):
         s = feed_tick(s, {"z2-wl1": 40.0}, verdict=None, **reading_fields)
     record = s.actions[send.action_id]
     assert record.status is ActionStatus.UNVERIFIED and DEVICE not in s.in_flight
-    assert DEVICE in s.suspect
-    messages = alert_messages(s.last_effects)
+    assert DEVICE not in s.suspect
+    messages = [m for m in alert_messages(s.last_effects) if "was" in m or "were" in m]
     assert len(messages) == 2 and all("No measurements were available" in m for m in messages)
 
 
 def test_alert_for_a_measured_failure_says_no_effect():
     s, send = verifying_open()
-    s = feed_channel(s, DEVICE, seconds=3.5, rate=0.02)
+    s = feed_channel(s, DEVICE, seconds=OPEN_DUE_S, rate=0.02)
     assert all("no observed effect" in m for m in alert_messages(s.last_effects))
 
 
 @pytest.mark.parametrize("verdict_first", [False, True])
 def test_forged_falling_readings_cannot_verify_a_dead_valve(verdict_first):
     s, send = verifying_open()
-    s = feed_channel(s, DEVICE, seconds=3.5, rate=-0.025, verdict=TrustState.UNTRUSTED,
+    s = feed_channel(s, DEVICE, seconds=OPEN_DUE_S, rate=-0.025, verdict=TrustState.UNTRUSTED,
                      verdict_first=verdict_first)
     record = s.actions[send.action_id]
     assert record.status is ActionStatus.UNVERIFIED
     [verification] = [e.event for e in of_type(Publish, s.last_effects)
                       if e.event["type"].endswith(".verification.v1")]
     assert verification["data"]["verdict"] == "inconclusive"
-    assert DEVICE in s.suspect
+    assert DEVICE not in s.suspect
+    assert all("excluded as untrusted" in m for m in alert_messages(s.last_effects))
 
 
 def test_readings_awaiting_a_verdict_at_close_do_not_count():
     s, send = verifying_open()
-    s = feed_channel(s, DEVICE, seconds=3.5, rate=-0.025, verdict=None)
+    s = feed_channel(s, DEVICE, seconds=OPEN_DUE_S, rate=-0.025, verdict=None)
     assert s.actions[send.action_id].status is ActionStatus.UNVERIFIED
 
 
@@ -512,7 +516,7 @@ def test_trusted_readings_decide_when_forgeries_are_mixed_in():
     """Dead valve: true readings keep rising, forged ones between them fall."""
     s, send = verifying_open()
     start = s.levels[DEVICE]
-    for n in range(1, 36):
+    for n in range(1, 56):
         forged = n % 3 == 0
         value = start + 0.002 * n - (0.015 if forged else 0.0)
         s = feed_tick(s, {DEVICE: value}, TrustState.UNTRUSTED if forged else TrustState.TRUSTED)
@@ -532,7 +536,7 @@ def test_another_channel_on_the_same_tick_does_not_affect_verification():
     send = only(SendCommand, s.last_effects)
     s = apply(s, CommandResult(send.action_id, "ACCEPTED", {}))
     start = s.levels[DEVICE]
-    for n in range(1, 36):
+    for n in range(1, 56):
         seq = s.global_tick + 1
         s = feed_tick(s, {other: 4.1 + 0.001 * n}, verdict=None, seq=seq)
         s = feed_tick(s, {DEVICE: start - 0.0025 * n}, seq=seq)
@@ -541,7 +545,7 @@ def test_another_channel_on_the_same_tick_does_not_affect_verification():
 
 def test_doubtful_readings_count_for_verification():
     s, send = verifying_open()
-    s = feed_channel(s, DEVICE, seconds=3.5, rate=-0.025, verdict=TrustState.DOUBTFUL)
+    s = feed_channel(s, DEVICE, seconds=OPEN_DUE_S, rate=-0.025, verdict=TrustState.DOUBTFUL)
     assert s.actions[send.action_id].status is ActionStatus.VERIFIED
 
 
@@ -549,7 +553,7 @@ def test_first_half_second_after_accept_is_not_measured():
     """The level keeps rising until the valve bites; only what follows counts."""
     s, send = verifying_open()
     s = feed_channel(s, DEVICE, seconds=0.4, rate=0.05)
-    s = feed_channel(s, DEVICE, seconds=3.1, rate=-0.011)
+    s = feed_channel(s, DEVICE, seconds=5.1, rate=-0.011)
     assert s.actions[send.action_id].status is ActionStatus.VERIFIED
 
 
@@ -559,16 +563,18 @@ def test_close_with_the_level_still_falling_is_unverified():
     send = only(SendCommand, s.last_effects)
     assert (send.state, record.status) == ("closed", ActionStatus.DISPATCHED)
     s = apply(s, CommandResult(send.action_id, "ACCEPTED", {}))
-    s = feed_channel(s, DEVICE, seconds=5.5, rate=-0.045)
+    s = feed_channel(s, DEVICE, seconds=CLOSE_DUE_S, rate=-0.045)
     assert record.status is ActionStatus.UNVERIFIED and DEVICE in s.suspect
 
 
 # ----- epochs -----
 
 
-def restart(s, level=3.2):
-    """The Twin restarts: `seq` and sim time go back to the start."""
-    return feed_tick(s, {DEVICE: level}, verdict=None, seq=3)
+def restart(s, level=3.2, verdict=None, **tick_fields):
+    """The Twin restarts: new keys, and `seq` and sim time go back to the start."""
+    devices = tuple(water_device(d) for d in s.registry)
+    s = apply(s, RegistryLoaded(devices, ALLOWLIST, keys_changed=True))
+    return feed_tick(s, {DEVICE: level}, verdict, seq=3, **tick_fields)
 
 
 def later(s):
@@ -597,7 +603,7 @@ def test_new_epoch_resolves_a_dispatched_action_and_a_late_result_stays_ignored(
 
 def test_new_epoch_leaves_terminal_actions_alone():
     s, send = verifying_open()
-    s = feed_falling_channel(s, DEVICE, seconds=3.5)
+    s = feed_falling_channel(s, DEVICE, seconds=OPEN_DUE_S)
     s = restart(later(s))
     assert s.actions[send.action_id].status is ActionStatus.VERIFIED
     assert alerts(s.last_effects, "EPOCH_CHANGED_ACTION_UNKNOWN") == []
@@ -622,7 +628,7 @@ def test_valve_can_be_commanded_after_a_restart_rewinds_sim_time():
     s, send = dispatched_open()
     s = later(s)
     s.last_effects = []
-    s = feed_tick(s, {DEVICE: 5.95}, seq=3, verdict_first=True)
+    s = restart(s, 5.95, TrustState.TRUSTED, verdict_first=True)
     s = feed_rising_channel(s, DEVICE, until_level=6.1, verdict_first=True)
     fresh = only(SendCommand, s.last_effects)
     assert fresh.idempotency_key == f"brain-1-{fresh.action_id}"
@@ -640,7 +646,7 @@ def test_rate_limit_refills_after_a_restart_rewinds_sim_time():
 
 def test_suspect_clears_on_a_new_epoch():
     s, send = verifying_open()
-    s = feed_channel(s, DEVICE, seconds=3.5, rate=0.02)
+    s = feed_channel(s, DEVICE, seconds=OPEN_DUE_S, rate=0.02)
     assert DEVICE in s.suspect
     s = restart(later(s))
     assert s.suspect == set()
@@ -697,3 +703,74 @@ def test_dispatched_is_published_before_the_command_is_sent():
     s, _ = dispatched_open()
     published = s.last_effects.index(Publish(commands(s.last_effects, "DISPATCHED")[0]))
     assert published < s.last_effects.index(only(SendCommand, s.last_effects))
+
+
+# ----- whole-branch review: verification timing and recovery -----
+
+
+@pytest.mark.parametrize("lag_ticks", [16, 19])
+def test_legal_guardian_lag_still_verifies(lag_ticks):
+    s, send = verifying_open()
+    start = s.levels[DEVICE]
+    first = s.global_tick + 1
+    for n in range(1, round(OPEN_DUE_S / PERIOD_S) + 1):
+        s = feed_tick(s, {DEVICE: start - 0.0025 * n}, verdict=None)
+        if n > lag_ticks:
+            s = apply(s, VerdictReceived(verdict_for(DEVICE, first + n - 1 - lag_ticks)))
+    assert s.actions[send.action_id].status is ActionStatus.VERIFIED
+
+
+def test_window_stays_open_until_the_verdict_wait_has_passed():
+    s, send = verifying_open()
+    s = feed_falling_channel(s, DEVICE, seconds=4.8)
+    assert s.actions[send.action_id].status is ActionStatus.VERIFYING
+    s = feed_falling_channel(s, DEVICE, seconds=0.3)
+    assert s.actions[send.action_id].status is ActionStatus.VERIFIED
+
+
+def test_inconclusive_leaves_the_target_commandable():
+    s, send = verifying_open()
+    s = feed_channel(s, DEVICE, seconds=OPEN_DUE_S, rate=-0.025, device_status=DeviceStatus.ISOLATED)
+    assert DEVICE not in s.suspect and s.counters["REFUSED_REPEAT"] == 0
+    assert all("No measurements" in m for m in alert_messages(s.last_effects))
+
+
+def statuses(effects, reason):
+    return [e.event for e in of_type(Publish, effects)
+            if e.event["type"].endswith(".status.v1") and e.event["data"]["reason"] == reason]
+
+
+def test_suspect_valve_clears_once_it_behaves_as_commanded():
+    s, send = verifying_open()
+    s = feed_channel(s, DEVICE, seconds=OPEN_DUE_S, rate=0.02)
+    assert DEVICE in s.suspect
+    s = feed_channel(s, DEVICE, seconds=3.0, rate=-0.03)
+    assert DEVICE in s.suspect and statuses(s.last_effects, "actuator_recovered") == []
+    s = feed_channel(s, DEVICE, seconds=15.0, rate=-0.03)
+    assert DEVICE not in s.suspect
+    [recovered] = statuses(s.last_effects, "actuator_recovered")
+    assert recovered["data"]["target"] == DEVICE
+
+
+def test_dead_valve_stays_suspect_while_the_level_keeps_rising():
+    s, _ = verifying_open()
+    s = feed_channel(s, DEVICE, seconds=60.0, rate=0.02)
+    assert DEVICE in s.suspect and statuses(s.last_effects, "actuator_recovered") == []
+
+
+def test_stuck_open_valve_stays_suspect_after_a_failed_close():
+    s, record = close_awaiting_newest_verdict()
+    s = trust_all(s, record)
+    send = only(SendCommand, s.last_effects)
+    s = apply(s, CommandResult(send.action_id, "ACCEPTED", {}))
+    s = feed_channel(s, DEVICE, seconds=CLOSE_DUE_S + 30.0, rate=-0.045)
+    assert DEVICE in s.suspect
+
+
+def test_dispatched_event_carries_the_resolved_evidence():
+    s, _ = dispatched_open()
+    [event] = commands(s.last_effects, "DISPATCHED")
+    evidence = event["data"]["evidence"]
+    assert len(evidence) == CFG.policy["water"]["evidence_count"]
+    assert all(r["trust_state"] == "TRUSTED" and r["weight"] > 0 for r in evidence)
+    assert "evidence" not in commands(s.last_effects, "AWAITING_TRUST")[0]["data"]

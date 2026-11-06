@@ -1,6 +1,7 @@
 """The water loop end to end through `step`: reading, verdict, command, result, verification."""
 
 import json
+import random
 from pathlib import Path
 
 import jsonschema
@@ -9,14 +10,18 @@ import pytest
 from city_brain.core.events import (
     CommandResult,
     Publish,
+    RegistryLoaded,
     SendCommand,
     TimerFired,
     VerdictReceived,
 )
+from city_brain.core.state import BrainState
 from city_brain.core.step import step
 from city_brain.domain.types import ActionStatus, DeviceStatus, TrustState
 from tests.helpers_coordinator import (
+    ALLOWLIST,
     CFG,
+    PERIOD_S,
     apply,
     feed_channel,
     feed_falling_channel,
@@ -26,9 +31,11 @@ from tests.helpers_coordinator import (
     only,
     state_with_registry,
     verdict_for,
+    water_device,
 )
 
 DEVICE = "z1-wl1"
+QUIET = "z2-wl1"
 SCHEMA_PATH = Path(__file__).resolve().parents[2] / "schemas" / "brain-event.v1.schema.json"
 BRAIN_EVENT_SCHEMA = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
 
@@ -68,7 +75,7 @@ def test_happy_path_open_then_verified():
     assert send.capability == "valve" and send.idempotency_key == f"brain-0-{send.action_id}"
     s, _ = step(s, CommandResult(send.action_id, "ACCEPTED", {"status": "ok"}))
     assert s.registry[DEVICE].actuator.current_state == "open"
-    s = feed_falling_channel(s, DEVICE, seconds=3.5)
+    s = feed_falling_channel(s, DEVICE, seconds=5.5)
     record = s.actions[send.action_id]
     assert record.status is ActionStatus.VERIFIED
     assert DEVICE not in s.in_flight and DEVICE not in s.suspect
@@ -240,14 +247,14 @@ def test_full_cycle_open_verified_then_close_verified():
     s = feed_rising_channel(s, DEVICE, until_level=6.05)
     opened = only(SendCommand, s.last_effects)
     s = apply(s, CommandResult(opened.action_id, "ACCEPTED", {}))
-    s = feed_falling_channel(s, DEVICE, seconds=3.5)
+    s = feed_falling_channel(s, DEVICE, seconds=5.5)
     s = feed_channel(s, DEVICE, seconds=125.0, rate=-0.025)
     assert s.filters[DEVICE].level < 3.0
     s = feed_channel(s, DEVICE, seconds=6.0, rate=-0.025)
     closing = of_type(SendCommand, s.last_effects)[1]
     assert closing.state == "closed" and closing.action_id != opened.action_id
     s = apply(s, CommandResult(closing.action_id, "ACCEPTED", {}))
-    s = feed_channel(s, DEVICE, seconds=5.5, rate=0.02)
+    s = feed_channel(s, DEVICE, seconds=17.5, rate=0.02)
     assert s.actions[closing.action_id].status is ActionStatus.VERIFIED
     assert s.registry[DEVICE].actuator.current_state == "closed"
 
@@ -261,6 +268,144 @@ def scripted_run():
     for n in range(50):
         s = feed_tick(s, {"z1-wl1": 6.1 - 0.0025 * n, "z2-wl1": 6.2 + 0.002 * n})
     return s.last_effects
+
+
+def alerts(effects, code):
+    return [e for e in published(effects, "alert") if e["data"]["code"] == code]
+
+
+def test_lost_reply_freeze_survives_an_old_reading():
+    s = state_with_registry()
+    s = feed_rising_channel(s, DEVICE, until_level=6.05)
+    send = only(SendCommand, s.last_effects)
+    s = apply(s, CommandResult(send.action_id, "UNKNOWN", {}))
+    s = feed_tick(s, {DEVICE: 6.06}, seq=s.global_tick + 500)
+    s = feed_tick(s, {DEVICE: 6.0}, seq=1)  # byte-identical to the first reading of the run
+    s = feed_channel(s, DEVICE, seconds=5.0, rate=0.02)
+    assert s.epoch == 0 and s.counters["DUPLICATE"] == 1
+    assert s.actions[send.action_id].status is ActionStatus.UNKNOWN
+    assert only(SendCommand, s.last_effects) == send
+
+
+def untrust_latest(s, state=TrustState.UNTRUSTED):
+    return apply(s, VerdictReceived(verdict_for(DEVICE, s.global_tick, state, trust=0.0)))
+
+
+def test_untrusted_device_gets_a_hold_and_no_plan_until_trusted_again():
+    s = enough_readings(level=5.99)
+    s = untrust_latest(s)
+    s = feed_tick(s, {DEVICE: 6.02}, verdict=None)
+    assert hold_reasons(s.last_effects) == ["UNTRUSTED_READINGS"]
+    assert s.filters[DEVICE].level >= 6.0 and s.actions == {}
+    s = apply(s, VerdictReceived(verdict_for(DEVICE, s.global_tick, TrustState.TRUSTED)))
+    s = feed_tick(s, {DEVICE: 6.03})
+    assert s.last_hold[DEVICE] is None and len(s.actions) == 1
+
+
+def test_older_verdict_arriving_late_does_not_clear_untrusted():
+    s = enough_readings(level=5.9)
+    s = untrust_latest(s)
+    s = apply(s, VerdictReceived(verdict_for(DEVICE, s.global_tick - 2)))
+    s = feed_tick(s, {DEVICE: 5.9}, verdict=None)
+    assert s.last_hold[DEVICE] == "UNTRUSTED_READINGS"
+
+
+def run_with_silent_channel(ticks):
+    s = state_with_registry(DEVICE, QUIET)
+    s = feed_tick(s, {DEVICE: 5.0, QUIET: 5.0})
+    for n in range(ticks):
+        s = feed_tick(s, {DEVICE: 5.0 + 0.002 * n})
+    return s
+
+
+def test_silent_channel_gets_a_stale_hold_and_one_alert():
+    s = run_with_silent_channel(100)
+    assert s.last_hold[QUIET] == "STALE"
+    [alert] = alerts(s.last_effects, "CHANNEL_SILENT")
+    assert alert["subject"] == QUIET and alert["data"]["audience"] == "operator"
+    stale = [e for e in holds(s.last_effects) if e["data"]["incident"]["device_id"] == QUIET]
+    assert [e["data"]["incident"]["hold_reason"] for e in stale].count("STALE") == 1
+
+
+def test_a_channel_not_yet_silent_gets_nothing():
+    s = run_with_silent_channel(18)
+    assert alerts(s.last_effects, "CHANNEL_SILENT") == []
+
+
+def test_channel_that_never_reported_counts_as_silent_and_a_second_silence_alerts_again():
+    s = state_with_registry(DEVICE, QUIET)
+    for n in range(25):
+        s = feed_tick(s, {DEVICE: 5.0 + 0.002 * n})
+    assert len(alerts(s.last_effects, "CHANNEL_SILENT")) == 1
+    s = feed_tick(s, {QUIET: 5.0}, seq=s.global_tick)
+    for n in range(25):
+        s = feed_tick(s, {DEVICE: 5.1 + 0.002 * n})
+    assert len(alerts(s.last_effects, "CHANNEL_SILENT")) == 2
+
+
+def test_contained_channel_still_reporting_is_not_silent():
+    s = state_with_registry()
+    s = feed_tick(s, {DEVICE: 5.0})
+    s = feed_channel(s, DEVICE, seconds=5.0, rate=0.001, device_status=DeviceStatus.ISOLATED)
+    assert s.last_hold[DEVICE] == "STALE" and alerts(s.last_effects, "CHANNEL_SILENT") == []
+
+
+VALVE = "z1-v1"
+
+
+def sensor_with_separate_valve():
+    s = state_with_registry()
+    sensor = s.registry[DEVICE]
+    actuator = sensor.actuator.model_copy(update={"target": VALVE})
+    s.registry[DEVICE] = sensor.model_copy(update={"actuator": actuator})
+    s.registry[VALVE] = sensor.model_copy(update={"device_id": VALVE, "actuator": actuator})
+    return s
+
+
+def test_command_goes_to_the_actuator_target_and_verifies_on_the_sensor():
+    s = feed_rising_channel(sensor_with_separate_valve(), DEVICE, until_level=6.05)
+    send = only(SendCommand, s.last_effects)
+    assert send.target == VALVE and s.plan_version == {VALVE: 1}
+    assert s.actions[send.action_id].intent.expected_effect.channel == DEVICE
+    s = apply(s, CommandResult(send.action_id, "ACCEPTED", {}))
+    assert s.registry[DEVICE].actuator.current_state == "open"
+    assert s.registry[VALVE].actuator.current_state == "open"
+    s = feed_falling_channel(s, DEVICE, seconds=5.5)
+    assert s.actions[send.action_id].status is ActionStatus.VERIFIED
+
+
+def test_suspect_is_kept_on_the_target_and_recovery_reads_the_sensor():
+    s = feed_rising_channel(sensor_with_separate_valve(), DEVICE, until_level=6.05)
+    send = only(SendCommand, s.last_effects)
+    s = apply(s, CommandResult(send.action_id, "ACCEPTED", {}))
+    s = feed_channel(s, DEVICE, seconds=5.5, rate=0.02)
+    assert s.suspect == {VALVE}
+    s = feed_channel(s, DEVICE, seconds=20.0, rate=-0.03)
+    assert s.suspect == set()
+
+
+def test_healthy_valve_under_noise_never_stays_suspect():
+    """Long run at low inflow: every close has a real but small rate to find in the noise."""
+    rng = random.Random(7)
+    policy = {**CFG.policy, "water": {**CFG.policy["water"], "high_band": 3.8}}
+    s = BrainState.new(policy, CFG.params)
+    s, _ = step(s, RegistryLoaded((water_device(DEVICE),), ALLOWLIST))
+    s.last_effects, s.levels = [], {}
+    inflow, drain = 0.012, 0.045
+    level, valve = 3.5, 0.0
+    closes = 0
+    for _ in range(9000):
+        level += (inflow - drain * valve) * PERIOD_S
+        s = feed_tick(s, {DEVICE: round(level + rng.gauss(0, 0.005), 2)})
+        for effect in of_type(SendCommand, s.last_effects):
+            s = apply(s, CommandResult(effect.action_id, "ACCEPTED", {}))
+            valve = 1.0 if effect.state == "open" else 0.0
+            closes += effect.state == "closed"
+        s.last_effects = []
+        assert DEVICE not in s.suspect
+    assert closes >= 3
+    outcomes = {r.status for r in s.actions.values()}
+    assert ActionStatus.UNVERIFIED not in outcomes
 
 
 def test_same_events_give_same_effects():

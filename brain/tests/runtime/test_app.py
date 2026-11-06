@@ -223,3 +223,41 @@ async def test_timers_go_to_the_clock(rig, monkeypatch):
     script(monkeypatch, [StartTimer("t1", "k", 1.0), StartTimer("t2", "k", 1.0), CancelTimer("t1")])
     await rig.app.feed(TimerFired("t", "k"))
     assert rig.clock.advance(1.0) == [TimerFired("t2", "k")]
+
+
+def statuses(rig):
+    return [e["data"]["reason"] for e in rig.log() if "reason" in e["data"]]
+
+
+async def test_reload_with_new_keys_starts_the_epoch_once(rig):
+    rig.twin.restart()
+    await rig.app.reload_registry()
+    assert rig.app.state.epoch == 1
+    assert statuses(rig) == ["startup", "registry_reloaded", "epoch_changed"]
+
+
+async def test_reload_with_the_same_keys_keeps_the_epoch(rig):
+    await rig.app.reload_registry()
+    assert rig.app.state.epoch == 0
+
+
+async def test_removed_device_is_not_a_key_change(rig):
+    del rig.twin.devices["z6-ec1"]
+    await rig.app.reload_registry()
+    assert rig.app.state.epoch == 0
+
+
+async def test_epoch_change_without_a_recent_reload_reloads_the_registry(rig, monkeypatch):
+    script(monkeypatch, [Publish({"type": "status", "data": {"reason": "epoch_changed"}})])
+    rig.now = 3.0
+    await rig.app.feed(TimerFired("t", "k"))
+    assert rig.app._last_reload == 3.0
+    assert statuses(rig)[-1] == "epoch_changed"
+
+
+async def test_epoch_change_right_after_a_reload_does_not_reload_again(rig, monkeypatch):
+    await rig.app.reload_registry()
+    rig.now = 9.9
+    script(monkeypatch, [Publish({"type": "status", "data": {"reason": "epoch_changed"}})])
+    await rig.app.feed(TimerFired("t", "k"))
+    assert rig.app._last_reload == 0.0

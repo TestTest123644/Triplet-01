@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 from city_brain.core.estimator import WaterFilter
 from city_brain.core.shield import ShieldResult, TokenBucket
 from city_brain.core.trust import VerdictLedger
-from city_brain.domain.types import ActionIntent, ActionStatus, DeviceProfile, EvidenceRef
+from city_brain.domain.types import ActionIntent, ActionStatus, DeviceProfile, EvidenceRef, Verdict
 
 
 @dataclass
@@ -64,6 +64,12 @@ class BrainState:
     last_hold: dict[str, str | None] = field(default_factory=dict)
     plan_version: dict[str, int] = field(default_factory=dict)
     recent: dict[str, deque[EvidenceRef]] = field(default_factory=dict)
+    # Devices seen going backwards, and the global tick of the first: a restart needs several.
+    epoch_candidates: set[str] = field(default_factory=set)
+    epoch_candidate_tick: int | None = None
+    device_verdicts: dict[str, Verdict] = field(default_factory=dict)  # newest per device
+    last_heard: dict[str, int] = field(default_factory=dict)  # tick of the channel's last reading
+    silent: set[str] = field(default_factory=set)  # channels already alerted as silent
 
     @classmethod
     def new(cls, policy: dict, params: dict) -> "BrainState":

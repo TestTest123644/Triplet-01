@@ -7,7 +7,7 @@ verification:
   open_rate_max: -0.01
   open_window_s: 3.0
   close_rate_min: 0.005
-  close_window_s: 5.0
+  close_window_s: 15.0
 shield:
   cooldown_s:
     valve: 5.0
@@ -25,3 +25,6 @@ trust:
 epochs:
   seq_drop: 100
   ts_back_s: 60
+  confirm_devices: 5
+  confirm_ticks: 20
+  seq_jump_max: 6000

@@ -4,6 +4,8 @@ from types import SimpleNamespace
 import pytest
 
 from city_brain.config import load_config
+from dataclasses import replace
+
 from city_brain.core.water import WaterContext, commanded_ratio, plan_water_t0, water_hold_reason
 from city_brain.core.estimator import WaterFilter
 from city_brain.domain.ids import action_id
@@ -36,7 +38,7 @@ def ctx(level, valve="closed", flags=(), below_for_s=None, initialised=True, rec
         device_id=DEVICE, zone_id="zone-1", filter=fake_filter(level, flags, initialised, stale),
         valve_state=valve, recent=refs() if recent is None else recent,
         below_low_since=None if below_for_s is None else now - timedelta(seconds=below_for_s),
-        now=now, plan_version=plan_version, global_tick=1,
+        now=now, plan_version=plan_version, global_tick=1, target=DEVICE,
     )
 
 
@@ -73,7 +75,7 @@ def test_close_needs_sustained_low():
     i = plan_water_t0(ctx(level=2.9, valve="open", below_for_s=5.0), POLICY)
     assert i.risk_class is RiskClass.R2 and i.state == "closed"
     assert i.expected_effect.comparator == ">=" and i.expected_effect.threshold == 0.005
-    assert i.expected_effect.window_s == 5.0
+    assert i.expected_effect.window_s == 15.0
     assert i.alternatives[0].option == "keep open"
     assert i.alternatives[0].rejected_because == "level below low band for close_sustain_s"
 
@@ -117,8 +119,8 @@ def test_stale_filter_never_planned():
 def test_real_filter_goes_stale():
     f = WaterFilter(CFG.params["filter"])
     f.update(value=6.5, tick=1, weight=1.0, u=0.0)
-    assert plan_water_t0(WaterContext(DEVICE, "zone-1", f, "closed", refs(), None, T0, 2, 1), POLICY)
-    late = WaterContext(DEVICE, "zone-1", f, "closed", refs(), None, T0, 2, 1 + 20)
+    assert plan_water_t0(WaterContext(DEVICE, "zone-1", f, "closed", refs(), None, T0, 2, 1, DEVICE), POLICY)
+    late = WaterContext(DEVICE, "zone-1", f, "closed", refs(), None, T0, 2, 1 + 20, DEVICE)
     assert plan_water_t0(late, POLICY) is None and water_hold_reason(late, POLICY) == "STALE"
 
 
@@ -160,7 +162,7 @@ def test_hold_reason_priority():
 def test_real_filter_accepted():
     f = WaterFilter(CFG.params["filter"])
     f.update(value=6.5, tick=1, weight=1.0, u=0.0)
-    c = WaterContext(DEVICE, "zone-1", f, "closed", refs(), None, T0, 2, 1)
+    c = WaterContext(DEVICE, "zone-1", f, "closed", refs(), None, T0, 2, 1, DEVICE)
     assert plan_water_t0(c, POLICY).incident_id == f"flood-risk:{DEVICE}:2"
 
 
@@ -194,3 +196,19 @@ def test_evidence_count_below_one_is_config_error():
     bad = {**POLICY, "water": {**POLICY["water"], "evidence_count": 0}}
     with pytest.raises(ValueError):
         plan_water_t0(ctx(level=7.0), bad)
+
+
+def test_untrusted_device_holds_and_plans_nothing():
+    c = replace(ctx(level=8.0), untrusted=True)
+    assert water_hold_reason(c, POLICY) == "UNTRUSTED_READINGS"
+    assert plan_water_t0(c, POLICY) is None
+
+
+def test_stale_outranks_untrusted():
+    assert water_hold_reason(replace(ctx(level=8.0, stale=True), untrusted=True), POLICY) == "STALE"
+
+
+def test_intent_targets_the_actuator_and_measures_the_sensor():
+    i = plan_water_t0(replace(ctx(level=6.5), target="z1-v1"), POLICY)
+    assert i.target == "z1-v1" and i.expected_effect.channel == DEVICE
+    assert i.action_id == action_id(i.incident_id, "valve", "z1-v1", "open", 1)

@@ -137,7 +137,7 @@ def dispatch(state: BrainState, record: ActionRecord) -> list[Effect]:
     state.last_command_at[intent.target] = state.sim_now
     # Published first: the log must show the dispatch even if the send never returns.
     return [
-        _transition(state, record, ActionStatus.DISPATCHED, ()),
+        _transition(state, record, ActionStatus.DISPATCHED, (), evidence=intent.evidence),
         SendCommand(intent.action_id, record.key, intent.capability, intent.target, intent.state),
     ]
 
@@ -181,7 +181,9 @@ def on_estimate(state: BrainState) -> list[Effect]:
         record = state.actions[action_id]
         if record.status is not ActionStatus.VERIFYING:
             continue
-        if (state.sim_now - record.dispatched_at).total_seconds() >= record.intent.expected_effect.window_s:
+        # The wait lets the verdicts on the window's readings land before they are counted.
+        due_s = record.intent.expected_effect.window_s + float(state.policy["trust"]["verdict_wait_s"])
+        if (state.sim_now - record.dispatched_at).total_seconds() >= due_s:
             effects.extend(_verify(state, record))
     return effects
 
@@ -236,7 +238,8 @@ def _resolve(state: BrainState, ref: EvidenceRef) -> tuple[EvidenceRef, bool]:
     current = device.status if device is not None else DeviceStatus.ISOLATED
     status = current if ref.device_status is DeviceStatus.OK else ref.device_status
     weight = trust_weight(verdict, status, state.policy["trust"]["caps"])
-    return evidence_ref(ref, verdict, weight), verdict is None and ref.verdict_id is not None
+    known = ref.verdict_id is not None or state.ledger.latest(ref.reading_id, ref.sig_hash) is not None
+    return evidence_ref(ref, verdict, weight), verdict is None and known
 
 
 def _check_trust(state: BrainState, record: ActionRecord) -> tuple[bool | None, tuple[str, ...]]:
@@ -269,11 +272,12 @@ def _transition(
     status: ActionStatus,
     reasons: tuple[str, ...],
     reply: dict | None = None,
+    evidence: tuple[EvidenceRef, ...] = (),
 ) -> Publish:
     record.status = status
     record.reasons = reasons
     # `tool_call` is the runtime's: the core knows capabilities, not partner tools.
-    return Publish(command_event(state, record.intent, record.shield, status, None, reply, reasons))
+    return Publish(command_event(state, record.intent, record.shield, status, None, reply, reasons, evidence))
 
 
 def _decision(state: BrainState, record: ActionRecord) -> Publish:
@@ -286,11 +290,11 @@ def _decision(state: BrainState, record: ActionRecord) -> Publish:
 
 
 def _adopt_state(state: BrainState, intent: ActionIntent) -> None:
-    device = state.registry.get(intent.target)
-    if device is None or device.actuator is None:
-        return
-    actuator = device.actuator.model_copy(update={"current_state": intent.state})
-    state.registry[intent.target] = device.model_copy(update={"actuator": actuator})
+    """Every device that reports this actuator now reads the commanded state."""
+    for device_id, device in state.registry.items():
+        if device.actuator is not None and device.actuator.target == intent.target:
+            actuator = device.actuator.model_copy(update={"current_state": intent.state})
+            state.registry[device_id] = device.model_copy(update={"actuator": actuator})
 
 
 def _untrusted_ticks(state: BrainState, record: ActionRecord) -> list[int]:
@@ -301,6 +305,14 @@ def _untrusted_ticks(state: BrainState, record: ActionRecord) -> list[int]:
         if verdict is None or verdict.state not in COUNTS_FOR_VERIFICATION:
             ticks.append(tick)
     return ticks
+
+
+def _has_untrusted_verdict(state: BrainState, record: ActionRecord) -> bool:
+    for _, reading_id, sig_hash in record.window_readings:
+        verdict = state.ledger.lookup(reading_id, sig_hash, state.sim_now)
+        if verdict is not None and verdict.state not in COUNTS_FOR_VERIFICATION:
+            return True
+    return False
 
 
 def _verify(state: BrainState, record: ActionRecord) -> list[Effect]:
@@ -324,10 +336,12 @@ def _verify(state: BrainState, record: ActionRecord) -> list[Effect]:
     ))]
     if verdict == "verified":
         return effects
-    state.suspect.add(intent.target)
-    if slope is None:
+    if slope is None and _has_untrusted_verdict(state, record):
+        message = f"Measurements for {intent.state} on {intent.target} were excluded as untrusted."
+    elif slope is None:
         message = f"No measurements were available to check {intent.state} on {intent.target}."
     else:
+        state.suspect.add(intent.target)  # only a measured failure condemns the actuator
         message = f"{intent.state} on {intent.target} had no observed effect."
     message += " The command is not resent."
     refs = {**_refs(intent), "observed_slope": slope}

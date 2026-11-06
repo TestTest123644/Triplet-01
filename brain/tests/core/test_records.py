@@ -183,8 +183,8 @@ def test_epoch_change_resets_sequence_and_carries_new_epoch():
     s = fresh_state()
     s, _ = step(s, RegistryLoaded(devices=()))
     s, _ = step(s, ReadingReceived(traffic_reading(seq=5000, sim_time=T0 + timedelta(seconds=500))))
-    s, fx = step(s, ReadingReceived(traffic_reading(seq=3, sim_time=T0, reading_id="r-n", sig_hash="new")))
-    [ev] = [e.event for e in fx if isinstance(e, Publish)]
+    s, fx = step(s, RegistryLoaded(devices=(), keys_changed=True))
+    ev = fx[-1].event
     assert ev["data"]["reason"] == "epoch_changed"
     assert ev["epoch"] == 1 and ev["id"] == "1-0"
     jsonschema.validate(ev, BRAIN_EVENT_SCHEMA)

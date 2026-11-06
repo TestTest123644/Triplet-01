@@ -11,6 +11,7 @@ from city_brain.domain.types import DeviceProfile, Observation, Verdict
 class RegistryLoaded:
     devices: tuple[DeviceProfile, ...]
     allowlist: Mapping[str, frozenset[str]] = field(default_factory=dict)  # empty refuses every state
+    keys_changed: bool = False  # the partner's device keys differ: it restarted (spec 9.3)
 
 
 @dataclass(frozen=True)

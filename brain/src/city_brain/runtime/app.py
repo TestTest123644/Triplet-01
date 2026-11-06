@@ -33,6 +33,7 @@ BAD_SIGNATURE = "BAD_SIGNATURE"
 RELOAD_DEVICES = 5  # distinct devices (spec 9.3)
 RELOAD_WINDOW_S = 1.0
 RELOAD_MIN_GAP_S = 10.0
+EPOCH_CHANGED = "epoch_changed"
 DISPATCHED_COMMAND = ("tn.tsyp.brain.command.v1", "DISPATCHED")
 
 
@@ -64,6 +65,7 @@ class BrainApp:
         self._wall_now = wall_now
         self._bad_signatures: dict[str, float] = {}  # device id -> wall time of its latest reject
         self._last_reload: float | None = None
+        self._keys: dict[str, str] = {}  # as last loaded
 
     async def start(self) -> None:
         await self._load_registry()
@@ -98,17 +100,21 @@ class BrainApp:
                 if result is not None:
                     pending.append(result)  # after this batch: the core has one writer and one order
             handled.extend(effects)
+        if self._needs_reload(handled):
+            await self.reload_registry()  # the restarted Twin's actuators and keys, not the old ones
         return handled
 
     async def _load_registry(self) -> None:
         raw_devices, keys, _ = await self._twin.load_registry()
+        keys_changed = any(self._keys[d] != keys[d] for d in self._keys.keys() & keys.keys())
+        self._keys = dict(keys)
         devices = tuple(self._profile.map_device(raw) for raw in raw_devices)
         self._keyring.clear()
         for device_id, key in keys.items():
             self._keyring.set(device_id, key)
         self._registry.clear()
         self._registry.update({device.device_id: device for device in devices})
-        await self.feed(RegistryLoaded(devices, allowlist=self._profile.allowlist))
+        await self.feed(RegistryLoaded(devices, allowlist=self._profile.allowlist, keys_changed=keys_changed))
 
     def _burst_of_bad_signatures(self, rejected: Rejected) -> bool:
         if rejected.code != BAD_SIGNATURE or rejected.device_id is None:
@@ -116,9 +122,15 @@ class BrainApp:
         now = self._wall_now()
         self._bad_signatures[rejected.device_id] = now
         self._bad_signatures = {d: t for d, t in self._bad_signatures.items() if now - t <= RELOAD_WINDOW_S}
-        if len(self._bad_signatures) < RELOAD_DEVICES:
-            return False
-        return self._last_reload is None or now - self._last_reload >= RELOAD_MIN_GAP_S
+        return len(self._bad_signatures) >= RELOAD_DEVICES and self._reload_allowed()
+
+    def _reload_allowed(self) -> bool:
+        return self._last_reload is None or self._wall_now() - self._last_reload >= RELOAD_MIN_GAP_S
+
+    def _needs_reload(self, effects: list[Effect]) -> bool:
+        changed = any(
+            isinstance(e, Publish) and e.event["data"].get("reason") == EPOCH_CHANGED for e in effects)
+        return changed and self._reload_allowed()
 
     async def _handle(self, effect: Effect) -> CommandResult | None:
         if isinstance(effect, Publish):

@@ -123,6 +123,7 @@ def command_event(
     tool_call: dict | None,
     twin_reply: dict | None,
     reasons: Sequence[str],
+    evidence: Sequence = (),
 ) -> dict:
     data = {
         "status": status,
@@ -136,6 +137,8 @@ def command_event(
         "reasons": reasons,
         "expected": intent.expected_effect,
     }
+    if evidence:
+        data["evidence"] = evidence
     return _envelope(state, "command", intent.target, data, intent.incident_id, intent.action_id)
 
 

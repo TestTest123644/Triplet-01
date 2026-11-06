@@ -37,11 +37,11 @@ This is `2026-11-05-city-brain-p1-vertical-slice.md` with the deltas of the fina
 - `src/city_brain/core/` imports nothing from `adapters/`, `runtime/`, `asyncio`, `time`, `random`, `datetime.now`, `uuid`, and contains no Twin-specific literals (`twin.sensors`, `set_valve`, `z1-`, `zone-1`, `meters`). Enforced by `tests/test_core_purity.py` (Task 9).
 - Every threshold below comes from `policy/default.yaml` or `params/twin-triplet07-v1.yaml`, never a literal in `core/`:
   - water: `high_band: 6.0`, `low_band: 3.0`, `close_sustain_s: 5.0`, `evidence_count: 3`
-  - verification: `open_rate_max: -0.01`, `open_window_s: 3.0`, `close_rate_min: 0.005`, `close_window_s: 5.0`
+  - verification: `open_rate_max: -0.01`, `open_window_s: 3.0`, `close_rate_min: 0.005`, `close_window_s: 15.0`
   - shield: `cooldown_s.valve: 5.0`, `rate_limit: {burst: 8, per_s: 2.0}`
   - trust: `verdict_wait_s: 2.0` (wall), `pending_weight: 0.5`, caps `TRUSTED 1.0, DOUBTFUL 0.5, UNTRUSTED 0.0, UNKNOWN 0.0`
   - filter: `sample_period_s: 0.1`, `r0: 2.5e-5`, `q_level: 1.0e-8`, `q_inflow: 1.0e-8`, `b_prior: 0.045`, `jump_sigma: 6.0`, `stuck_ticks: 30`, `stale_s: 2.0`
-  - epochs: `seq_drop: 100`, `ts_back_s: 60`
+  - epochs: `seq_drop: 100`, `ts_back_s: 60`, `confirm_devices: 5`, `confirm_ticks: 20`, `seq_jump_max: 6000`
 - Risk classes (spec §8.6): valve `open` or ratio increase = R1; valve `closed` or ratio decrease = R2. R1 needs every cited reading TRUSTED or DOUBTFUL and at least one TRUSTED; R2 needs every cited reading TRUSTED.
 - Brain events are CloudEvents 1.0 dicts; the core never sets `time` (wall clock); the log sink adds it. Determinism comparisons ignore `time`, `hash` and `prev_hash`.
 - `sig_hash(sig)` = first 16 hex chars of SHA-256 over the UTF-8 bytes of the base64 `sig` string.
