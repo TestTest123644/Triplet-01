@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
 from city_brain.core.estimator import WaterFilter
+from city_brain.core.trust import VerdictLedger
 from city_brain.domain.types import DeviceProfile
 
 
@@ -28,6 +29,7 @@ class BrainState:
     filters: dict[str, WaterFilter] = field(default_factory=dict)
     counters: Counter[str] = field(default_factory=Counter)
     event_seq: int = 0
+    ledger: VerdictLedger = field(default_factory=VerdictLedger)
 
     @classmethod
     def new(cls, policy: dict, params: dict) -> "BrainState":

@@ -9,6 +9,7 @@ from city_brain.core.events import (
     ReadingReceived,
     ReadingRejected,
     RegistryLoaded,
+    VerdictReceived,
 )
 from city_brain.core.state import BrainState, DeviceCursor
 from city_brain.domain.types import DeviceStatus, Observation, SensorKind
@@ -28,6 +29,12 @@ def step(state: BrainState, event: Event) -> tuple[BrainState, list[Effect]]:
         state.counters[event.code] += 1
     elif isinstance(event, ReadingReceived):
         _ingest(state, event, effects)
+    elif isinstance(event, VerdictReceived):
+        state.ledger.add(event.verdict)
+        # sim_now is undefined before the first accepted reading; park without pruning.
+        if state.epoch_origin is not None:
+            state.ledger.prune(state.sim_now)
+        # Task 15 re-evaluates pending actions here.
     return state, effects
 
 
