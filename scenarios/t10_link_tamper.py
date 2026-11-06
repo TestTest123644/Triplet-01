@@ -15,21 +15,43 @@ from typing import List
 
 # Zero twin.* imports
 sys.path.insert(0, os.path.dirname(__file__))
-from _twin_common import ScenarioContext, make_common_parser, verify_payload_signature
+from _twin_common import ScenarioContext, make_common_parser, verify_payload_signature, parse_sim_timestamp
 
 
 def _parse_ts(ts_str: str) -> float:
-    try:
-        s = ts_str.strip()
-        if s.endswith("Z"):
-            s = s[:-1] + "+00:00"
-        return datetime.fromisoformat(s).timestamp()
-    except Exception:
-        return 0.0
+    return parse_sim_timestamp(ts_str)
 
 
 def run_mode(ctx: ScenarioContext, mode: str) -> bool:
     print(f"[{ctx.scenario_id}] --- Testing Link Mode: {mode} on z3-tc1 ---")
+
+    # Before each mode: clear previous attack, reinstate device, and sync wire stream
+    try:
+        ctx.rest.clear_event("all")
+        ctx.rest.clear_attack("all")
+        ctx.mcp.call_tool("reinstate_device", {"device_id": "z3-tc1"})
+    except Exception as e:
+        ctx.log_event("", "scenario", "pre_mode_clear_error", {"error": str(e), "mode": mode})
+
+    # Wait until z3-tc1 frames are current again (ts within 2 sim-s of stream head)
+    head_ts = 0.0
+    tc1_ts = 0.0
+    sync_start = time.time()
+    while time.time() - sync_start < 15.0:
+        frames = ctx.wire.drain(max_seconds=0.5)
+        for _, p in frames:
+            t = _parse_ts(p.get("ts", ""))
+            if t > head_ts:
+                head_ts = t
+            if p.get("device_id") == "z3-tc1":
+                if t > tc1_ts:
+                    tc1_ts = t
+        if head_ts > 0 and tc1_ts > 0 and (head_ts - tc1_ts) < 2.0:
+            break
+
+    # Record injection sim time before injecting attack
+    inj_sim_time = ctx.get_sim_time_seconds()
+
     inj_res = ctx.rest.inject_event({
         "capability": "link",
         "target_device_id": "z3-tc1",
@@ -44,9 +66,12 @@ def run_mode(ctx: ScenarioContext, mode: str) -> bool:
     if mode in ("corrupt_bytes", "corrupt_sig"):
         print(f"[{ctx.scenario_id}] [{mode}] Verifying signature failures / corruption on wire...")
         sig_failed = False
-        deadline = time.time() + 15.0
-        while time.time() < deadline:
-            frames = ctx.wire.drain(max_seconds=0.5, max_items=100)
+        start_sim = ctx.get_sim_time_seconds()
+        sim_duration = max(15.0 * max(0.1, ctx.sim_speed), 300.0)
+        deadline_sim = start_sim + sim_duration
+        wall_safety = time.time() + 20.0
+        while True:
+            frames = ctx.wire.drain(max_seconds=0.5)
             for raw_b, p in frames:
                 if p.get("device_id") == "z3-tc1":
                     if p.get("_corrupted") or not verify_payload_signature(p, pub_key):
@@ -54,7 +79,8 @@ def run_mode(ctx: ScenarioContext, mode: str) -> bool:
                         break
             if sig_failed:
                 break
-            time.sleep(0.2)
+            if ctx.get_sim_time_seconds() >= deadline_sim or time.time() >= wall_safety:
+                break
         ctx.record_check(f"{mode}_sig_failure_on_wire", sig_failed, "Wire payload corrupted or invalid signature")
 
         print(f"[{ctx.scenario_id}] [{mode}] Waiting for Guardian quarantine on z3-tc1...")
@@ -64,7 +90,7 @@ def run_mode(ctx: ScenarioContext, mode: str) -> bool:
                 and e.get("detail", {}).get("tool") == "quarantine_device"
                 and (e.get("detail", {}).get("target") == "z3-tc1" or e.get("detail", {}).get("device_id") == "z3-tc1")
             ),
-            timeout=30.0,
+            timeout=35.0,
         )
         ctx.record_check(f"z3_tc1_quarantined_for_{mode}", entry is not None, f"containment: {entry.get('detail') if entry else 'None'}")
 
@@ -72,9 +98,12 @@ def run_mode(ctx: ScenarioContext, mode: str) -> bool:
         print(f"[{ctx.scenario_id}] [replay] Verifying duplicate reading_id on wire...")
         seen_ids = collections.defaultdict(int)
         duplicate_seen = False
-        deadline = time.time() + 15.0
-        while time.time() < deadline:
-            frames = ctx.wire.drain(max_seconds=0.5, max_items=200)
+        start_sim = ctx.get_sim_time_seconds()
+        sim_duration = max(15.0 * max(0.1, ctx.sim_speed), 300.0)
+        deadline_sim = start_sim + sim_duration
+        wall_safety = time.time() + 20.0
+        while True:
+            frames = ctx.wire.drain(max_seconds=0.5)
             for _, p in frames:
                 if p.get("device_id") == "z3-tc1":
                     rid = p.get("reading_id")
@@ -85,7 +114,8 @@ def run_mode(ctx: ScenarioContext, mode: str) -> bool:
                             break
             if duplicate_seen:
                 break
-            time.sleep(0.2)
+            if ctx.get_sim_time_seconds() >= deadline_sim or time.time() >= wall_safety:
+                break
         ctx.record_check("z3_tc1_reading_id_seen_twice_on_wire", duplicate_seen, f"duplicate seen: {duplicate_seen}")
 
         print(f"[{ctx.scenario_id}] [replay] Waiting for Guardian replay detection and isolation...")
@@ -95,7 +125,7 @@ def run_mode(ctx: ScenarioContext, mode: str) -> bool:
                 and e.get("detail", {}).get("tool") == "isolate_device"
                 and (e.get("detail", {}).get("target") == "z3-tc1" or e.get("detail", {}).get("device_id") == "z3-tc1")
             ),
-            timeout=30.0,
+            timeout=35.0,
         )
         ctx.record_check("z3_tc1_isolated_for_replay", entry is not None, f"isolation: {entry.get('detail') if entry else 'None'}")
 
@@ -103,10 +133,13 @@ def run_mode(ctx: ScenarioContext, mode: str) -> bool:
         print(f"[{ctx.scenario_id}] [delay] Verifying frame ts lags stream head on wire...")
         head_ts = 0.0
         tc1_ts = 0.0
-        deadline = time.time() + 15.0
         lag_detected = False
-        while time.time() < deadline:
-            frames = ctx.wire.drain(max_seconds=0.5, max_items=200)
+        start_sim = ctx.get_sim_time_seconds()
+        sim_duration = max(15.0 * max(0.1, ctx.sim_speed), 300.0)
+        deadline_sim = start_sim + sim_duration
+        wall_safety = time.time() + 20.0
+        while True:
+            frames = ctx.wire.drain(max_seconds=0.5)
             for _, p in frames:
                 t = _parse_ts(p.get("ts", ""))
                 if t > head_ts:
@@ -116,7 +149,8 @@ def run_mode(ctx: ScenarioContext, mode: str) -> bool:
             if head_ts > 0 and tc1_ts > 0 and (head_ts - tc1_ts) >= 1.0:
                 lag_detected = True
                 break
-            time.sleep(0.2)
+            if ctx.get_sim_time_seconds() >= deadline_sim or time.time() >= wall_safety:
+                break
         ctx.record_check("z3_tc1_frame_ts_lags_stream_head", lag_detected, f"head_ts - tc1_ts = {head_ts - tc1_ts:.2f}s")
 
         print(f"[{ctx.scenario_id}] [delay] Waiting for Guardian late frame detection and isolation...")
@@ -133,14 +167,20 @@ def run_mode(ctx: ScenarioContext, mode: str) -> bool:
     elif mode == "drop":
         print(f"[{ctx.scenario_id}] [drop] Verifying frames for z3-tc1 cease on wire...")
         received_z3 = 0
-        deadline = time.time() + 5.0
-        while time.time() < deadline:
-            frames = ctx.wire.drain(max_seconds=0.5, max_items=100)
+        start_sim = ctx.get_sim_time_seconds()
+        sim_duration = max(5.0 * max(0.1, ctx.sim_speed), 100.0)
+        deadline_sim = start_sim + sim_duration
+        wall_safety = time.time() + 5.0
+        while True:
+            frames = ctx.wire.drain(max_seconds=0.5)
             for _, p in frames:
                 if p.get("device_id") == "z3-tc1":
-                    received_z3 += 1
-            time.sleep(0.2)
-        ctx.record_check("z3_tc1_frames_dropped_on_wire", received_z3 == 0, f"received {received_z3} frames (expected 0)")
+                    t = _parse_ts(p.get("ts", ""))
+                    if t > inj_sim_time:
+                        received_z3 += 1
+            if ctx.get_sim_time_seconds() >= deadline_sim or time.time() >= wall_safety:
+                break
+        ctx.record_check("z3_tc1_frames_dropped_on_wire", received_z3 == 0, f"received {received_z3} frames with ts > injection sim time (expected 0)")
 
     return True
 

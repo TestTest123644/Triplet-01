@@ -493,6 +493,18 @@ class TestJournals:
 class TestEndToEndAuthAndTransports:
     """Requirement 8.f: Live uvicorn server testing over /sse and /mcp with bearer token auth."""
 
+    def test_parse_auth_tokens_strict_principal_token(self, monkeypatch):
+        """Verify parse_auth_tokens strictly parses principal:token into {token: principal}."""
+        from twin.mcp_server import parse_auth_tokens
+
+        monkeypatch.setenv("MCP_AUTH_TOKENS", "brain:tok-b,guardian:tok-g,scenario:tok-s")
+        parsed = parse_auth_tokens()
+        assert parsed == {
+            "tok-b": "brain",
+            "tok-g": "guardian",
+            "tok-s": "scenario",
+        }
+
     @pytest.mark.asyncio
     async def test_live_auth_sse_and_mcp(self, tmp_path, monkeypatch):
         port = find_free_port()

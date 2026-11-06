@@ -32,9 +32,11 @@ def run(ctx: ScenarioContext) -> bool:
     wl1_sig_valid = False
     wl2_nominal = False
 
-    deadline = time.time() + 15.0
-    while time.time() < deadline:
-        frames = ctx.wire.drain(max_seconds=0.5, max_items=1000)
+    start_sim = ctx.get_sim_time_seconds()
+    deadline_sim = start_sim + 300.0
+    wall_safety = time.time() + (300.0 / max(0.1, ctx.sim_speed)) + 20.0
+    while True:
+        frames = ctx.wire.drain(max_seconds=0.5)
         for _, p in frames:
             did = p.get("device_id")
             val = float(p.get("value", 0.0))
@@ -48,7 +50,8 @@ def run(ctx: ScenarioContext) -> bool:
                     wl2_nominal = True
         if wl1_spoofed and wl1_sig_valid and wl2_nominal:
             break
-        time.sleep(0.2)
+        if ctx.get_sim_time_seconds() >= deadline_sim or time.time() >= wall_safety:
+            break
 
     ctx.record_check("spoofed_reading_broadcast", wl1_spoofed, "z2-wl1 value >= 9.0m")
     ctx.record_check("spoofed_reading_signature_verified", wl1_sig_valid, "Ed25519 signature verified on spoofed frame")

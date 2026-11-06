@@ -77,7 +77,7 @@ def run(ctx: ScenarioContext) -> bool:
     print(f"[{ctx.scenario_id}] Verifying physical level rises >= 0.3m over 5 sim-min despite reported open...")
     level_start = 0.0
     level_end = 0.0
-    frames = ctx.wire.drain(max_seconds=1.0, max_items=100)
+    frames = ctx.wire.drain(max_seconds=1.0)
     for _, p in frames:
         if p.get("device_id") == "z2-wl1":
             level_start = float(p.get("value", 0.0))
@@ -104,7 +104,7 @@ def run(ctx: ScenarioContext) -> bool:
                     break
 
     if level_end <= 0.0:
-        frames = ctx.wire.drain(max_seconds=2.0, max_items=2000)
+        frames = ctx.wire.drain(max_seconds=2.0)
         for _, p in frames:
             if p.get("device_id") == "z2-wl1":
                 level_end = float(p.get("value", 0.0))

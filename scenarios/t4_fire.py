@@ -30,9 +30,11 @@ def run(ctx: ScenarioContext) -> bool:
     print(f"[{ctx.scenario_id}] Monitoring z5-aq1 for fire plume (AQI > 150)...")
     aqi_elevated = False
     peak_aqi = 0.0
-    deadline = time.time() + 25.0
-    while time.time() < deadline:
-        frames = ctx.wire.drain(max_seconds=0.5, max_items=100)
+    start_sim = ctx.get_sim_time_seconds()
+    deadline_sim = start_sim + 600.0
+    wall_safety = time.time() + (600.0 / max(0.1, ctx.sim_speed)) + 30.0
+    while True:
+        frames = ctx.wire.drain(max_seconds=0.5)
         for _, p in frames:
             if p.get("device_id") == "z5-aq1":
                 val = float(p.get("value", 0.0))
@@ -43,7 +45,8 @@ def run(ctx: ScenarioContext) -> bool:
                     break
         if aqi_elevated:
             break
-        time.sleep(0.5)
+        if ctx.get_sim_time_seconds() >= deadline_sim or time.time() >= wall_safety:
+            break
 
     ctx.record_check("aqi_exceeded_150", aqi_elevated, f"peak AQI: {peak_aqi:.1f} (> 150)")
 

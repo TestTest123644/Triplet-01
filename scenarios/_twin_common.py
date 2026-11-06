@@ -53,6 +53,19 @@ def verify_payload_signature(payload: Dict[str, Any], pub_key_b64: str) -> bool:
         return False
 
 
+def parse_sim_timestamp(ts_str: str) -> float:
+    """Parse ISO8601 or sim timestamp to float seconds."""
+    if not ts_str:
+        return 0.0
+    try:
+        s = ts_str.strip()
+        if s.endswith("Z"):
+            s = s[:-1] + "+00:00"
+        return datetime.fromisoformat(s).timestamp()
+    except Exception:
+        return 0.0
+
+
 # ==============================================================================
 # 2. HTTP Red-Team REST Client
 # ==============================================================================
@@ -259,15 +272,24 @@ class WireConsumer:
                 return val_bytes, {"_corrupted": True}
         return None
 
-    def drain(self, max_seconds: float = 2.0, max_items: int = 1000) -> List[Tuple[bytes, Dict[str, Any]]]:
+    def drain(self, max_seconds: float = 2.0, max_items: Optional[int] = None) -> List[Tuple[bytes, Dict[str, Any]]]:
+        """Drain available frames until consumer is empty or deadline expires."""
         res = []
         start = time.time()
-        while time.time() - start < max_seconds and len(res) < max_items:
-            item = self.poll(timeout=0.05)
-            if item:
-                res.append(item)
-            elif res:
+        # Initial poll to wait for next message if consumer is briefly quiet
+        item = self.poll(timeout=0.05)
+        if not item:
+            return res
+        res.append(item)
+        while True:
+            if max_items is not None and len(res) >= max_items:
                 break
+            if time.time() - start >= max_seconds:
+                break
+            item = self.poll(timeout=0.001)
+            if item is None:
+                break
+            res.append(item)
         return res
 
     def close(self) -> None:
@@ -295,12 +317,8 @@ def resolve_tokens(
         for part in raw.split(","):
             part = part.strip()
             if ":" in part:
-                p1, p2 = part.split(":", 1)
-                p1, p2 = p1.strip(), p2.strip()
-                if p2.lower() in ("brain", "guardian", "scenario"):
-                    env_tokens[p2.lower()] = p1
-                else:
-                    env_tokens[p1.lower()] = p2
+                principal, token = part.split(":", 1)
+                env_tokens[principal.strip().lower()] = token.strip()
 
     b_tok = brain_token or os.getenv("MCP_BRAIN_TOKEN") or env_tokens.get("brain") or mcp_token
     g_tok = guardian_token or os.getenv("MCP_GUARDIAN_TOKEN") or env_tokens.get("guardian") or mcp_token
@@ -407,6 +425,15 @@ class ScenarioContext:
             return str(st.get("sim_time", ""))
         except Exception:
             return ""
+
+    def get_sim_time_seconds(self) -> float:
+        """Fetch current sim_time from /api/status as float seconds."""
+        ts_str = self.get_sim_ts_now()
+        if ts_str:
+            parsed = parse_sim_timestamp(ts_str)
+            if parsed > 0.0:
+                return parsed
+        return time.time()
 
     def log_event(self, sim_ts: str, layer: str, event: str, details: Dict[str, Any]) -> None:
         """Write single JSON line event to scenario log."""
@@ -524,11 +551,22 @@ class ScenarioContext:
         self,
         predicate: Callable[[Dict[str, Any]], bool],
         timeout: float = 30.0,
+        timeout_sim_seconds: Optional[float] = None,
         poll_interval: float = 0.5,
     ) -> Optional[Dict[str, Any]]:
         """Poll /api/journal until predicate matches an entry or deadline expires."""
-        deadline = time.time() + timeout
-        while time.time() < deadline:
+        if timeout_sim_seconds is not None:
+            start_sim = self.get_sim_time_seconds()
+            deadline_sim = start_sim + timeout_sim_seconds
+            wall_safety = time.time() + (timeout_sim_seconds / max(0.1, self.sim_speed)) + 30.0
+            def is_expired() -> bool:
+                return self.get_sim_time_seconds() >= deadline_sim or time.time() >= wall_safety
+        else:
+            deadline = time.time() + timeout
+            def is_expired() -> bool:
+                return time.time() >= deadline
+
+        while not is_expired():
             journal = self.rest.get_journal(since_ts=self.start_sim_time, limit=1000)
             for entry in journal:
                 if self.start_sim_time and entry.get("sim_ts") and entry.get("sim_ts") < self.start_sim_time:

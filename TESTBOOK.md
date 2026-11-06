@@ -5,6 +5,23 @@ Each scenario verifies cyber-physical realism, adversarial resilience, and multi
 
 ---
 
+## Authentication & Verification Setup
+
+All scenarios and mocks execute as authenticated clients against the Twin runtime.
+Audit attribution in the ground-truth journal is strictly configured via:
+
+```bash
+export MCP_AUTH_TOKENS="brain:tok-b,guardian:tok-g,scenario:tok-s"
+export RED_TEAM_TOKEN="red-team-secret"
+```
+
+Principals and credentials:
+- **City Brain (Layer 2):** `Bearer tok-b` -> caller attribute `brain`
+- **Guardian (Layer 3):** `Bearer tok-g` -> caller attribute `guardian`
+- **Scenario Runner:** `Bearer tok-s` -> caller attribute `scenario`
+
+---
+
 ## Twin Test Suite (Layer 1)
 
 ### T1: Baseline Telemetry Stream Conformance

@@ -63,17 +63,11 @@ def parse_auth_tokens() -> Dict[str, str]:
     if not raw:
         return {}
     tokens: Dict[str, str] = {}
-    known_principals = {"brain", "guardian", "scenario"}
     for part in raw.split(","):
         part = part.strip()
         if ":" in part:
-            left, right = part.split(":", 1)
-            left_s = left.strip()
-            right_s = right.strip()
-            if right_s.lower() in known_principals and left_s.lower() not in known_principals:
-                tokens[left_s] = right_s
-            else:
-                tokens[right_s] = left_s
+            principal, token = part.split(":", 1)
+            tokens[token.strip()] = principal.strip()
     return tokens
 
 

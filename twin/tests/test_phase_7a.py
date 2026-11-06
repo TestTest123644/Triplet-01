@@ -1025,3 +1025,59 @@ def test_6e_grep_isolation():
 
     assert r1.stdout.strip() == "", f"Found forbidden 'from twin' in mocks:\n{r1.stdout}"
     assert r2.stdout.strip() == "", f"Found forbidden 'import twin' in mocks:\n{r2.stdout}"
+
+
+def test_mock_guardian_containment_cleared_externally():
+    """Verify MockGuardian forgets containment and logs containment_cleared_externally on status='ok'."""
+    from mocks.mock_guardian import MockGuardian
+
+    class DummyMcpCaller:
+        def __init__(self):
+            self.calls = []
+
+        async def call_tool_async(self, tool, args):
+            self.calls.append((tool, args))
+            return {"status": "ok"}
+
+        async def close(self):
+            pass
+
+    guardian = MockGuardian(mcp_caller=DummyMcpCaller())
+    guardian.key_cache["z3-tc1"] = "fake_pub_key"
+    guardian.key_cache["z1-pl1"] = "fake_pub_key"
+    guardian.isolated_devices.append("z3-tc1")
+    guardian.quarantined_devices.append("z1-pl1")
+
+    # Frame with status 'isolated' should still be ignored
+    res_isolated = guardian.process_reading({
+        "device_id": "z3-tc1",
+        "reading_id": "r-1",
+        "status": "isolated",
+        "ts": "2026-11-06T08:00:00Z",
+    })
+    assert res_isolated["action"] == "device_already_contained"
+    assert "z3-tc1" in guardian.isolated_devices
+
+    # Frame with status 'ok' indicates external reinstatement
+    res_ok = guardian.process_reading({
+        "device_id": "z3-tc1",
+        "reading_id": "r-2",
+        "status": "ok",
+        "ts": "2026-11-06T08:00:01Z",
+        "device_type": "traffic_camera",
+        "value": 45.0,
+        "sig": "fake_sig",
+    })
+    assert "z3-tc1" not in guardian.isolated_devices
+
+    # Same for quarantined device
+    res_pl1 = guardian.process_reading({
+        "device_id": "z1-pl1",
+        "reading_id": "r-3",
+        "status": "ok",
+        "ts": "2026-11-06T08:00:02Z",
+        "device_type": "power_load",
+        "value": 50.0,
+        "sig": "fake_sig",
+    })
+    assert "z1-pl1" not in guardian.quarantined_devices

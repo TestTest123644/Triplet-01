@@ -202,15 +202,6 @@ class MockGuardian:
         if device_id and reading_id:
             self.last_device_reading_id[device_id] = reading_id
 
-        # Once a device is contained (isolated or quarantined), stop issuing new containment actions/rollbacks for it
-        if device_id in self.quarantined_devices or device_id in self.isolated_devices:
-            return {
-                "action": "device_already_contained",
-                "device_id": device_id,
-                "reading_id": reading_id,
-                "status": "quarantined" if device_id in self.quarantined_devices else "isolated",
-            }
-
         if sim_sec > self.newest_stream_sim_sec:
             self.newest_stream_sim_sec = sim_sec
 
@@ -234,6 +225,34 @@ class MockGuardian:
 
         late_threshold = max(2.0, 15.0 * ts_step)
         late_window = max(10.0, 5.0 * late_threshold)
+        is_late = bool(len(ts_hist) >= 5 and ts_step > 0.0 and (self.newest_stream_sim_sec - sim_sec) > late_threshold)
+
+        # Once a device is contained (isolated or quarantined), stop issuing new containment actions/rollbacks for it.
+        # If a fresh, current (not replayed, not late) frame arrives with status == "ok", external restoration occurred: clear containment.
+        status = str(payload.get("status", "ok"))
+        last_seq = self.last_device_seq.get(device_id)
+        is_replayed = (reading_id in self.seen_reading_ids) or (last_seq is not None and seq <= last_seq)
+
+        if device_id in self.quarantined_devices or device_id in self.isolated_devices:
+            if status == "ok" and not is_replayed and not is_late:
+                if device_id in self.isolated_devices:
+                    self.isolated_devices.remove(device_id)
+                    self._log_event(sim_ts, "containment_cleared_externally", {"device_id": device_id, "type": "isolated"})
+                if device_id in self.quarantined_devices:
+                    self.quarantined_devices.remove(device_id)
+                    self._log_event(sim_ts, "containment_cleared_externally", {"device_id": device_id, "type": "quarantined"})
+                self.sig_failures[device_id].clear()
+                self.late_events[device_id].clear()
+                self.replay_delay_events[device_id].clear()
+                self.device_ts_history[device_id].clear()
+                self.last_device_seq.pop(device_id, None)
+            else:
+                return {
+                    "action": "device_already_contained",
+                    "device_id": device_id,
+                    "reading_id": reading_id,
+                    "status": "quarantined" if device_id in self.quarantined_devices else "isolated",
+                }
 
         # 1. Late-frame rule: frame ts is > late_threshold older than newest stream ts -> flag late; 3 in late_window -> isolate
         if len(ts_hist) >= 5 and ts_step > 0.0 and (self.newest_stream_sim_sec - sim_sec) > late_threshold:

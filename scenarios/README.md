@@ -12,7 +12,7 @@ To ensure full auditability across all three layers, the Twin runtime enforces b
 
 ```bash
 # In twin/.env or execution environment:
-MCP_AUTH_TOKENS="tok-b:brain,tok-g:guardian,tok-s:scenario"
+MCP_AUTH_TOKENS="brain:tok-b,guardian:tok-g,scenario:tok-s"
 RED_TEAM_TOKEN="red-team-secret"
 ```
 
