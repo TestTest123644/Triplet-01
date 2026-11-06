@@ -211,15 +211,38 @@ def test_map_device():
     assert alt.max_val == pytest.approx(12.0)
 
 
-@pytest.mark.parametrize("pos,expected", [
-    ("open", "open"), ("closed", "closed"), ("33%", "ratio:33"), ("0%", "ratio:0"),
-    ("weird", "closed"), ("150%", "closed"), ("", "closed"),
+@pytest.mark.parametrize("pos,expected,flagged", [
+    ("open", "open", False), ("closed", "closed", False), ("33%", "ratio:33", False),
+    ("0%", "ratio:0", False), ("100%", "ratio:100", False),
+    ("150%", "ratio:100", True), ("33.5%", "ratio:34", True), ("-20%", "ratio:0", True),
+    ("weird", "closed", True), ("", "closed", True), ("x%", "closed", True), ("nan%", "closed", True),
+    (None, "closed", True),
 ])
-def test_canonical_actuator_state_valve(pos, expected):
+def test_canonical_actuator_state_valve(pos, expected, flagged):
     p = TwinProfile.load(TWIN)
     raw = {"device_type": "water_level", "actuator_state": {"valve_position": pos}}
     assert p.canonical_actuator_state(raw) == expected
-    assert p.actuator_state_with_flag(raw) == (expected, pos not in ("open", "closed") and expected == "closed")
+    assert p.actuator_state_with_flag(raw) == (expected, flagged)
+
+
+def test_ratio_must_be_canonical_form():
+    p = TwinProfile.load(TWIN)
+    with pytest.raises(StateNotAllowed):
+        p.to_tool_call("valve", "z1-wl1", "ratio:007")
+    assert p.to_tool_call("valve", "z1-wl1", "ratio:0").args["target_state"] == "0%"
+    assert p.to_tool_call("valve", "z1-wl1", "ratio:100").args["target_state"] == "100%"
+
+
+def test_inventory_carries_mock_data():
+    inv = TwinProfile.load(TWIN).inventory
+    assert inv["zone_coords"]["zone-1"] == {"lat": 36.8, "lon": 10.18}
+    wl1 = next(d for d in inv["devices"] if d["suffix"] == "wl1")
+    assert wl1["initial_actuator"] == {"valve_position": "closed", "valve_ratio": 0.0}
+    assert {d["suffix"]: d["initial_actuator"] for d in inv["devices"] if "initial_actuator" in d} == {
+        "tc1": {"signal_plan": "normal"}, "tc2": {"signal_plan": "normal"},
+        "wl1": {"valve_position": "closed", "valve_ratio": 0.0},
+        "wl2": {"valve_position": "closed", "valve_ratio": 0.0},
+        "pl1": {"grid_state": "grid_a"}}
 
 
 def test_canonical_actuator_state_others():

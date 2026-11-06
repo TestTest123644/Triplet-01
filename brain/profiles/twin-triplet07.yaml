@@ -22,12 +22,24 @@ inventory:         # read by the mock only; copied from twin/simulation.py
   zones: 6
   device_id: "z{zone}-{suffix}"
   zone_id: "zone-{zone}"
+  zone_coords:
+    zone-1: {lat: 36.8000, lon: 10.1800}
+    zone-2: {lat: 36.8050, lon: 10.2700}
+    zone-3: {lat: 36.8480, lon: 10.2050}
+    zone-4: {lat: 36.8150, lon: 10.1300}
+    zone-5: {lat: 36.8320, lon: 10.1550}
+    zone-6: {lat: 36.7550, lon: 10.2200}
+  device_offset:   # per device (idx = row order below): lat = round(zone_lat + idx*lat_step + lat_base, 6)
+    lat_step: 0.0012
+    lat_base: -0.0036
+    lon_step: 0.0015
+    lon_base: -0.0045
   devices:
-    - {suffix: tc1, type: traffic_camera, unit: "veh/min", min: 0.0, max: 200.0, init: 45.0}
-    - {suffix: tc2, type: traffic_camera, unit: "veh/min", min: 0.0, max: 200.0, init: 38.0}
-    - {suffix: wl1, type: water_level, unit: meters, min: 0.0, max: 12.0, init: 3.2}
-    - {suffix: wl2, type: water_level, unit: meters, min: 0.0, max: 12.0, init: 2.8}
-    - {suffix: pl1, type: power_load, unit: MW, min: 5.0, max: 120.0, init: 48.0}
+    - {suffix: tc1, type: traffic_camera, unit: "veh/min", min: 0.0, max: 200.0, init: 45.0, initial_actuator: {signal_plan: normal}}
+    - {suffix: tc2, type: traffic_camera, unit: "veh/min", min: 0.0, max: 200.0, init: 38.0, initial_actuator: {signal_plan: normal}}
+    - {suffix: wl1, type: water_level, unit: meters, min: 0.0, max: 12.0, init: 3.2, initial_actuator: {valve_position: closed, valve_ratio: 0.0}}
+    - {suffix: wl2, type: water_level, unit: meters, min: 0.0, max: 12.0, init: 2.8, initial_actuator: {valve_position: closed, valve_ratio: 0.0}}
+    - {suffix: pl1, type: power_load, unit: MW, min: 5.0, max: 120.0, init: 48.0, initial_actuator: {grid_state: grid_a}}
     - {suffix: aq1, type: air_quality, unit: AQI, min: 10.0, max: 350.0, init: 42.0}
     - {suffix: ec1, type: emergency_call, unit: "call/min", min: 0.0, max: 30.0, init: 1.0}
 couplings:

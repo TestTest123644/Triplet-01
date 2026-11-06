@@ -5,6 +5,7 @@ values (enum members, canonical units, canonical actuator states).
 """
 
 import json
+import math
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -27,7 +28,7 @@ from city_brain.domain.types import (
 OBSERVED_KEYS = ("commit", "date", "by", "method")
 OBSERVED_METHODS = ("code_read", "recording", "assumed")
 _BRAIN_ROOT = Path(__file__).resolve().parents[3]
-_RATIO = re.compile(r"ratio:(\d{1,3})")
+_RATIO = re.compile(r"ratio:(0|[1-9]\d{0,2})")
 _PCT = re.compile(r"(\d{1,3})%")
 
 
@@ -214,7 +215,7 @@ class TwinProfile:
         return None
 
     def actuator_state_with_flag(self, device_raw: Mapping[str, Any]) -> tuple[str | None, bool]:
-        """(canonical actuator state, flagged). An unrecognised valve state is `closed`, flagged."""
+        """(canonical actuator state, flagged). Valves mirror the Twin: "NN%" strings are float-parsed and clamped; other unknowns are `closed`, flagged."""
         cap = self._capability_for(device_raw.get("device_type"))
         if cap is None:
             return None, False
@@ -224,9 +225,17 @@ class TwinProfile:
             if canon != "ratio" and wire == partner:
                 return canon, False
         if cap == "valve" and "ratio" in spec["states"]:
-            m = _PCT.fullmatch(partner) if isinstance(partner, str) else None
-            if m and int(m.group(1)) <= 100:
-                return f"ratio:{int(m.group(1))}", False
+            # Mirror the Twin (handle_set_valve): a string ending in '%' is parsed with float()
+            # and clamped to 0..1; any other unknown string leaves the valve closed.
+            if isinstance(partner, str) and partner.endswith("%"):
+                try:
+                    pct = float(partner.rstrip("%"))
+                except ValueError:
+                    pct = math.nan
+                if not math.isnan(pct):
+                    ratio = max(0.0, min(1.0, pct / 100.0))
+                    exact = _PCT.fullmatch(partner) is not None and int(partner[:-1]) <= 100
+                    return f"ratio:{round(100 * ratio)}", not exact
             return "closed", True
         return None, True
 
@@ -281,7 +290,11 @@ class TwinProfile:
         return ToolCall(spec["tool"], {"device_id": target, "target_state": wire})
 
     def accepts_partner_state(self, capability: str, partner_state: str) -> bool:
-        """Whether the partner's own code accepts this wire state (used by the mock)."""
+        """The contract: whether this wire state is a documented, valid state for the capability.
+
+        The real Twin is looser (any '%' string, even "150%", is accepted and clamped), and the
+        mock's `accept_unknown_states` defect reproduces that; this method deliberately does not.
+        """
         spec = self.actuators.get(capability)
         if spec is None:
             return False
