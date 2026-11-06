@@ -18,6 +18,7 @@ from typing import Any, Dict, List, Literal, Optional, Tuple, Union
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from twin.crypto_utils import canonicalize_for_signing, sign_payload, verify_payload_signature
+from twin.kafka_config import kafka_client_config
 from twin.wire_limits import WIRE_VALUE_MAX, WIRE_VALUE_MIN
 
 logger = logging.getLogger("twin.kafka_streamer")
@@ -149,6 +150,7 @@ class KafkaStreamer:
         self._kafka_state: str = "disabled" if mock_mode else "ok"
 
         if not mock_mode:
+            sasl_conf = kafka_client_config()
             try:
                 import confluent_kafka
 
@@ -161,11 +163,14 @@ class KafkaStreamer:
                     "message.timeout.ms": message_timeout_ms,
                     "acks": 1,
                 }
+                conf.update(sasl_conf)
                 if producer_config:
                     conf.update(producer_config)
 
                 self.producer = confluent_kafka.Producer(conf)
                 self._kafka_state = "ok"
+            except ValueError:
+                raise
             except Exception as e:
                 logger.warning(
                     f"Could not connect to Kafka broker at {self.bootstrap_servers} ({e}). "

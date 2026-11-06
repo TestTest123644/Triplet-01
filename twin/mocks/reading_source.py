@@ -58,13 +58,32 @@ class KafkaSource(ReadingSource):
     ):
         try:
             import confluent_kafka
-            self.consumer = confluent_kafka.Consumer({
+            try:
+                import importlib
+                kafka_config_mod = importlib.import_module("twin.kafka_config")
+                kafka_client_config = getattr(kafka_config_mod, "kafka_client_config")
+                sasl_conf = kafka_client_config()
+            except ImportError:
+                import sys, os
+                src_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src"))
+                if src_path not in sys.path:
+                    sys.path.insert(0, src_path)
+                import importlib
+                kafka_config_mod = importlib.import_module("twin.kafka_config")
+                kafka_client_config = getattr(kafka_config_mod, "kafka_client_config")
+                sasl_conf = kafka_client_config()
+
+            consumer_conf = {
                 "bootstrap.servers": bootstrap_servers,
                 "group.id": group_id,
                 "auto.offset.reset": "latest",
                 "enable.auto.commit": True,
-            })
+            }
+            consumer_conf.update(sasl_conf)
+            self.consumer = confluent_kafka.Consumer(consumer_conf)
             self.consumer.subscribe([topic])
+        except ValueError:
+            raise
         except Exception as e:
             logger.warning(f"Could not initialize Kafka consumer: {e}")
             self.consumer = None

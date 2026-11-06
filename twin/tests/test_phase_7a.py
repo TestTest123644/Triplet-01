@@ -1028,7 +1028,75 @@ def test_6e_grep_isolation():
 
 
 def test_mock_guardian_containment_cleared_externally():
-    """Verify MockGuardian forgets containment and logs containment_cleared_externally on status='ok'."""
+    """Verify MockGuardian forgets containment when ok frame arrives after grace period and MCP confirms."""
+    from mocks.mock_guardian import MockGuardian
+
+    class DummyMcpCaller:
+        def __init__(self):
+            self.calls = []
+
+        async def call_tool_async(self, tool, args):
+            self.calls.append((tool, args))
+            if tool == "list_devices":
+                return [
+                    {"device_id": "z3-tc1", "status": "ok"},
+                    {"device_id": "z1-pl1", "status": "ok"},
+                ]
+            return {"status": "ok"}
+
+        async def close(self):
+            pass
+
+    guardian = MockGuardian(mcp_caller=DummyMcpCaller())
+    guardian.key_cache["z3-tc1"] = "fake_pub_key"
+    guardian.key_cache["z1-pl1"] = "fake_pub_key"
+    guardian.isolated_devices.append("z3-tc1")
+    guardian.containment_sim_time["z3-tc1"] = 1000.0
+    guardian.quarantined_devices.append("z1-pl1")
+    guardian.containment_sim_time["z1-pl1"] = 1000.0
+
+    # 1. In-flight frame within 5 sim-seconds grace (e.g. at 1002s) should be ignored
+    res_inflight = guardian.process_reading({
+        "device_id": "z3-tc1",
+        "reading_id": "r-1",
+        "status": "ok",
+        "ts": "1970-01-01T00:16:42Z",  # 1002 sim-sec
+        "device_type": "traffic_camera",
+        "value": 45.0,
+        "sig": "fake_sig",
+    })
+    assert res_inflight["action"] == "device_already_contained"
+    assert "z3-tc1" in guardian.isolated_devices
+
+    # 2. Frame arriving after 5 sim-seconds grace (1007s) triggers MCP confirmation and clears containment
+    res_ok = guardian.process_reading({
+        "device_id": "z3-tc1",
+        "reading_id": "r-2",
+        "status": "ok",
+        "ts": "1970-01-01T00:16:47Z",  # 1007 sim-sec
+        "device_type": "traffic_camera",
+        "value": 45.0,
+        "sig": "fake_sig",
+    })
+    assert "z3-tc1" not in guardian.isolated_devices
+    assert res_ok["action"] == "containment_cleared_externally"
+
+    # Same for quarantined device after grace period
+    res_pl1 = guardian.process_reading({
+        "device_id": "z1-pl1",
+        "reading_id": "r-3",
+        "status": "ok",
+        "ts": "1970-01-01T00:16:48Z",  # 1008 sim-sec
+        "device_type": "power_load",
+        "value": 50.0,
+        "sig": "fake_sig",
+    })
+    assert "z1-pl1" not in guardian.quarantined_devices
+    assert res_pl1["action"] == "containment_cleared_externally"
+
+
+def test_inflight_ok_frames_cause_no_second_quarantine():
+    """Verify in-flight 'ok' frames right after a quarantine cause NO second quarantine (Phase 7C.3a)."""
     from mocks.mock_guardian import MockGuardian
 
     class DummyMcpCaller:
@@ -1042,42 +1110,80 @@ def test_mock_guardian_containment_cleared_externally():
         async def close(self):
             pass
 
-    guardian = MockGuardian(mcp_caller=DummyMcpCaller())
-    guardian.key_cache["z3-tc1"] = "fake_pub_key"
-    guardian.key_cache["z1-pl1"] = "fake_pub_key"
-    guardian.isolated_devices.append("z3-tc1")
-    guardian.quarantined_devices.append("z1-pl1")
+    caller = DummyMcpCaller()
+    guardian = MockGuardian(mcp_caller=caller)
 
-    # Frame with status 'isolated' should still be ignored
-    res_isolated = guardian.process_reading({
-        "device_id": "z3-tc1",
-        "reading_id": "r-1",
-        "status": "isolated",
-        "ts": "2026-11-06T08:00:00Z",
-    })
-    assert res_isolated["action"] == "device_already_contained"
-    assert "z3-tc1" in guardian.isolated_devices
-
-    # Frame with status 'ok' indicates external reinstatement
-    res_ok = guardian.process_reading({
-        "device_id": "z3-tc1",
-        "reading_id": "r-2",
+    # 1. Rogue device rg-p1 arrives at sim time 100.0s -> quarantined
+    guardian.process_reading({
+        "device_id": "rg-p1",
+        "reading_id": "r-rg-1",
         "status": "ok",
-        "ts": "2026-11-06T08:00:01Z",
-        "device_type": "traffic_camera",
-        "value": 45.0,
-        "sig": "fake_sig",
-    })
-    assert "z3-tc1" not in guardian.isolated_devices
-
-    # Same for quarantined device
-    res_pl1 = guardian.process_reading({
-        "device_id": "z1-pl1",
-        "reading_id": "r-3",
-        "status": "ok",
-        "ts": "2026-11-06T08:00:02Z",
+        "ts": "1970-01-01T00:01:40Z",  # 100 sim-sec
         "device_type": "power_load",
         "value": 50.0,
-        "sig": "fake_sig",
     })
-    assert "z1-pl1" not in guardian.quarantined_devices
+    assert "rg-p1" in guardian.quarantined_devices
+    quarantine_calls = [c for c in caller.calls if c[0] == "quarantine_device"]
+    assert len(quarantine_calls) == 1
+
+    # 2. In-flight frames with status 'ok' arrive within the 5 sim-s grace period (e.g. 101s, 102s)
+    for s in (101, 102, 103, 104):
+        res = guardian.process_reading({
+            "device_id": "rg-p1",
+            "reading_id": f"r-rg-inflight-{s}",
+            "status": "ok",
+            "ts": f"1970-01-01T00:01:{s:02d}Z",
+            "device_type": "power_load",
+            "value": 50.0,
+        })
+        assert res["action"] == "device_already_contained"
+        assert "rg-p1" in guardian.quarantined_devices
+
+    # Verify no second quarantine tool call was issued
+    quarantine_calls = [c for c in caller.calls if c[0] == "quarantine_device"]
+    assert len(quarantine_calls) == 1, f"Expected exactly 1 quarantine call, got {len(quarantine_calls)}"
+
+
+def test_guardian_rollback_deduplication():
+    """Verify MockGuardian never sends rollback_reading for the same reading_id twice (Phase 7C.3b)."""
+    from mocks.mock_guardian import MockGuardian
+
+    class DummyMcpCaller:
+        def __init__(self):
+            self.calls = []
+
+        async def call_tool_async(self, tool, args):
+            self.calls.append((tool, args))
+            return {"status": "ok"}
+
+        async def close(self):
+            pass
+
+    caller = DummyMcpCaller()
+    guardian = MockGuardian(mcp_caller=caller)
+    guardian.key_cache["z3-tc1"] = "fake_key"
+
+    # Simulate invalid signature on reading r-z3-tc1-2671
+    guardian.process_reading({
+        "device_id": "z3-tc1",
+        "reading_id": "r-z3-tc1-2671",
+        "status": "ok",
+        "ts": "1970-01-01T00:01:00Z",
+        "device_type": "traffic_camera",
+        "value": 50.0,
+        "sig": "invalid_signature",
+    })
+
+    # Same reading arriving again (or checked again)
+    guardian.process_reading({
+        "device_id": "z3-tc1",
+        "reading_id": "r-z3-tc1-2671",
+        "status": "ok",
+        "ts": "1970-01-01T00:01:00Z",
+        "device_type": "traffic_camera",
+        "value": 50.0,
+        "sig": "invalid_signature",
+    })
+
+    rollbacks = [c for c in caller.calls if c[0] == "rollback_reading" and c[1].get("reading_id") == "r-z3-tc1-2671"]
+    assert len(rollbacks) == 1, f"Expected 1 rollback call for r-z3-tc1-2671, got {len(rollbacks)}"

@@ -487,7 +487,7 @@ class ScenarioContext:
     def _start_mocks(self) -> None:
         env = os.environ.copy()
         pythonpath = env.get("PYTHONPATH", "")
-        env["PYTHONPATH"] = f".:twin:{pythonpath}".strip(":")
+        env["PYTHONPATH"] = f".:twin:twin/src:{pythonpath}".strip(":")
 
         self._guardian_log = os.path.join(self.log_dir, f"{self.scenario_id}-guardian.tmp.log")
         self._brain_log = os.path.join(self.log_dir, f"{self.scenario_id}-brain.tmp.log")
@@ -617,6 +617,18 @@ class ScenarioContext:
             msg = f"False positive violation: containments={violating_containments}, commands={violating_commands}"
             return False, msg
         return True, "nominal"
+
+    def reinstate_if_needed(self, device_id: str) -> bool:
+        """Reinstate device only if currently isolated or quarantined (no-op if already ok)."""
+        try:
+            dev_list = self.mcp.list_devices()
+            dev = next((d for d in dev_list if d.get("device_id") == device_id), None)
+            if dev and dev.get("status") in ("isolated", "quarantined"):
+                self.mcp.call_tool("reinstate_device", {"device_id": device_id})
+                return True
+        except Exception as e:
+            self.log_event("", "scenario", "reinstate_if_needed_error", {"device_id": device_id, "error": str(e)})
+        return False
 
     def finish(self) -> bool:
         """Evaluate all recorded checks, write final result line, and print summary."""

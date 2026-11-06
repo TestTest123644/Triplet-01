@@ -89,6 +89,9 @@ class MockGuardian:
         self.quarantined_devices: List[str] = []
         self.isolated_devices: List[str] = []
         self.rolled_back_readings: List[str] = []
+        self.containment_sim_time: Dict[str, float] = {}
+        self.last_mcp_check_sim_time: Dict[str, float] = {}
+        self.already_rolled_back_ids: collections.OrderedDict[str, None] = collections.OrderedDict()
 
         # Tracking state for Guardian rules
         self.last_device_reading_id: Dict[str, str] = {}
@@ -138,6 +141,19 @@ class MockGuardian:
         except Exception as e:
             logger.error(f"MCP tool call failed ({tool_name}, {args}): {e}")
             return False, None
+
+    async def _rollback_reading_safe(self, reading_id: Optional[str]) -> bool:
+        """Roll back a reading exactly once. Never sends duplicate rollback calls."""
+        if not reading_id:
+            return False
+        if reading_id in self.already_rolled_back_ids:
+            return False
+        self.already_rolled_back_ids[reading_id] = None
+        if len(self.already_rolled_back_ids) > 10000:
+            self.already_rolled_back_ids.popitem(last=False)
+        self.rolled_back_readings.append(reading_id)
+        await self._safe_call_tool("rollback_reading", {"reading_id": reading_id})
+        return True
 
     async def get_public_key(self, device_id: str) -> Tuple[bool, Optional[str]]:
         """Fetch and cache public key via MCP 'get_device_key'.
@@ -234,25 +250,50 @@ class MockGuardian:
         is_replayed = (reading_id in self.seen_reading_ids) or (last_seq is not None and seq <= last_seq)
 
         if device_id in self.quarantined_devices or device_id in self.isolated_devices:
-            if status == "ok" and not is_replayed and not is_late:
-                if device_id in self.isolated_devices:
-                    self.isolated_devices.remove(device_id)
-                    self._log_event(sim_ts, "containment_cleared_externally", {"device_id": device_id, "type": "isolated"})
-                if device_id in self.quarantined_devices:
-                    self.quarantined_devices.remove(device_id)
-                    self._log_event(sim_ts, "containment_cleared_externally", {"device_id": device_id, "type": "quarantined"})
-                self.sig_failures[device_id].clear()
-                self.late_events[device_id].clear()
-                self.replay_delay_events[device_id].clear()
-                self.device_ts_history[device_id].clear()
-                self.last_device_seq.pop(device_id, None)
-            else:
-                return {
-                    "action": "device_already_contained",
-                    "device_id": device_id,
-                    "reading_id": reading_id,
-                    "status": "quarantined" if device_id in self.quarantined_devices else "isolated",
-                }
+            cont_time = self.containment_sim_time.get(device_id, 0.0)
+            if status == "ok" and not is_replayed and not is_late and sim_sec > cont_time + 5.0:
+                last_check = self.last_mcp_check_sim_time.get(device_id, 0.0)
+                if sim_sec - last_check >= 5.0:
+                    self.last_mcp_check_sim_time[device_id] = sim_sec
+                    success, dev_list = await self._safe_call_tool("list_devices", {})
+                    if success:
+                        if isinstance(dev_list, list):
+                            items = dev_list
+                        elif isinstance(dev_list, dict):
+                            if "devices" in dev_list:
+                                items = dev_list["devices"]
+                            elif "device_id" in dev_list:
+                                items = [dev_list]
+                            else:
+                                items = []
+                        else:
+                            items = []
+                        twin_dev = next((d for d in items if isinstance(d, dict) and d.get("device_id") == device_id), None)
+                        if twin_dev and twin_dev.get("status") == "ok":
+                            if device_id in self.isolated_devices:
+                                self.isolated_devices.remove(device_id)
+                                self._log_event(sim_ts, "containment_cleared_externally", {"device_id": device_id, "type": "isolated"})
+                            if device_id in self.quarantined_devices:
+                                self.quarantined_devices.remove(device_id)
+                                self._log_event(sim_ts, "containment_cleared_externally", {"device_id": device_id, "type": "quarantined"})
+                            self.containment_sim_time.pop(device_id, None)
+                            self.sig_failures[device_id].clear()
+                            self.late_events[device_id].clear()
+                            self.replay_delay_events[device_id].clear()
+                            self.last_device_seq.pop(device_id, None)
+                            return {
+                                "action": "containment_cleared_externally",
+                                "device_id": device_id,
+                                "reading_id": reading_id,
+                                "status": "ok",
+                            }
+
+            return {
+                "action": "device_already_contained",
+                "device_id": device_id,
+                "reading_id": reading_id,
+                "status": "quarantined" if device_id in self.quarantined_devices else "isolated",
+            }
 
         # 1. Late-frame rule: frame ts is > late_threshold older than newest stream ts -> flag late; 3 in late_window -> isolate
         if len(ts_hist) >= 5 and ts_step > 0.0 and (self.newest_stream_sim_sec - sim_sec) > late_threshold:
@@ -262,16 +303,13 @@ class MockGuardian:
 
             if len(window) >= 3 and device_id not in self.isolated_devices:
                 self.isolated_devices.append(device_id)
+                self.containment_sim_time[device_id] = sim_sec
                 await self._safe_call_tool("isolate_device", {"device_id": device_id})
-                if reading_id:
-                    self.rolled_back_readings.append(reading_id)
-                    await self._safe_call_tool("rollback_reading", {"reading_id": reading_id})
+                await self._rollback_reading_safe(reading_id)
                 self._log_event(sim_ts, "isolate_device", {"device_id": device_id, "reason": f"3 late frames (>{late_threshold:.1f}s old) within {late_window:.1f} sim-s"})
                 return {"action": "late_frame_detected", "device_id": device_id, "reading_id": reading_id, "status": "isolated"}
 
-            if reading_id:
-                self.rolled_back_readings.append(reading_id)
-                await self._safe_call_tool("rollback_reading", {"reading_id": reading_id})
+            await self._rollback_reading_safe(reading_id)
             return {"action": "late_frame_detected", "device_id": device_id, "reading_id": reading_id, "status": "flagged"}
 
         ts_hist.append(sim_sec)
@@ -281,10 +319,9 @@ class MockGuardian:
         if not is_known:
             if device_id not in self.quarantined_devices:
                 self.quarantined_devices.append(device_id)
+                self.containment_sim_time[device_id] = sim_sec
                 await self._safe_call_tool("quarantine_device", {"device_id": device_id})
-            if reading_id:
-                self.rolled_back_readings.append(reading_id)
-                await self._safe_call_tool("rollback_reading", {"reading_id": reading_id})
+            await self._rollback_reading_safe(reading_id)
             self._log_event(sim_ts, "quarantine_device", {"device_id": device_id, "reason": "unknown device key"})
             return {"action": "rogue_device_detected", "device_id": device_id, "reading_id": reading_id, "status": "quarantined"}
 
@@ -295,9 +332,7 @@ class MockGuardian:
         # 3. Cryptographic Ed25519 signature verification
         is_valid = verify_twin_reading(payload, pub_key)
         if not is_valid:
-            if reading_id:
-                self.rolled_back_readings.append(reading_id)
-                await self._safe_call_tool("rollback_reading", {"reading_id": reading_id})
+            await self._rollback_reading_safe(reading_id)
 
             window = [t for t in self.sig_failures[device_id] if sim_sec - t <= late_window]
             window.append(sim_sec)
@@ -305,6 +340,7 @@ class MockGuardian:
 
             if len(window) >= 3 and device_id not in self.quarantined_devices:
                 self.quarantined_devices.append(device_id)
+                self.containment_sim_time[device_id] = sim_sec
                 await self._safe_call_tool("quarantine_device", {"device_id": device_id})
                 self._log_event(sim_ts, "quarantine_device", {"device_id": device_id, "reason": f"3 signature failures within {late_window:.1f} sim-s"})
 
@@ -314,9 +350,7 @@ class MockGuardian:
         last_seq = self.last_device_seq.get(device_id)
         is_replay_or_delay = (reading_id in self.seen_reading_ids) or (last_seq is not None and seq <= last_seq)
         if is_replay_or_delay:
-            if reading_id:
-                self.rolled_back_readings.append(reading_id)
-                await self._safe_call_tool("rollback_reading", {"reading_id": reading_id})
+            await self._rollback_reading_safe(reading_id)
 
             window = [t for t in self.replay_delay_events[device_id] if sim_sec - t <= late_window]
             window.append(sim_sec)
@@ -324,6 +358,7 @@ class MockGuardian:
 
             if len(window) >= 3 and device_id not in self.isolated_devices:
                 self.isolated_devices.append(device_id)
+                self.containment_sim_time[device_id] = sim_sec
                 await self._safe_call_tool("isolate_device", {"device_id": device_id})
                 self._log_event(sim_ts, "isolate_device", {"device_id": device_id, "reason": f"3 replay/delay events within {late_window:.1f} sim-s"})
 
@@ -377,14 +412,13 @@ class MockGuardian:
 
                         if outlier_id not in self.isolated_devices:
                             self.isolated_devices.append(outlier_id)
+                            self.containment_sim_time[outlier_id] = sim_sec
                             await self._safe_call_tool(
                                 "isolate_device",
                                 {"device_id": outlier_id}
                             )
                             outlier_reading_id = self.last_device_reading_id.get(outlier_id)
-                            if outlier_reading_id:
-                                self.rolled_back_readings.append(outlier_reading_id)
-                                await self._safe_call_tool("rollback_reading", {"reading_id": outlier_reading_id})
+                            await self._rollback_reading_safe(outlier_reading_id)
                             self._log_event(sim_ts, "isolate_device", {"device_id": outlier_id, "reason": "paired water divergence > 2.0m for 20 readings"})
                         self.water_divergence_counts[zone_id] = 0
                 else:
@@ -401,10 +435,9 @@ class MockGuardian:
                     self.stuck_tracker[device_id] = (r_val, count)
                     if count >= 50 and device_id not in self.isolated_devices:
                         self.isolated_devices.append(device_id)
+                        self.containment_sim_time[device_id] = sim_sec
                         await self._safe_call_tool("isolate_device", {"device_id": device_id})
-                        if reading_id:
-                            self.rolled_back_readings.append(reading_id)
-                            await self._safe_call_tool("rollback_reading", {"reading_id": reading_id})
+                        await self._rollback_reading_safe(reading_id)
                         self._log_event(sim_ts, "isolate_device", {"device_id": device_id, "reason": "sensor stuck at constant value for 50 readings"})
                 else:
                     self.stuck_tracker[device_id] = (r_val, 1)
@@ -415,10 +448,9 @@ class MockGuardian:
         if device_type == "power_load" and val > 140.0:
             if device_id not in self.quarantined_devices:
                 self.quarantined_devices.append(device_id)
+                self.containment_sim_time[device_id] = sim_sec
                 await self._safe_call_tool("quarantine_device", {"device_id": device_id})
-            if reading_id:
-                self.rolled_back_readings.append(reading_id)
-                await self._safe_call_tool("rollback_reading", {"reading_id": reading_id})
+            await self._rollback_reading_safe(reading_id)
             self._log_event(sim_ts, "quarantine_device", {"device_id": device_id, "reason": f"physical limit violation (power {val} MW > 140 MW), probable compromised key"})
             return {"action": "compromised_key_detected", "device_id": device_id, "reading_id": reading_id, "status": "quarantined"}
 

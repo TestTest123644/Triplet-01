@@ -103,13 +103,23 @@ class McpCaller:
 
         call_res = await self._session.call_tool(tool_name, args)
         if hasattr(call_res, "content") and call_res.content:
-            first = call_res.content[0]
-            if hasattr(first, "text"):
-                text = first.text
-                try:
-                    return json.loads(text)
-                except Exception:
-                    return text
+            if len(call_res.content) == 1:
+                first = call_res.content[0]
+                if hasattr(first, "text"):
+                    text = first.text
+                    try:
+                        return json.loads(text)
+                    except Exception:
+                        return text
+            else:
+                items = []
+                for c in call_res.content:
+                    t = getattr(c, "text", "")
+                    try:
+                        items.append(json.loads(t))
+                    except Exception:
+                        items.append(t)
+                return items
         if hasattr(call_res, "structured_content"):
             return call_res.structured_content
         return call_res

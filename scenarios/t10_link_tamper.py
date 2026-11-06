@@ -25,15 +25,17 @@ def _parse_ts(ts_str: str) -> float:
 def run_mode(ctx: ScenarioContext, mode: str) -> bool:
     print(f"[{ctx.scenario_id}] --- Testing Link Mode: {mode} on z3-tc1 ---")
 
-    # Before each mode: clear previous attack, reinstate device, and sync wire stream
+    # Before each mode: clear previous attack, reinstate device (if contained), and sync wire stream
     try:
         ctx.rest.clear_event("all")
         ctx.rest.clear_attack("all")
-        ctx.mcp.call_tool("reinstate_device", {"device_id": "z3-tc1"})
+        ctx.reinstate_if_needed("z3-tc1")
     except Exception as e:
         ctx.log_event("", "scenario", "pre_mode_clear_error", {"error": str(e), "mode": mode})
 
     # Wait until z3-tc1 frames are current again (ts within 2 sim-s of stream head)
+    # AND at least 25 sim-seconds (12-13 ticks) have passed to fill streamer history with clean frames
+    clear_sim_time = ctx.get_sim_time_seconds()
     head_ts = 0.0
     tc1_ts = 0.0
     sync_start = time.time()
@@ -46,7 +48,7 @@ def run_mode(ctx: ScenarioContext, mode: str) -> bool:
             if p.get("device_id") == "z3-tc1":
                 if t > tc1_ts:
                     tc1_ts = t
-        if head_ts > 0 and tc1_ts > 0 and (head_ts - tc1_ts) < 2.0:
+        if head_ts > 0 and tc1_ts > 0 and (head_ts - tc1_ts) < 2.0 and (tc1_ts >= clear_sim_time + 25.0):
             break
 
     # Record injection sim time before injecting attack
@@ -89,6 +91,7 @@ def run_mode(ctx: ScenarioContext, mode: str) -> bool:
                 e.get("source") == "containment"
                 and e.get("detail", {}).get("tool") == "quarantine_device"
                 and (e.get("detail", {}).get("target") == "z3-tc1" or e.get("detail", {}).get("device_id") == "z3-tc1")
+                and _parse_ts(e.get("sim_ts", "")) >= inj_sim_time - 1.0
             ),
             timeout=35.0,
         )
@@ -124,6 +127,7 @@ def run_mode(ctx: ScenarioContext, mode: str) -> bool:
                 e.get("source") == "containment"
                 and e.get("detail", {}).get("tool") == "isolate_device"
                 and (e.get("detail", {}).get("target") == "z3-tc1" or e.get("detail", {}).get("device_id") == "z3-tc1")
+                and _parse_ts(e.get("sim_ts", "")) >= inj_sim_time - 1.0
             ),
             timeout=35.0,
         )
@@ -159,6 +163,7 @@ def run_mode(ctx: ScenarioContext, mode: str) -> bool:
                 e.get("source") == "containment"
                 and e.get("detail", {}).get("tool") == "isolate_device"
                 and (e.get("detail", {}).get("target") == "z3-tc1" or e.get("detail", {}).get("device_id") == "z3-tc1")
+                and _parse_ts(e.get("sim_ts", "")) >= inj_sim_time - 1.0
             ),
             timeout=35.0,
         )
@@ -198,7 +203,7 @@ def run(ctx: ScenarioContext, mode: str = "all") -> bool:
         if idx < len(modes_to_run) - 1:
             try:
                 ctx.rest.clear_event("all")
-                ctx.mcp.call_tool("reinstate_device", {"device_id": "z3-tc1"})
+                ctx.reinstate_if_needed("z3-tc1")
                 ctx.sim_sleep(1.0)
             except Exception as e:
                 ctx.log_event("", "scenario", "mode_transition_error", {"error": str(e)})

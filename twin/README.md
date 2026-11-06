@@ -79,3 +79,12 @@ PYTHONPATH=src streamlit run dashboard.py
 ### State Persistence and Keystore
 - **Keystore (`KEYSTORE_PATH`):** Device identities are backed by a persistent JSON keystore (mode 600) to keep public keys stable across restarts. Partners can safely cache device public keys.
 - **Ledger Reset (`RESET_LEDGER=true`):** Wipes telemetry readings, attacks, and runs records from the ledger on startup while preserving registered devices and device keystore.
+
+### Kafka Authentication & Security Configuration
+Kafka clients (producer, readiness probe AdminClient, and mock consumers) support optional SASL authentication driven strictly by environment variables:
+- `KAFKA_SECURITY_PROTOCOL`: Security protocol to use (`PLAINTEXT` [default], `SASL_PLAINTEXT`, `SASL_SSL`). When `PLAINTEXT`, no SASL keys are added.
+- `KAFKA_SASL_MECHANISM`: SASL mechanism (`PLAIN` [default], `SCRAM-SHA-256`, `SCRAM-SHA-512`).
+- `KAFKA_USERNAME`: Username for SASL authentication (required if protocol is `SASL_*`).
+- `KAFKA_PASSWORD`: Literal password for SASL authentication.
+- `KAFKA_PASSWORD_FILE`: Path to a file holding the password (Docker-secret style; trailing newline stripped). Takes precedence over `KAFKA_PASSWORD` if both are specified.
+Passwords are never logged or exposed in status endpoints.

@@ -233,3 +233,32 @@ def test_dashboard_geospatial_and_divergence(test_sim_and_db, monkeypatch):
     assert "broadcast_value" in ts_df.columns
     assert "discrepancy" in ts_df.columns
     assert (ts_df["broadcast_value"] - ts_df["true_value"]).abs().max() > 0
+
+
+def test_spatial_twin_deck_to_json(test_sim_and_db, monkeypatch):
+    """Test building PyDeck 3D map from sensors dataframe and serializing via to_json().
+
+    Regression test for pandas 2.x Series vs string accessor crash in pydeck.
+    """
+    import json
+    sim, ledger, db_path = test_sim_and_db
+    monkeypatch.setattr(dashboard, "DB_PATH", db_path)
+
+    sensors_df = dashboard.fetch_geospatial_sensors()
+    assert not sensors_df.empty
+
+    deck = dashboard.build_spatial_twin_deck(sensors_df, map_pitch=50)
+    assert deck is not None
+
+    json_str = deck.to_json()
+    assert isinstance(json_str, str)
+    parsed = json.loads(json_str)
+    assert "layers" in parsed
+    assert len(parsed["layers"]) == 4
+
+    # Verify that scatterplot layer uses radius column name accessor, not a Series
+    scatter_layers = [l for l in parsed["layers"] if l.get("@@type") == "ScatterplotLayer"]
+    assert len(scatter_layers) == 2
+    get_radii = [l.get("getRadius") for l in scatter_layers]
+    assert "@@=radius" in get_radii
+    assert "@@=halo_radius" in get_radii

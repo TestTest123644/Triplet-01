@@ -900,6 +900,123 @@ tab_map, tab_divergence, tab_ledger, tab_terminal = st.tabs([
     "// LIVE SECURITY AUDIT LOG",
 ])
 
+def build_spatial_twin_deck(filtered_df: pd.DataFrame, map_pitch: int = 50) -> pdk.Deck:
+    """Prepare PyDeck 3D Layer Data and build Deck instance."""
+    def compute_sensor_style(row: pd.Series) -> Tuple[List[int], float]:
+        val = float(row["broadcast_value"])
+        is_threat = bool(row["discrepancy"])
+        if is_threat:
+            # Crimson Red for Active Threat
+            color = [255, 42, 95, 255]
+            elevation = max(240.0, val * 6.5)
+        else:
+            # Neon Cyan for Nominal
+            color = [0, 229, 255, 210]
+            elevation = max(40.0, val * 3.5)
+        return color, elevation
+
+    df = filtered_df.copy()
+    styles = [compute_sensor_style(row) for _, row in df.iterrows()]
+    df["fill_color"] = [s[0] for s in styles]
+    df["elevation"] = [s[1] for s in styles]
+    df["radius"] = df["discrepancy"].apply(lambda d: 110 if d else 55)
+    df["status_label"] = df["discrepancy"].apply(
+        lambda d: "[CRITICAL THREAT ACTIVE]" if d else "[NOMINAL INTEGRITY]"
+    )
+
+    # 3D Column Layer for Sensors
+    sensor_column_layer = pdk.Layer(
+        "ColumnLayer",
+        data=df,
+        get_position=["lon", "lat"],
+        get_elevation="elevation",
+        elevation_scale=1.5,
+        radius=40,
+        get_fill_color="fill_color",
+        pickable=True,
+        auto_highlight=True,
+        extruded=True,
+    )
+
+    # Scatter Beacon Layer (Radial pulse marker)
+    sensor_scatter_layer = pdk.Layer(
+        "ScatterplotLayer",
+        data=df,
+        get_position=["lon", "lat"],
+        get_radius="radius",
+        get_fill_color="fill_color",
+        get_line_color=[255, 255, 255, 200],
+        line_width_min_pixels=1,
+        pickable=True,
+    )
+
+    # Neighborhood Centroids and Halo Radar Layer
+    neighborhoods_df = pd.DataFrame(NEIGHBORHOODS)
+    active_threat_zones = set(df[df["discrepancy"] == True]["zone_id"].unique()) if "zone_id" in df.columns else set()
+    neighborhoods_df["halo_color"] = neighborhoods_df["zone_id"].apply(
+        lambda zid: [255, 42, 95, 80] if zid in active_threat_zones else [0, 229, 255, 30]
+    )
+    neighborhoods_df["halo_radius"] = neighborhoods_df["zone_id"].apply(
+        lambda zid: 650 if zid in active_threat_zones else 450
+    )
+
+    zone_halo_layer = pdk.Layer(
+        "ScatterplotLayer",
+        data=neighborhoods_df,
+        get_position=["lon", "lat"],
+        get_radius="halo_radius",
+        get_fill_color="halo_color",
+        get_line_color=[255, 255, 255, 70],
+        line_width_min_pixels=1,
+        pickable=False,
+    )
+
+    # Crisp Vector Labels Layer (English Only, Zero Text Collision)
+    zone_text_layer = pdk.Layer(
+        "TextLayer",
+        data=neighborhoods_df,
+        get_position=["lon", "lat"],
+        get_text="name",
+        get_size=12,
+        get_color=[240, 246, 252, 240],
+        get_angle=0,
+        get_text_anchor="'middle'",
+        get_alignment_baseline="'center'",
+        background=True,
+        get_background_color=[7, 12, 24, 210],
+        pickable=False,
+    )
+
+    # Camera View State centered over Greater Tunis
+    view_state = pdk.ViewState(
+        latitude=36.808,
+        longitude=10.198,
+        zoom=12.1,
+        pitch=map_pitch,
+        bearing=-15,
+    )
+
+    # Render PyDeck 3D Map using Clean Dark Basemap without broken Arabic fonts
+    return pdk.Deck(
+        layers=[zone_halo_layer, sensor_scatter_layer, sensor_column_layer, zone_text_layer],
+        initial_view_state=view_state,
+        tooltip={
+            "html": """
+            <div style="background: rgba(7, 12, 24, 0.96); padding: 12px 16px; border: 1px solid rgba(0, 229, 255, 0.5); border-radius: 6px; color: #fff; font-family: 'JetBrains Mono', monospace; font-size: 0.8rem; box-shadow: 0 4px 20px rgba(0,0,0,0.8);">
+                <b style="color: #00e5ff; font-size: 0.95rem;">{device_id}</b> // {device_type}<br/>
+                <b>Sector:</b> {zone_name}<br/>
+                <b>Physical Truth:</b> <span style="color: #00e676; font-weight: bold;">{true_value} {unit}</span><br/>
+                <b>Broadcast Stream:</b> <span style="color: #ffab00; font-weight: bold;">{broadcast_value} {unit}</span><br/>
+                <b>Integrity:</b> {status_label}<br/>
+                <b>Attack Type:</b> <code>{attack_type}</code>
+            </div>
+            """,
+            "style": {"color": "white"},
+        },
+        map_style="https://basemaps.cartocdn.com/gl/dark-matter-nolabels-gl-style/style.json",
+    )
+
+
 # ------------------------------------------------------------------------------
 # TAB 1: 3D Geospatial Digital Twin Map & Neighborhood Sectors
 # ------------------------------------------------------------------------------
@@ -939,119 +1056,7 @@ with tab_map:
         if type_filter != "All Subsystems":
             filtered_df = filtered_df[filtered_df["device_type"] == type_filter]
 
-        # Prepare PyDeck 3D Layer Data
-        def compute_sensor_style(row: pd.Series) -> Tuple[List[int], float]:
-            val = float(row["broadcast_value"])
-            is_threat = bool(row["discrepancy"])
-            if is_threat:
-                # Crimson Red for Active Threat
-                color = [255, 42, 95, 255]
-                elevation = max(240.0, val * 6.5)
-            else:
-                # Neon Cyan for Nominal
-                color = [0, 229, 255, 210]
-                elevation = max(40.0, val * 3.5)
-            return color, elevation
-
-        styles = [compute_sensor_style(row) for _, row in filtered_df.iterrows()]
-        filtered_df["fill_color"] = [s[0] for s in styles]
-        filtered_df["elevation"] = [s[1] for s in styles]
-        filtered_df["status_label"] = filtered_df["discrepancy"].apply(
-            lambda d: "[CRITICAL THREAT ACTIVE]" if d else "[NOMINAL INTEGRITY]"
-        )
-
-        # 3D Column Layer for Sensors
-        sensor_column_layer = pdk.Layer(
-            "ColumnLayer",
-            data=filtered_df,
-            get_position=["lon", "lat"],
-            get_elevation="elevation",
-            elevation_scale=1.5,
-            radius=40,
-            get_fill_color="fill_color",
-            pickable=True,
-            auto_highlight=True,
-            extruded=True,
-        )
-
-        # Scatter Beacon Layer (Radial pulse marker)
-        sensor_scatter_layer = pdk.Layer(
-            "ScatterplotLayer",
-            data=filtered_df,
-            get_position=["lon", "lat"],
-            get_radius=filtered_df["discrepancy"].apply(lambda d: 110 if d else 55),
-            get_fill_color="fill_color",
-            get_line_color=[255, 255, 255, 200],
-            line_width_min_pixels=1,
-            pickable=True,
-        )
-
-        # Neighborhood Centroids and Halo Radar Layer
-        neighborhoods_df = pd.DataFrame(NEIGHBORHOODS)
-        active_threat_zones = set(filtered_df[filtered_df["discrepancy"] == True]["zone_id"].unique())
-        neighborhoods_df["halo_color"] = neighborhoods_df["zone_id"].apply(
-            lambda zid: [255, 42, 95, 80] if zid in active_threat_zones else [0, 229, 255, 30]
-        )
-        neighborhoods_df["halo_radius"] = neighborhoods_df["zone_id"].apply(
-            lambda zid: 650 if zid in active_threat_zones else 450
-        )
-
-        zone_halo_layer = pdk.Layer(
-            "ScatterplotLayer",
-            data=neighborhoods_df,
-            get_position=["lon", "lat"],
-            get_radius="halo_radius",
-            get_fill_color="halo_color",
-            get_line_color=[255, 255, 255, 70],
-            line_width_min_pixels=1,
-            pickable=False,
-        )
-
-        # Crisp Vector Labels Layer (English Only, Zero Text Collision)
-        zone_text_layer = pdk.Layer(
-            "TextLayer",
-            data=neighborhoods_df,
-            get_position=["lon", "lat"],
-            get_text="name",
-            get_size=12,
-            get_color=[240, 246, 252, 240],
-            get_angle=0,
-            get_text_anchor="'middle'",
-            get_alignment_baseline="'center'",
-            background=True,
-            get_background_color=[7, 12, 24, 210],
-            pickable=False,
-        )
-
-        # Camera View State centered over Greater Tunis
-        view_state = pdk.ViewState(
-            latitude=36.808,
-            longitude=10.198,
-            zoom=12.1,
-            pitch=map_pitch,
-            bearing=-15,
-        )
-
-        # Render PyDeck 3D Map using Clean Dark Basemap without broken Arabic fonts
-        deck = pdk.Deck(
-            layers=[zone_halo_layer, sensor_scatter_layer, sensor_column_layer, zone_text_layer],
-            initial_view_state=view_state,
-            tooltip={
-                "html": """
-                <div style="background: rgba(7, 12, 24, 0.96); padding: 12px 16px; border: 1px solid rgba(0, 229, 255, 0.5); border-radius: 6px; color: #fff; font-family: 'JetBrains Mono', monospace; font-size: 0.8rem; box-shadow: 0 4px 20px rgba(0,0,0,0.8);">
-                    <b style="color: #00e5ff; font-size: 0.95rem;">{device_id}</b> // {device_type}<br/>
-                    <b>Sector:</b> {zone_name}<br/>
-                    <b>Physical Truth:</b> <span style="color: #00e676; font-weight: bold;">{true_value} {unit}</span><br/>
-                    <b>Broadcast Stream:</b> <span style="color: #ffab00; font-weight: bold;">{broadcast_value} {unit}</span><br/>
-                    <b>Integrity:</b> {status_label}<br/>
-                    <b>Attack Type:</b> <code>{attack_type}</code>
-                </div>
-                """,
-                "style": {"color": "white"},
-            },
-            map_style="https://basemaps.cartocdn.com/gl/dark-matter-nolabels-gl-style/style.json",
-        )
-
+        deck = build_spatial_twin_deck(filtered_df, map_pitch=map_pitch)
         st.pydeck_chart(deck)
 
         # Neighborhoods Aggregate Status Cards (6 Grid Layout)

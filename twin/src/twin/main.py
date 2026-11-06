@@ -33,10 +33,14 @@ async def wait_for_kafka_ready(bootstrap_servers: str, max_retries: int = 30, de
     """Check connectivity to Kafka broker before starting high-rate streaming."""
     logger.info(f"Checking connectivity to Kafka broker at {bootstrap_servers}...")
     import confluent_kafka.admin
+    from twin.kafka_config import kafka_client_config
+
+    admin_conf = {"bootstrap.servers": bootstrap_servers, "socket.timeout.ms": 2000}
+    admin_conf.update(kafka_client_config())
 
     for attempt in range(1, max_retries + 1):
         try:
-            admin = confluent_kafka.admin.AdminClient({"bootstrap.servers": bootstrap_servers, "socket.timeout.ms": 2000})
+            admin = confluent_kafka.admin.AdminClient(admin_conf)
             metadata = admin.list_topics(timeout=2.0)
             if metadata.brokers:
                 logger.info(f"Connected to Kafka broker at {bootstrap_servers} (Brokers: {list(metadata.brokers.keys())})")
