@@ -6,6 +6,7 @@ import pytest
 from jsonschema import FormatChecker
 
 from city_brain.adapters.files.jsonl_log import verify_chain
+from city_brain.config import load_config
 from city_brain.runtime.main import main
 from scenarios.runner import load_scenario, run
 from tests.scenarios.helpers import (
@@ -24,7 +25,7 @@ BRAIN = Path(__file__).resolve().parents[2]
 SCHEMA = json.loads((BRAIN / "schemas" / "brain-event.v1.schema.json").read_text(encoding="utf-8"))
 
 
-def test_t02_valve_opened_before_6m_and_verified(t02_events):
+def test_t02_valve_opened_below_the_level_limit_and_verified(t02_events):
     expect = load_scenario("T02").expect
     valve = expect["valve"]
     cmd = first(t02_events, type=COMMAND, target=valve, state="open", status="DISPATCHED")
@@ -88,6 +89,25 @@ def test_every_logged_event_matches_the_schema_and_the_chain_verifies(
 
 def test_log_name_carries_scenario_and_epoch(t02_log):
     assert t02_log.name.startswith("T02-e0-") and t02_log.suffix == ".jsonl"
+
+
+def test_t02_no_channel_is_silent_and_dispatch_cites_its_evidence(t02_events):
+    assert count(t02_events, type=ALERT, code="CHANNEL_SILENT") == 0
+    cmd = first(t02_events, type=COMMAND, status="DISPATCHED")
+    assert cmd["data"]["evidence"] and all(r["trust_state"] == "TRUSTED" for r in cmd["data"]["evidence"])
+
+
+def test_t05_valve_stays_suspect(t05_events):
+    assert [e for e in t05_events if e["data"].get("reason") == "actuator_recovered"] == []
+
+
+def test_environment_overrides_reach_the_config(monkeypatch, capsys):
+    monkeypatch.setenv("BRAIN__MODE", "triplet")
+    assert main(["--config", str(BRAIN / "config" / "standalone.yaml"), "--scenario", "T02"]) == 2
+
+
+def test_triplet_logs_go_to_the_repo_root():
+    assert load_config(BRAIN / "config" / "triplet.yaml").logs_dir == BRAIN.parent / "logs"
 
 
 def test_triplet_profile_is_a_clear_stub():

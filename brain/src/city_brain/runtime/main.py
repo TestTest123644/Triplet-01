@@ -1,6 +1,7 @@
 """`python -m city_brain`: P1 runs standalone scenarios from brain/; triplet mode is P4."""
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -12,7 +13,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--config", required=True, type=Path)
     parser.add_argument("--scenario")
     args = parser.parse_args(argv)
-    config = load_config(args.config)
+    config = load_config(args.config, os.environ)
     if config.mode == "triplet":
         print("triplet mode lands in P4", file=sys.stderr)
         return 2
