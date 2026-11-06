@@ -19,6 +19,7 @@ def test_duplicate_reading_counted_not_processed():
     s, _ = step(s, ReadingReceived(r))
     s, fx = step(s, ReadingReceived(r))
     assert s.counters["DUPLICATE"] == 1 and fx == []
+    assert s.counters["OUT_OF_ORDER"] == 0
 
 
 def test_twin_restart_starts_new_epoch():
@@ -35,6 +36,17 @@ def test_twin_restart_starts_new_epoch():
     assert s.cursors["z1-wl1"].seq == 3
     assert s.global_tick == 3
     assert s.epoch_origin == (T0, 3)
+
+
+def test_restart_replaying_same_reading_key_is_not_duplicate():
+    s = fresh_state()
+    first = make_observation(seq=3)
+    s, _ = step(s, ReadingReceived(first))
+    s, _ = step(s, ReadingReceived(make_observation(seq=5000, reading_id="r-5000", sig_hash="x")))
+    s, _ = step(s, ReadingReceived(first))
+    assert s.epoch == 1
+    assert s.counters["DUPLICATE"] == 0 and s.counters["OUT_OF_ORDER"] == 0
+    assert s.cursors["z1-wl1"].seq == 3
 
 
 def test_small_reorder_is_out_of_order_not_new_epoch():
