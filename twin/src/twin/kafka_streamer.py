@@ -381,6 +381,10 @@ class KafkaStreamer:
         if not self._rate_history or now - self._rate_history[-1][0] >= 0.2:
             self._rate_history.append((now, self.produced + self.sunk))
 
+    def get_delayed_frames_pending(self) -> int:
+        """Return total number of delayed frames currently held in backlog queues."""
+        return sum(len(q) for q in self._delay_buffers.values())
+
     def flush_delayed(
         self, device_id: Optional[str] = None
     ) -> List[Tuple[TwinSensorReading, bytes]]:
@@ -395,6 +399,11 @@ class KafkaStreamer:
                 _, reading, raw_bytes = q.popleft()
                 self._emit_to_wire(did.encode("utf-8"), raw_bytes)
                 flushed.append((reading, raw_bytes))
+        if self.producer is not None:
+            try:
+                self.producer.poll(0)
+            except Exception:
+                pass
         return flushed
 
     def stream_reading(
@@ -471,12 +480,13 @@ class KafkaStreamer:
         # Emit the fresh non-delayed frame first
         self._emit_to_wire(reading.device_id.encode("utf-8"), serialized_bytes)
 
-        # If device has a backlog of delayed frames, release backlog one frame per tick after fresh frame
+        # If device has a backlog of delayed frames, release all held frames in order
         self.last_emitted_backlog = []
         if dev_id in self._delay_buffers and len(self._delay_buffers[dev_id]) > 0:
-            _, backlog_reading, backlog_bytes = self._delay_buffers[dev_id].popleft()
-            self._emit_to_wire(dev_id.encode("utf-8"), backlog_bytes)
-            self.last_emitted_backlog.append((backlog_reading, backlog_bytes))
+            while len(self._delay_buffers[dev_id]) > 0:
+                _, backlog_reading, backlog_bytes = self._delay_buffers[dev_id].popleft()
+                self._emit_to_wire(dev_id.encode("utf-8"), backlog_bytes)
+                self.last_emitted_backlog.append((backlog_reading, backlog_bytes))
 
         return reading, serialized_bytes
 

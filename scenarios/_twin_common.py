@@ -389,6 +389,7 @@ class ScenarioContext:
         self.injected_ids: List[str] = []
         self.sim_speed = 1.0
         self.start_sim_time: str = ""
+        self.settle_end_sim_time: Optional[str] = None
 
         # Subprocesses
         self._guardian_proc: Optional[subprocess.Popen] = None
@@ -463,35 +464,178 @@ class ScenarioContext:
         wall_seconds = sim_seconds / speed
         time.sleep(wall_seconds)
 
+    def settle(self, timeout_sim_seconds: float = 600.0) -> float:
+        """Settle the city into a verified clean, quiet baseline before or after a scenario.
+
+        Steps:
+        1. Clear all active attacks and events.
+        2. Wait until delayed_frames_pending == 0.
+        3. Reset actuators to default states (traffic_camera -> normal, power_load -> grid_a).
+        4. Reinstate any isolated or quarantined device as caller 'scenario'.
+        5. Wait until every water_level device reads below 5 m (open valves while waiting, then reset to half).
+        6. Wait until no new containment or command has appeared in the journal for 10 sim-s.
+        7. Record settle duration in scenario log and update start_sim_time / settle_end_sim_time.
+        """
+        start_wall = time.monotonic()
+        start_st = self.rest.get_status()
+        self.sim_speed = float(start_st.get("sim_speed", 1.0))
+        start_sim_ts = start_st.get("sim_time", "")
+        start_sim_s = parse_sim_timestamp(start_sim_ts)
+        if start_sim_s <= 0.0:
+            start_sim_s = time.time()
+        deadline_sim_s = start_sim_s + timeout_sim_seconds
+
+        def _check_deadline(phase: str) -> None:
+            curr_s = self.get_sim_time_seconds()
+            if curr_s > deadline_sim_s:
+                raise TimeoutError(
+                    f"Settle step timed out during '{phase}' after {timeout_sim_seconds:.1f} sim-seconds "
+                    f"(current_sim_s={curr_s:.1f}, deadline_sim_s={deadline_sim_s:.1f})"
+                )
+
+        # 1. Clear all attacks and events
+        try:
+            self.rest.clear_attack("all")
+        except Exception as e:
+            logger.debug(f"Settle clear_attack note: {e}")
+        try:
+            self.rest.clear_event("all")
+        except Exception as e:
+            logger.debug(f"Settle clear_event note: {e}")
+
+        # 2. Wait until delayed_frames_pending == 0
+        while True:
+            _check_deadline("delayed_frames_pending drain")
+            st = self.rest.get_status()
+            pending = int(st.get("delayed_frames_pending", 0))
+            if pending == 0:
+                break
+            self.sim_sleep(0.5)
+
+        # 3. Fetch device inventory and reset actuators & reinstate devices
+        dev_list = self.mcp.list_devices()
+        for d in dev_list:
+            _check_deadline("actuator and containment reset")
+            did = d.get("device_id")
+            dtype = d.get("device_type")
+            status = d.get("status")
+            act = d.get("actuator_state", {})
+
+            # 4. Reinstate any contained device as caller "scenario"
+            if did and status in ("isolated", "quarantined"):
+                try:
+                    self.mcp.call_tool("reinstate_device", {"device_id": did})
+                except Exception as e:
+                    logger.debug(f"Settle reinstate notice for {did}: {e}")
+
+            # Reset actuators
+            if dtype == "traffic_camera" and act.get("signal_plan") != "normal":
+                try:
+                    self.mcp.call_tool("set_signal_plan", {"device_id": did, "target_state": "normal"})
+                except Exception as e:
+                    logger.debug(f"Settle set_signal_plan notice: {e}")
+            elif dtype == "power_load" and act.get("grid_state") != "grid_a":
+                try:
+                    self.mcp.call_tool("switch_grid", {"device_id": did, "target_state": "grid_a"})
+                except Exception as e:
+                    logger.debug(f"Settle switch_grid notice: {e}")
+
+        # 5. Wait until every water_level device reads below 5 m (open valves while waiting, then reset them)
+        wl_devices = [d.get("device_id") for d in dev_list if d.get("device_type") == "water_level" and d.get("device_id")]
+        valves_opened = False
+        while True:
+            _check_deadline("water_level drainage")
+            high_water = False
+            for did in wl_devices:
+                try:
+                    dev_st = self.mcp.call_tool("get_device_state", {"device_id": did})
+                    val = float(dev_st.get("current_value", 0.0))
+                    if val >= 5.0:
+                        high_water = True
+                        break
+                except Exception:
+                    pass
+            if not high_water:
+                break
+            if not valves_opened:
+                for did in wl_devices:
+                    try:
+                        self.mcp.call_tool("set_valve", {"device_id": did, "target_state": "open"})
+                    except Exception:
+                        pass
+                valves_opened = True
+            self.sim_sleep(0.5)
+
+        # Reset water level valves back to default "half"
+        for did in wl_devices:
+            try:
+                self.mcp.call_tool("set_valve", {"device_id": did, "target_state": "half"})
+            except Exception:
+                pass
+
+        # 6. Wait until no new containment or command has appeared in the journal for 10 sim-s
+        quiet_needed_sim_s = 10.0
+        while True:
+            _check_deadline("quiet period wait")
+            now_sim_s = self.get_sim_time_seconds()
+
+            entries = self.rest.get_journal(limit=200)
+            action_entries = [
+                e for e in entries
+                if e.get("source") in ("containment", "command")
+            ]
+            if action_entries:
+                latest_action_ts = max(
+                    parse_sim_timestamp(e.get("sim_ts", ""))
+                    for e in action_entries
+                )
+                quiet_sim_elapsed = now_sim_s - latest_action_ts
+            else:
+                quiet_sim_elapsed = 100.0
+
+            if quiet_sim_elapsed >= quiet_needed_sim_s:
+                break
+
+            sleep_sim = max(0.5, quiet_needed_sim_s - quiet_sim_elapsed)
+            self.sim_sleep(min(sleep_sim, 2.0))
+
+        # 7. Record settle duration in scenario log and update start_sim_time / settle_end_sim_time
+        end_wall = time.monotonic()
+        end_st = self.rest.get_status()
+        end_sim_ts = end_st.get("sim_time", "")
+        end_sim_s = parse_sim_timestamp(end_sim_ts)
+        duration_sim_s = max(0.0, end_sim_s - start_sim_s)
+        duration_wall_s = max(0.0, end_wall - start_wall)
+
+        self.settle_end_sim_time = end_sim_ts
+        self.start_sim_time = end_sim_ts
+
+        self.log_event(end_sim_ts, "scenario", "settle_completed", {
+            "settle_sim_duration_s": round(duration_sim_s, 2),
+            "settle_wall_duration_s": round(duration_wall_s, 2),
+            "settle_start_sim_time": start_sim_ts,
+            "settle_end_sim_time": end_sim_ts,
+        })
+        print(
+            f"[{self.scenario_id}] Settle completed in {duration_sim_s:.1f} sim-s "
+            f"({duration_wall_s:.2f} wall-s) at sim_time {end_sim_ts}",
+            flush=True,
+        )
+        return duration_sim_s
+
     def __enter__(self) -> "ScenarioContext":
         print(f"=== Starting Scenario {self.scenario_id}: {self.name} ===", flush=True)
-        # Ensure clean state between sequential scenarios
-        if not self.partners:
-            try:
-                self.rest.clear_event("all")
-                self.rest.clear_attack("all")
-                dev_list = self.mcp.list_devices()
-                for d in dev_list:
-                    did = d.get("device_id")
-                    if did and d.get("status") in ("isolated", "quarantined"):
-                        self.mcp.call_tool("reinstate_device", {"device_id": did})
-                    act = d.get("actuator_state", {})
-                    dtype = d.get("device_type")
-                    if dtype == "water_level" and act.get("valve_position") != "half":
-                        self.mcp.call_tool("set_valve", {"device_id": did, "target_state": "half"})
-                    elif dtype == "power_load" and act.get("grid_state") != "grid_a":
-                        self.mcp.call_tool("switch_grid", {"device_id": did, "target_state": "grid_a"})
-                    elif dtype == "traffic_camera" and act.get("signal_plan") != "normal":
-                        self.mcp.call_tool("set_signal_plan", {"device_id": did, "target_state": "normal"})
-            except Exception as e:
-                logger.debug(f"Pre-scenario reset notice: {e}")
-
-        # 1. Fetch initial status to get sim_speed and sim_time
+        # Fetch initial status to get sim_speed
         st = self.rest.get_status()
         self.sim_speed = float(st.get("sim_speed", 1.0))
-        sim_time = st.get("sim_time", "")
-        self.start_sim_time = sim_time
-        self.log_event(sim_time, "scenario", "scenario_start", {
+
+        # Run settle step before mocks and scenario logic start
+        if not self.partners:
+            self.settle()
+        else:
+            self.start_sim_time = st.get("sim_time", "")
+
+        self.log_event(self.start_sim_time, "scenario", "scenario_start", {
             "scenario": self.name,
             "sim_speed": self.sim_speed,
             "with_mocks": self.with_mocks,
@@ -499,7 +643,7 @@ class ScenarioContext:
             "no_brain": self.no_brain,
         })
 
-        # 2. Start mock subprocesses if requested
+        # Start mock subprocesses if requested
         if self.with_mocks:
             self._start_mocks()
 
@@ -629,12 +773,13 @@ class ScenarioContext:
         allowed_zones: Set[str],
     ) -> Tuple[bool, str]:
         """Verify no containment on other devices and no commands in other zones."""
-        journal = self.rest.get_journal(since_ts=self.start_sim_time, limit=1000)
+        filter_ts = getattr(self, "settle_end_sim_time", None) or self.start_sim_time
+        journal = self.rest.get_journal(since_ts=filter_ts, limit=1000)
         violating_containments = []
         violating_commands = []
 
         for e in journal:
-            if self.start_sim_time and e.get("sim_ts") and e.get("sim_ts") < self.start_sim_time:
+            if filter_ts and e.get("sim_ts") and e.get("sim_ts") <= filter_ts:
                 continue
             src = e.get("source")
             dt = e.get("detail", {})

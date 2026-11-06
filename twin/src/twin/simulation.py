@@ -295,6 +295,7 @@ class CitySimulator:
         self._clamped_attacks: set[str] = set()
         self.blocked_rogue_ids: set[str] = set()
         self.blocked_rogue_frames: Dict[str, int] = {}
+        self.streamer: Optional[Any] = None
 
         self._generate_device_inventory()
 
@@ -1080,6 +1081,14 @@ class CitySimulator:
                 run_id=self.run_id,
             )
         )
+
+        # Release any delayed frames still held for target device immediately in order
+        if self.streamer is not None and hasattr(self.streamer, "flush_delayed"):
+            flushed = self.streamer.flush_delayed(target_dev)
+            if flushed:
+                wire_records = [(r.reading_id, r.sig, len(b)) for r, b in flushed]
+                self.ledger.record_wire_batch(wire_records)
+
         return True
 
     def clear_all_attacks(self) -> None:
@@ -1097,6 +1106,12 @@ class CitySimulator:
             d.active_attacks.clear()
             d.drift_offset = 0.0
         self.ledger.deactivate_all_attacks(end_sim_time=self.get_sim_time())
+        # Release all delayed frames still held across all devices immediately in order
+        if self.streamer is not None and hasattr(self.streamer, "flush_delayed"):
+            flushed = self.streamer.flush_delayed()
+            if flushed:
+                wire_records = [(r.reading_id, r.sig, len(b)) for r, b in flushed]
+                self.ledger.record_wire_batch(wire_records)
 
     def tick(self) -> List[Dict[str, Any]]:
         """Execute one complete 10 Hz simulation tick.

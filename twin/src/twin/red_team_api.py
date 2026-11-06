@@ -479,8 +479,15 @@ def _query_journal_sync(db_path: str, since_sim_ts: Optional[str], limit: int) -
 
 def build_red_team_app(sim: CitySimulator, token: str, streamer: Optional[Any] = None) -> Starlette:
     """Build Starlette ASGI application hosting Red Team control endpoints."""
+    if streamer is not None:
+        sim.streamer = streamer
 
     async def api_status(request: Request) -> JSONResponse:
+        delayed_pending = (
+            streamer.get_delayed_frames_pending()
+            if streamer is not None and hasattr(streamer, "get_delayed_frames_pending")
+            else 0
+        )
         data = {
             "status": "ok",
             "sim_time": sim.get_sim_time(),
@@ -490,6 +497,7 @@ def build_red_team_app(sim: CitySimulator, token: str, streamer: Optional[Any] =
             "active_attacks_count": len(sim.active_attacks),
             "active_events_count": len(sim.active_events),
             "blocked_frames": dict(getattr(sim, "blocked_rogue_frames", {})),
+            "delayed_frames_pending": delayed_pending,
         }
         if streamer is not None:
             stream_stats = streamer.stats()
