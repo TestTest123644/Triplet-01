@@ -205,3 +205,125 @@ def test_consumer_receives_helper_keys(monkeypatch):
     assert source.consumer is not None
     for k, v in expected_sasl.items():
         assert captured_conf.get(k) == v, f"Expected {k}={v} in Consumer config, got {captured_conf.get(k)}"
+
+
+def test_producer_acks_all_idempotence_default(monkeypatch):
+    """Default acks is 'all' and enable.idempotence is True."""
+    monkeypatch.delenv("KAFKA_ACKS", raising=False)
+    conf = KafkaStreamer.build_producer_config(bootstrap_servers="mock:9092")
+    assert conf["acks"] == "all"
+    assert conf["enable.idempotence"] is True
+
+
+def test_producer_acks_override_1(monkeypatch):
+    """KAFKA_ACKS=1 disables idempotence."""
+    monkeypatch.setenv("KAFKA_ACKS", "1")
+    conf = KafkaStreamer.build_producer_config(bootstrap_servers="mock:9092")
+    assert conf["acks"] in (1, "1")
+    assert conf["enable.idempotence"] is False
+
+
+def test_producer_acks_override_0(monkeypatch):
+    """KAFKA_ACKS=0 disables idempotence."""
+    monkeypatch.setenv("KAFKA_ACKS", "0")
+    conf = KafkaStreamer.build_producer_config(bootstrap_servers="mock:9092")
+    assert conf["acks"] in (0, "0")
+    assert conf["enable.idempotence"] is False
+
+
+def test_producer_acks_invalid_raises(monkeypatch):
+    """Invalid KAFKA_ACKS raises ValueError naming KAFKA_ACKS and allowed values."""
+    monkeypatch.setenv("KAFKA_ACKS", "invalid")
+    with pytest.raises(ValueError, match="KAFKA_ACKS.*all, 1, 0"):
+        KafkaStreamer.build_producer_config(bootstrap_servers="mock:9092")
+
+
+def test_streamer_init_invalid_acks_raises(monkeypatch):
+    """Streamer startup fails immediately when KAFKA_ACKS is invalid."""
+    monkeypatch.setenv("KAFKA_ACKS", "2")
+    with pytest.raises(ValueError, match="KAFKA_ACKS"):
+        KafkaStreamer(bootstrap_servers="mock:9092", mock_mode=True)
+
+
+def test_kafka_client_config_ssl_ca_location_valid(monkeypatch):
+    """SASL_SSL with valid KAFKA_SSL_CA_LOCATION includes ssl.ca.location."""
+    with tempfile.NamedTemporaryFile("w", delete=False) as f:
+        f.write("-----BEGIN CERTIFICATE-----\nMOCK\n-----END CERTIFICATE-----\n")
+        ca_file = f.name
+
+    try:
+        monkeypatch.setenv("KAFKA_SECURITY_PROTOCOL", "SASL_SSL")
+        monkeypatch.setenv("KAFKA_USERNAME", "ssl_user")
+        monkeypatch.setenv("KAFKA_PASSWORD", "ssl_secret")
+        monkeypatch.setenv("KAFKA_SSL_CA_LOCATION", ca_file)
+
+        conf = kafka_client_config()
+        assert conf["security.protocol"] == "SASL_SSL"
+        assert conf["ssl.ca.location"] == ca_file
+    finally:
+        if os.path.exists(ca_file):
+            os.remove(ca_file)
+
+
+def test_kafka_client_config_ssl_ca_location_missing_raises(monkeypatch):
+    """Non-existent CA file specified in KAFKA_SSL_CA_LOCATION raises ValueError."""
+    monkeypatch.setenv("KAFKA_SECURITY_PROTOCOL", "SASL_SSL")
+    monkeypatch.setenv("KAFKA_USERNAME", "ssl_user")
+    monkeypatch.setenv("KAFKA_PASSWORD", "ssl_secret")
+    monkeypatch.setenv("KAFKA_SSL_CA_LOCATION", "/nonexistent/path/to/ca.pem")
+
+    with pytest.raises(ValueError, match="KAFKA_SSL_CA_LOCATION"):
+        kafka_client_config()
+
+
+def test_kafka_client_config_plaintext_ignores_ca_location(monkeypatch):
+    """PLAINTEXT protocol returns only security.protocol, ignoring KAFKA_SSL_CA_LOCATION."""
+    monkeypatch.setenv("KAFKA_SECURITY_PROTOCOL", "PLAINTEXT")
+    monkeypatch.setenv("KAFKA_SSL_CA_LOCATION", "/nonexistent/ignored/ca.pem")
+
+    conf = kafka_client_config()
+    assert conf == {"security.protocol": "PLAINTEXT"}
+
+
+def test_mock_kafka_config_ssl_ca_location(monkeypatch):
+    """twin/mocks/kafka_config handles KAFKA_SSL_CA_LOCATION identically."""
+    import mocks.kafka_config as mock_kc
+
+    with tempfile.NamedTemporaryFile("w", delete=False) as f:
+        f.write("-----BEGIN CERTIFICATE-----\nMOCK\n-----END CERTIFICATE-----\n")
+        ca_file = f.name
+
+    try:
+        monkeypatch.setenv("KAFKA_SECURITY_PROTOCOL", "SASL_SSL")
+        monkeypatch.setenv("KAFKA_USERNAME", "mock_user")
+        monkeypatch.setenv("KAFKA_PASSWORD", "mock_secret")
+        monkeypatch.setenv("KAFKA_SSL_CA_LOCATION", ca_file)
+
+        conf = mock_kc.kafka_client_config()
+        assert conf["security.protocol"] == "SASL_SSL"
+        assert conf["ssl.ca.location"] == ca_file
+
+        monkeypatch.setenv("KAFKA_SSL_CA_LOCATION", "/nonexistent/mock_ca.pem")
+        with pytest.raises(ValueError, match="KAFKA_SSL_CA_LOCATION"):
+            mock_kc.kafka_client_config()
+    finally:
+        if os.path.exists(ca_file):
+            os.remove(ca_file)
+
+
+def test_twin_src_never_touches_broker():
+    """Verify twin/src contains zero broker administration or topic creation methods."""
+    forbidden = ["create_topics", "NewTopic", "alter_configs", "create_partitions"]
+    src_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src"))
+    violations = []
+    for root, _, files in os.walk(src_dir):
+        for f in files:
+            if f.endswith(".py"):
+                path = os.path.join(root, f)
+                with open(path, "r", encoding="utf-8") as fh:
+                    for line_num, line in enumerate(fh, 1):
+                        for term in forbidden:
+                            if term in line:
+                                violations.append(f"{path}:{line_num}: {term} found in '{line.strip()}'")
+    assert not violations, f"Forbidden broker manipulation detected:\n" + "\n".join(violations)
+

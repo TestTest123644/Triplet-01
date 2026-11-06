@@ -21,10 +21,11 @@ def kafka_client_config() -> Dict[str, str]:
         KAFKA_PASSWORD_FILE: Path to file holding password (Docker-secret style, trailing newline stripped).
         KAFKA_PASSWORD: Plaintext password literal (used if KAFKA_PASSWORD_FILE is unset).
                         If both are set, KAFKA_PASSWORD_FILE wins.
+        KAFKA_SSL_CA_LOCATION: Path to CA certificate file (optional, only used for SASL_SSL).
 
     Returns:
         Dict[str, str] of configuration parameters to pass into confluent_kafka clients.
-        When protocol is PLAINTEXT, returns {"security.protocol": "PLAINTEXT"} with NO sasl.* keys.
+        When protocol is PLAINTEXT, returns {"security.protocol": "PLAINTEXT"} with NO sasl.* or ssl.* keys.
     """
     protocol = os.getenv("KAFKA_SECURITY_PROTOCOL", "PLAINTEXT").strip()
     allowed_protocols = ("PLAINTEXT", "SASL_PLAINTEXT", "SASL_SSL")
@@ -79,10 +80,21 @@ def kafka_client_config() -> Dict[str, str]:
             "Missing required environment variable for SASL authentication: KAFKA_PASSWORD or KAFKA_PASSWORD_FILE"
         )
 
-    return {
+    config: Dict[str, str] = {
         "security.protocol": protocol,
         "sasl.mechanism": mechanism,
         "sasl.username": username,
         "sasl.password": password,
     }
+
+    if protocol == "SASL_SSL":
+        ca_location = os.getenv("KAFKA_SSL_CA_LOCATION", "").strip()
+        if ca_location:
+            if not os.path.exists(ca_location):
+                raise ValueError(
+                    f"CA file specified by KAFKA_SSL_CA_LOCATION does not exist: '{ca_location}'"
+                )
+            config["ssl.ca.location"] = ca_location
+
+    return config
 

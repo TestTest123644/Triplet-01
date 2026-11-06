@@ -8,7 +8,7 @@ The Twin layer simulates 42 devices across 6 zones in Greater Tunis. It streams 
 
 All commands run from the repository root.
 
-If a container named "kafka" already exists, stop or rename it first (`docker stop kafka`).
+If a container named "kafka" already exists, remove or rename it first (`docker rm -f kafka` or `docker rename kafka kafka-old`).
 
 ```bash
 # 1. Start the Twin layer, Kafka broker, and console (SIM_SPEED=20 for scenario pace)
@@ -48,7 +48,7 @@ PYTHONPATH=src streamlit run dashboard.py
 
 ## Endpoints and services
 
-- **Kafka telemetry:** `localhost:19092` (internal `kafka:9092`, topic `twin.sensors`)
+- **Kafka telemetry:** `localhost:19092` (internal `kafka:9092`, topic `twin.sensors`). Accepts comma-separated brokers (`host1:port,host2:port,host3:port`) via `KAFKA_BOOTSTRAP_SERVERS`. The topic `twin.sensors` must already exist on the broker (the Twin never creates topics or modifies broker settings). Messages are keyed by `device_id` to ensure strict per-device ordering within partitions. Producer uses durable delivery (`acks=all`, `enable.idempotence=True`), overridable via `KAFKA_ACKS` (`all`, `1`, `0`). Set `WAIT_FOR_KAFKA=false` if broker ACLs disallow cluster description. Optional TLS CA file via `KAFKA_SSL_CA_LOCATION`.
 - **MCP command server:** `http://localhost:8000/sse` and `/mcp` (JSON-RPC)
 - **Red-team adversary API:** `http://localhost:8100/api/status` (header `X-Red-Team-Token`)
 - **Operations console:** `http://localhost:8501` (Streamlit)

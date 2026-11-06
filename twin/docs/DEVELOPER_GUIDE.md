@@ -33,14 +33,15 @@ Layer 1 simulates 42 physical IoT devices across 6 geographic zones in Greater T
 ```
 
 ### Core Architecture Rules
-1. **Unidirectional Streaming on Kafka:** Twin Layer streams telemetry to the Kafka topic `twin.sensors`. Partners only consume from this topic; never publish data to it.
-2. **Synchronous Commands over MCP:** Actuation commands (`dispatch`, `set_valve`, etc.) and queries (`get_device_key`, `list_devices`) run strictly over the Model Context Protocol (MCP) HTTP/SSE interface on port `8000`. We do not send commands over Kafka.
-3. **Dual Clocks:**
+1. **Unidirectional Streaming on Kafka:** Twin Layer streams telemetry to the Kafka topic `twin.sensors`. Partners only consume from this topic; never publish data to it. The topic must already exist on the broker (the Twin never creates topics or modifies broker settings). Messages are keyed by `device_id` to maintain strict per-device ordering within partitions.
+2. **Durable Producer Configuration:** Outbound streaming uses `acks="all"` and `enable.idempotence=True` by default to prevent message loss across a 3-node broker cluster. Overridable via `KAFKA_ACKS` (`all`, `1`, `0`). Supports comma-separated broker addresses (`KAFKA_BOOTSTRAP_SERVERS=host1:port,host2:port,host3:port`) and optional TLS CA certificates (`KAFKA_SSL_CA_LOCATION`). Set `WAIT_FOR_KAFKA=false` if partner ACLs disallow describing the cluster.
+3. **Synchronous Commands over MCP:** Actuation commands (`dispatch`, `set_valve`, etc.) and queries (`get_device_key`, `list_devices`) run strictly over the Model Context Protocol (MCP) HTTP/SSE interface on port `8000`. We do not send commands over Kafka.
+4. **Dual Clocks:**
    - **Simulation Time (`ts`):** RFC 3339 UTC string with second precision ending in `'Z'` (e.g. `2026-10-18T14:00:00Z`). All sensor timestamps reflect simulation time.
    - **Wall-Clock Time:** Used only inside the Twin process to pace the 10 Hz loop (sleeping ~100 ms between ticks).
-4. **Sub-300-Byte Payload Budget:** Every JSON payload pushed to Kafka stays strictly <= 300 bytes.
-5. **Cryptographic Signatures:** Every reading is signed by the device's private Ed25519 key. The signature is placed in the `sig` field of the Kafka envelope.
-6. **Ground Truth Isolation:** The local SQLite database (`ground_truth.db`) records true physical values and injected attacks. Neither City Brain nor Guardian can query this file directly. They must rely on public MCP endpoints and Kafka messages.
+5. **Sub-300-Byte Payload Budget:** Every JSON payload pushed to Kafka stays strictly <= 300 bytes.
+6. **Cryptographic Signatures:** Every reading is signed by the device's private Ed25519 key. The signature is placed in the `sig` field of the Kafka envelope.
+7. **Ground Truth Isolation:** The local SQLite database (`ground_truth.db`) records true physical values and injected attacks. Neither City Brain nor Guardian can query this file directly. They must rely on public MCP endpoints and Kafka messages.
 
 ---
 

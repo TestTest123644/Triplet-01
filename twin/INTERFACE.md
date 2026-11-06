@@ -6,7 +6,7 @@ The Twin layer (Layer 1) simulates 42 devices across Greater Tunis, streaming si
 
 ## What the Twin sends (Kafka `twin.sensors`)
 
-Broadcasts 420 messages/second (10 Hz per device) to Kafka topic `twin.sensors`. Key is `device_id`. Every payload is strictly <= 300 bytes and digitally signed with Ed25519.
+Broadcasts 420 messages/second (10 Hz per device) to Kafka topic `twin.sensors`. Messages are keyed by `device_id` so each device stays in order within its partition. The topic `twin.sensors` must already exist on the broker (the Twin never creates topics or alters broker settings). Every payload is strictly <= 300 bytes and digitally signed with Ed25519.
 
 Real telemetry payload:
 ```json
@@ -74,13 +74,16 @@ Error response shape:
 
 | Variable | Default | Purpose |
 | :--- | :--- | :--- |
-| `KAFKA_BOOTSTRAP_SERVERS` | `localhost:19092` | Kafka broker host (use `kafka:9092` in container network) |
-| `KAFKA_TOPIC` | `twin.sensors` | Telemetry topic name |
+| `KAFKA_BOOTSTRAP_SERVERS` | `localhost:19092` | Comma-separated broker list (`h1:p,h2:p,h3:p` or container `kafka:9092`) |
+| `KAFKA_TOPIC` | `twin.sensors` | Telemetry topic name (must already exist; Twin never creates topics) |
+| `KAFKA_ACKS` | `all` | Producer durability: `all` (with idempotence), `1`, or `0` |
 | `KAFKA_SECURITY_PROTOCOL` | `PLAINTEXT` | Broker protocol: `PLAINTEXT`, `SASL_PLAINTEXT`, `SASL_SSL` |
 | `KAFKA_SASL_MECHANISM` | `PLAIN` | SASL auth mechanism: `PLAIN`, `SCRAM-SHA-256`, `SCRAM-SHA-512` |
 | `KAFKA_USERNAME` | *(unset)* | SASL username |
 | `KAFKA_PASSWORD` | *(unset)* | SASL password literal |
 | `KAFKA_PASSWORD_FILE` | *(unset)* | Path to file containing SASL password (takes priority) |
+| `KAFKA_SSL_CA_LOCATION` | *(unset)* | Path to CA certificate file (optional, only used for `SASL_SSL`) |
+| `WAIT_FOR_KAFKA` | `true` | Set `false` to skip describe cluster check if broker ACLs disallow it |
 | `MCP_HOST` / `MCP_PORT` | `0.0.0.0` / `8000` | MCP server binding address |
 | `MCP_AUTH_TOKENS` | *(unset)* | Bearer tokens `principal:token,...` (off by default; callers logged as "anonymous") |
 | `RED_TEAM_PORT` | `8100` | Dedicated red-team attack injection REST port |

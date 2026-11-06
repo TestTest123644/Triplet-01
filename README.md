@@ -31,7 +31,7 @@ Monitors Kafka telemetry in parallel with the City Brain to protect municipal in
 
 All commands run from the repository root.
 
-If a container named "kafka" already exists, stop or rename it first (`docker stop kafka`).
+If a container named "kafka" already exists, remove or rename it first (`docker rm -f kafka` or `docker rename kafka kafka-old`).
 
 To launch the triplet infrastructure (Kafka broker, Twin Layer simulation, and Operations Console):
 
@@ -47,7 +47,7 @@ python3 scenarios/t5_grid_overload.py --with-mocks
 ```
 
 ### Shared Service Endpoints
-- **Apache Kafka:** `localhost:19092` (Topic: `twin.sensors`)
+- **Apache Kafka:** `localhost:19092` (Topic: `twin.sensors`, pre-existing, supports comma-separated brokers)
 - **Twin MCP Server:** `http://localhost:8000/sse` and `/mcp`
 - **Red-Team Adversary API:** `http://localhost:8100/api/status`
 - **Twin Operations Console:** `http://localhost:8501`

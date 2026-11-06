@@ -103,6 +103,25 @@ def tamper_value_bytes(serialized_bytes: bytes) -> bytes:
     return serialized_bytes[:val_start] + bytes(val_bytes) + serialized_bytes[val_end:]
 
 
+def get_producer_acks_config() -> Tuple[Union[str, int], bool]:
+    """Parse and validate KAFKA_ACKS environment variable.
+
+    Returns:
+        (acks, enable_idempotence) tuple.
+        Allowed KAFKA_ACKS values: 'all' (default), '1', '0'.
+        enable.idempotence is True only when acks is 'all'.
+    """
+    raw = os.getenv("KAFKA_ACKS", "all").strip().lower()
+    allowed = ("all", "1", "0")
+    if raw not in allowed:
+        raise ValueError(
+            f"Invalid KAFKA_ACKS: '{raw}'. Allowed: {', '.join(allowed)}"
+        )
+    if raw == "all":
+        return "all", True
+    return int(raw), False
+
+
 class KafkaStreamer:
     """Outbound Kafka producer streaming signed telemetry envelopes under 300 bytes."""
 
@@ -148,25 +167,17 @@ class KafkaStreamer:
         # Operational health state tracking
         self._error_history: collections.deque[float] = collections.deque(maxlen=1000)
         self._kafka_state: str = "disabled" if mock_mode else "ok"
+        self._producer_conf: Dict[str, Any] = {}
+
+        # Validate KAFKA_ACKS env var on startup (raises ValueError if invalid)
+        get_producer_acks_config()
 
         if not mock_mode:
-            sasl_conf = kafka_client_config()
             try:
                 import confluent_kafka
 
-                message_timeout_ms = int(os.getenv("KAFKA_MESSAGE_TIMEOUT_MS", "10000"))
-                conf = {
-                    "bootstrap.servers": self.bootstrap_servers,
-                    "linger.ms": 5,
-                    "batch.num.messages": 1000,
-                    "queue.buffering.max.messages": 100000,
-                    "message.timeout.ms": message_timeout_ms,
-                    "acks": 1,
-                }
-                conf.update(sasl_conf)
-                if producer_config:
-                    conf.update(producer_config)
-
+                conf = self.build_producer_config(self.bootstrap_servers, producer_config)
+                self._producer_conf = dict(conf)
                 self.producer = confluent_kafka.Producer(conf)
                 self._kafka_state = "ok"
             except ValueError:
@@ -178,6 +189,30 @@ class KafkaStreamer:
                 )
                 self.producer = None
                 self._kafka_state = "disabled"
+
+    @classmethod
+    def build_producer_config(
+        cls,
+        bootstrap_servers: str = "localhost:19092",
+        producer_config: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Build producer configuration dictionary with security settings and durable acks/idempotence."""
+        acks_val, enable_idempotence = get_producer_acks_config()
+        sasl_conf = kafka_client_config()
+        message_timeout_ms = int(os.getenv("KAFKA_MESSAGE_TIMEOUT_MS", "10000"))
+        conf: Dict[str, Any] = {
+            "bootstrap.servers": bootstrap_servers,
+            "linger.ms": 5,
+            "batch.num.messages": 1000,
+            "queue.buffering.max.messages": 100000,
+            "message.timeout.ms": message_timeout_ms,
+            "acks": acks_val,
+            "enable.idempotence": enable_idempotence,
+        }
+        conf.update(sasl_conf)
+        if producer_config:
+            conf.update(producer_config)
+        return conf
 
     def _record_error(self) -> None:
         """Record error timestamp and handle transition to degraded state."""
