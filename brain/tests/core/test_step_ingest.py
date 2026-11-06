@@ -196,3 +196,15 @@ def test_a_second_registry_load_is_reported_as_a_reload():
     s, _ = step(fresh_state(), RegistryLoaded((dev,)))
     _, fx = step(s, RegistryLoaded((dev,)))
     assert [e.event["data"]["reason"] for e in fx if isinstance(e, Publish)] == ["registry_reloaded"]
+
+
+def test_device_silent_past_the_jump_limit_is_let_back_in():
+    jump = POLICY["epochs"]["seq_jump_max"]
+    s = far_along(("z1-wl1", "z2-wl1"))
+    for n in range(1, 4):
+        s, _ = step(s, ReadingReceived(make_observation(
+            seq=5000 + n * jump, reading_id=f"a{n}", sig_hash=f"a{n}", sim_time=LATER)))
+    back = s.global_tick
+    s, _ = step(s, ReadingReceived(make_observation(
+        device_id="z2-wl1", seq=back + 1, reading_id="b", sig_hash="b", sim_time=LATER)))
+    assert s.counters["SEQ_JUMP"] == 0 and s.cursors["z2-wl1"].seq == back + 1

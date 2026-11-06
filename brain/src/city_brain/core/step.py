@@ -118,8 +118,8 @@ def _start_epoch(state: BrainState, effects: list[Effect]) -> None:
 
 
 def _seq_jumped(state: BrainState, cursor: DeviceCursor | None, obs: Observation, jump_max: int) -> bool:
-    if cursor is not None:
-        return obs.seq > cursor.seq + jump_max
+    if cursor is not None:  # against the global tick too: a long silence must not lock a device out
+        return obs.seq > max(cursor.seq, state.global_tick) + jump_max
     return state.epoch_origin is not None and obs.seq > state.global_tick + jump_max
 
 
@@ -181,7 +181,10 @@ def _water_reading(state: BrainState, obs: Observation, effects: list[Effect]) -
     )
     coordinator.note_reading(state, obs)
     effects.extend(coordinator.on_estimate(state))
-    _check_recovery(state, target, water_filter, valve_state, effects)
+    window_ticks = round(float(state.policy["verification"]["close_window_s"]) / state.sample_period_s)
+    readings = state.window_readings.setdefault(device_id, deque(maxlen=window_ticks + 1))
+    readings.append((obs.seq, obs.reading_id, obs.sig_hash))
+    _check_recovery(state, target, water_filter, valve_state, readings, effects)
     intent = plan_water_t0(context, state.policy)
     if intent is not None and coordinator.may_propose(state, intent):
         effects.extend(coordinator.propose(state, intent))
@@ -189,13 +192,20 @@ def _water_reading(state: BrainState, obs: Observation, effects: list[Effect]) -
 
 
 def _check_recovery(
-    state: BrainState, target: str, water_filter: WaterFilter, valve_state: str, effects: list[Effect]
+    state: BrainState,
+    target: str,
+    water_filter: WaterFilter,
+    valve_state: str,
+    readings: Sequence[tuple[int, str, str]],
+    effects: list[Effect],
 ) -> None:
     """A suspect actuator is cleared by behaving as commanded, not by waiting (spec 8.8)."""
     if target not in state.suspect:
         return
     window_s = float(state.policy["verification"]["close_window_s"])
-    slope = water_filter.observed_slope(state.global_tick - round(window_s / state.sample_period_s))
+    since_tick = state.global_tick - round(window_s / state.sample_period_s)
+    excluded = frozenset(coordinator.untrusted_ticks(state, readings))
+    slope = water_filter.observed_slope(since_tick, exclude_ticks=excluded)  # None under 10 usable points
     if slope is not None and matches_commanded(slope, valve_state, state.policy):
         state.suspect.discard(target)
         effects.append(Publish(status_event(state, "actuator_recovered", {"target": target})))

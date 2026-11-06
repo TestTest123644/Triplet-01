@@ -774,3 +774,36 @@ def test_dispatched_event_carries_the_resolved_evidence():
     assert len(evidence) == CFG.policy["water"]["evidence_count"]
     assert all(r["trust_state"] == "TRUSTED" and r["weight"] > 0 for r in evidence)
     assert "evidence" not in commands(s.last_effects, "AWAITING_TRUST")[0]["data"]
+
+
+def test_untrusted_readings_cannot_clear_suspect():
+    s, _ = verifying_open()
+    s = feed_channel(s, DEVICE, seconds=OPEN_DUE_S, rate=0.02)
+    assert DEVICE in s.suspect
+    s = feed_channel(s, DEVICE, seconds=20.0, rate=-0.03, verdict=None)
+    start = s.global_tick
+    for tick in range(start - 199, start + 1):
+        s = apply(s, VerdictReceived(verdict_for(DEVICE, tick, TrustState.UNTRUSTED, trust=0.0)))
+    s = feed_channel(s, DEVICE, seconds=0.1, rate=-0.03, verdict=TrustState.UNTRUSTED)
+    assert DEVICE in s.suspect and statuses(s.last_effects, "actuator_recovered") == []
+
+
+def test_readings_still_awaiting_a_verdict_cannot_clear_suspect():
+    s, _ = verifying_open()
+    s = feed_channel(s, DEVICE, seconds=OPEN_DUE_S, rate=0.02)
+    s = feed_channel(s, DEVICE, seconds=20.0, rate=-0.03, verdict=None)
+    assert DEVICE in s.suspect
+
+
+def test_recovery_needs_ten_usable_points():
+    s, _ = verifying_open()
+    s = feed_channel(s, DEVICE, seconds=OPEN_DUE_S, rate=0.02)
+    s = feed_channel(s, DEVICE, seconds=20.0, rate=-0.03, verdict=None)
+    start = s.global_tick
+    for tick in range(start - 8, start + 1):  # nine verdicts, with the next reading unjudged
+        s = apply(s, VerdictReceived(verdict_for(DEVICE, tick)))
+    s = feed_channel(s, DEVICE, seconds=0.1, rate=-0.03, verdict=None)
+    assert DEVICE in s.suspect
+    s = apply(s, VerdictReceived(verdict_for(DEVICE, start - 9)))
+    s = feed_channel(s, DEVICE, seconds=0.1, rate=-0.03, verdict=None)
+    assert DEVICE not in s.suspect

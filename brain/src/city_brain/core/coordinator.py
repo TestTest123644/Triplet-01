@@ -3,6 +3,8 @@
 Every function mutates `state` on behalf of `step` and returns the effects to emit.
 """
 
+from collections.abc import Iterable
+
 from city_brain.core.events import CancelTimer, CommandResult, Effect, Publish, SendCommand, StartTimer, TimerFired
 from city_brain.core.records import alert_event, command_event, decision_event, verification_event
 from city_brain.core.shield import ShieldContext, evaluate
@@ -297,10 +299,10 @@ def _adopt_state(state: BrainState, intent: ActionIntent) -> None:
             state.registry[device_id] = device.model_copy(update={"actuator": actuator})
 
 
-def _untrusted_ticks(state: BrainState, record: ActionRecord) -> list[int]:
-    """Window ticks whose reading has no TRUSTED or DOUBTFUL verdict as the window closes (spec 8.8)."""
+def untrusted_ticks(state: BrainState, readings: Iterable[tuple[int, str, str]]) -> list[int]:
+    """Ticks whose reading has no TRUSTED or DOUBTFUL verdict right now (spec 8.8)."""
     ticks = []
-    for tick, reading_id, sig_hash in record.window_readings:
+    for tick, reading_id, sig_hash in readings:
         verdict = state.ledger.lookup(reading_id, sig_hash, state.sim_now)
         if verdict is None or verdict.state not in COUNTS_FOR_VERIFICATION:
             ticks.append(tick)
@@ -319,7 +321,7 @@ def _verify(state: BrainState, record: ActionRecord) -> list[Effect]:
     intent = record.intent
     expected = intent.expected_effect
     since_tick = record.dispatch_tick + SETTLE_TICKS
-    excluded = _untrusted_ticks(state, record)
+    excluded = untrusted_ticks(state, record.window_readings)
     slope = state.filters[expected.channel].observed_slope(since_tick, exclude_ticks=frozenset(excluded))
     if slope is None:
         verdict = "inconclusive"

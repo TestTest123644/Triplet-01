@@ -69,6 +69,8 @@ class BrainState:
     epoch_candidate_tick: int | None = None
     device_verdicts: dict[str, Verdict] = field(default_factory=dict)  # newest per device
     last_heard: dict[str, int] = field(default_factory=dict)  # tick of the channel's last reading
+    # (tick, reading_id, sig_hash) per channel, one recovery window long.
+    window_readings: dict[str, deque[tuple[int, str, str]]] = field(default_factory=dict)
     silent: set[str] = field(default_factory=set)  # channels already alerted as silent
 
     @classmethod

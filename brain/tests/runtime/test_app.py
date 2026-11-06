@@ -261,3 +261,18 @@ async def test_epoch_change_right_after_a_reload_does_not_reload_again(rig, monk
     script(monkeypatch, [Publish({"type": "status", "data": {"reason": "epoch_changed"}})])
     await rig.app.feed(TimerFired("t", "k"))
     assert rig.app._last_reload == 0.0
+
+
+async def test_failed_reload_does_not_lose_the_key_change(rig, monkeypatch):
+    rig.twin.restart()
+    good = rig.twin.profile.map_device
+
+    def broken(raw):
+        raise ProfileError("bad device")
+
+    monkeypatch.setattr(rig.twin.profile, "map_device", broken)
+    with pytest.raises(ProfileError):
+        await rig.app.reload_registry()
+    monkeypatch.setattr(rig.twin.profile, "map_device", good)
+    await rig.app.reload_registry()
+    assert rig.app.state.epoch == 1

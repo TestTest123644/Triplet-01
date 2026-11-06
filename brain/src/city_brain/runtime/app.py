@@ -106,9 +106,9 @@ class BrainApp:
 
     async def _load_registry(self) -> None:
         raw_devices, keys, _ = await self._twin.load_registry()
-        keys_changed = any(self._keys[d] != keys[d] for d in self._keys.keys() & keys.keys())
-        self._keys = dict(keys)
         devices = tuple(self._profile.map_device(raw) for raw in raw_devices)
+        keys_changed = any(self._keys[d] != keys[d] for d in self._keys.keys() & keys.keys())
+        self._keys = dict(keys)  # only now: a failed load must not hide the change from the next one
         self._keyring.clear()
         for device_id, key in keys.items():
             self._keyring.set(device_id, key)

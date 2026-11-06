@@ -52,5 +52,6 @@ def start_new_epoch(state: BrainState) -> None:
     state.epoch_candidate_tick = None
     state.device_verdicts.clear()
     state.last_heard.clear()
+    state.window_readings.clear()
     state.silent.clear()
     state.bucket = new_token_bucket(state.policy)
