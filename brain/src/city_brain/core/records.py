@@ -5,6 +5,7 @@ The core never sets `time`; the log sink adds it. `data` holds JSON-native value
 """
 
 import dataclasses
+import math
 from collections.abc import Sequence
 from datetime import datetime, timezone
 from enum import Enum
@@ -32,8 +33,12 @@ def _native(value):
     if isinstance(value, bool) or value is None or isinstance(value, (int, str)):
         return value
     if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError("NaN and infinity cannot appear in a record")
         return round(value, FLOAT_DIGITS)
     if isinstance(value, datetime):
+        if value.tzinfo is None:
+            raise ValueError("naive datetime cannot appear in a record")
         return format_time(value)
     if isinstance(value, BaseModel):
         return {name: _native(getattr(value, name)) for name in type(value).model_fields}
@@ -56,6 +61,7 @@ def _envelope(
     correlation_id: str | None,
     action_id: str | None,
 ) -> dict:
+    native = _native(data)  # may raise; do it before consuming a sequence number
     event_id = f"{state.epoch}-{state.event_seq}"
     state.event_seq += 1
     return {
@@ -70,7 +76,7 @@ def _envelope(
         "actionid": action_id,
         "schemaversion": "1",
         "datacontenttype": "application/json",
-        "data": _native(data),
+        "data": native,
     }
 
 
@@ -98,12 +104,13 @@ def decision_event(
         "rationale": rationale,
         "would_change_if": would_change_if,
     }
+    correlation_id = intent.incident_id if intent is not None else incident.get("incident_id")
     return _envelope(
         state,
         "decision",
         str(incident.get("zone") or "city"),
         data,
-        None if intent is None else intent.incident_id,
+        correlation_id,
         None if intent is None else intent.action_id,
     )
 
@@ -138,9 +145,12 @@ def verification_event(
     expected: ExpectedEffect,
     observed: dict,
     verdict: Literal["verified", "unverified", "inconclusive"],
+    *,
+    target: str,
+    incident_id: str,
 ) -> dict:
     data = {"expected": expected, "observed": observed, "verdict": verdict}
-    return _envelope(state, "verification", expected.channel, data, None, action_id)
+    return _envelope(state, "verification", target, data, incident_id, action_id)
 
 
 def alert_event(

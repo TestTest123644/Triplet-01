@@ -3,11 +3,13 @@ from datetime import timedelta
 from pathlib import Path
 
 import jsonschema
+from datetime import datetime
 import pytest
 
 from city_brain.config import load_config
 from city_brain.core.events import Publish, ReadingReceived, RegistryLoaded
 from city_brain.core.records import (
+    _native,
     alert_event,
     command_event,
     decision_event,
@@ -94,7 +96,7 @@ def sample_events():
         command_event(s, i, sample_shield(), ActionStatus.DISPATCHED,
                       {"name": "set_valve", "args": {"state": "open"}}, {"ok": True}, ["R1_OK"]),
         command_event(s, i, sample_shield(False), ActionStatus.REFUSED, None, None, ["NO_OP"]),
-        verification_event(s, "a-1", EXPECTED, {"rate": -0.02}, "verified"),
+        verification_event(s, "a-1", EXPECTED, {"rate": -0.02}, "verified", target="z1-v1", incident_id="i-1"),
         alert_event(s, "operator", "high", "ACTUATOR_SUSPECT", "valve did not move",
                     {"action_id": "a-1", "incident_id": "i-1", "target": "z1-v1"}),
         alert_event(s, "guardian", "low", "X", "m", {}),
@@ -179,3 +181,58 @@ def test_epoch_change_resets_sequence_and_carries_new_epoch():
     assert ev["data"]["reason"] == "epoch_changed"
     assert ev["epoch"] == 1 and ev["id"] == "1-0"
     jsonschema.validate(ev, BRAIN_EVENT_SCHEMA)
+
+
+def test_verification_subject_and_correlation():
+    ev = verification_event(running_state(), "a-1", EXPECTED, {"rate": -0.02}, "verified",
+                            target="z1-v1", incident_id="i-1")
+    assert ev["subject"] == "z1-v1" and ev["correlationid"] == "i-1" and ev["actionid"] == "a-1"
+
+
+def test_hold_correlationid_from_incident():
+    s = running_state()
+    inc = {"kind": "STALE", "zone": "zone-1", "belief": 0.5, "status": "OPEN", "incident_id": "i-9"}
+    ev = decision_event(s, None, "hold", inc, "water.t0", (), alternatives(), "stale", ["fresh data"])
+    assert ev["correlationid"] == "i-9" and ev["actionid"] is None
+    ev2 = sample_decision(s, sample_intent())
+    assert ev2["correlationid"] == "i-1"
+
+
+def test_each_builder_increments_event_seq_once():
+    s = running_state()
+    i = sample_intent()
+    calls = [
+        lambda: status_event(s, "x", {}),
+        lambda: sample_decision(s, i),
+        lambda: command_event(s, i, sample_shield(), ActionStatus.DISPATCHED, None, None, []),
+        lambda: verification_event(s, "a-1", EXPECTED, {}, "verified", target="t", incident_id="i"),
+        lambda: alert_event(s, "operator", "low", "C", "m", {}),
+    ]
+    for n, call in enumerate(calls, start=1):
+        call()
+        assert s.event_seq == n
+
+
+def test_failed_normalisation_leaves_no_sequence_gap():
+    s = running_state()
+    with pytest.raises(TypeError):
+        status_event(s, "x", {"bad": object()})
+    assert s.event_seq == 0
+    assert status_event(s, "x", {})["id"] == "0-0"
+
+
+def test_native_rejects_nonfinite_and_naive():
+    for bad in (float("nan"), float("inf"), -float("inf")):
+        with pytest.raises(ValueError):
+            _native({"v": bad})
+    with pytest.raises(ValueError):
+        _native(datetime(2026, 1, 1))
+    with pytest.raises(TypeError):
+        _native(object())
+
+
+def test_native_canonical_forms():
+    out = _native({"b": {3, 1, 2}, "a": (1, 2), "twin_reply": {"level": 1.23456789, "xs": [0.1234567891]}})
+    assert out == {"a": [1, 2], "b": [1, 2, 3], "twin_reply": {"level": 1.234568, "xs": [0.123457]}}
+    assert list(out) == ["a", "b", "twin_reply"]
+    json.dumps(out, allow_nan=False)
