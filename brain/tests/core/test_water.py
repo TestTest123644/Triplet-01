@@ -11,12 +11,13 @@ from city_brain.domain.types import RiskClass, StateKind, TrustState, EvidenceRe
 from tests.factories import T0
 
 CFG = load_config("config/standalone.yaml")
-POLICY = {**CFG.policy, "filter": {"stale_s": 2.0}}
+POLICY = CFG.policy
 DEVICE = "z1-wl1"
 
 
-def fake_filter(level, flags=(), initialised=True):
-    return SimpleNamespace(level=level, flags=frozenset(flags), initialised=initialised)
+def fake_filter(level, flags=(), initialised=True, stale=False):
+    return SimpleNamespace(level=level, flags=frozenset(flags), initialised=initialised,
+                           is_stale=lambda tick: stale)
 
 
 def refs(n=5, last_at=T0):
@@ -30,12 +31,12 @@ def refs(n=5, last_at=T0):
     )
 
 
-def ctx(level, valve="closed", flags=(), below_for_s=None, initialised=True, recent=None, now=T0, plan_version=1):
+def ctx(level, valve="closed", flags=(), below_for_s=None, initialised=True, recent=None, now=T0, plan_version=1, stale=False):
     return WaterContext(
-        device_id=DEVICE, zone_id="zone-1", filter=fake_filter(level, flags, initialised),
+        device_id=DEVICE, zone_id="zone-1", filter=fake_filter(level, flags, initialised, stale),
         valve_state=valve, recent=refs() if recent is None else recent,
         below_low_since=None if below_for_s is None else now - timedelta(seconds=below_for_s),
-        now=now, plan_version=plan_version,
+        now=now, plan_version=plan_version, global_tick=1,
     )
 
 
@@ -108,11 +109,17 @@ def test_uninitialised_filter_never_planned():
     assert water_hold_reason(c, POLICY) == "STALE"
 
 
-def test_stale_by_age_of_last_evidence():
-    c = ctx(level=8.0, recent=refs(last_at=T0 - timedelta(seconds=2.0)))
+def test_stale_filter_never_planned():
+    c = ctx(level=8.0, stale=True)
     assert plan_water_t0(c, POLICY) is None and water_hold_reason(c, POLICY) == "STALE"
-    fresh = ctx(level=8.0, recent=refs(last_at=T0 - timedelta(seconds=1.9)))
-    assert water_hold_reason(fresh, POLICY) is None
+
+
+def test_real_filter_goes_stale():
+    f = WaterFilter(CFG.params["filter"])
+    f.update(value=6.5, tick=1, weight=1.0, u=0.0)
+    assert plan_water_t0(WaterContext(DEVICE, "zone-1", f, "closed", refs(), None, T0, 2, 1), POLICY)
+    late = WaterContext(DEVICE, "zone-1", f, "closed", refs(), None, T0, 2, 1 + 20)
+    assert plan_water_t0(late, POLICY) is None and water_hold_reason(late, POLICY) == "STALE"
 
 
 def test_no_evidence_is_stale():
@@ -133,5 +140,37 @@ def test_hold_reason_priority():
 def test_real_filter_accepted():
     f = WaterFilter(CFG.params["filter"])
     f.update(value=6.5, tick=1, weight=1.0, u=0.0)
-    c = WaterContext(DEVICE, "zone-1", f, "closed", refs(), None, T0, 2)
+    c = WaterContext(DEVICE, "zone-1", f, "closed", refs(), None, T0, 2, 1)
     assert plan_water_t0(c, POLICY).incident_id == f"flood-risk:{DEVICE}:2"
+
+
+def test_exact_boundaries():
+    assert plan_water_t0(ctx(level=6.0, valve="closed"), POLICY).state == "open"
+    assert plan_water_t0(ctx(level=3.0, valve="open", below_for_s=5.0), POLICY).state == "closed"
+
+
+def test_ratio_zero_counts_as_closed():
+    assert plan_water_t0(ctx(level=7.0, valve="ratio:0"), POLICY).state == "open"
+    assert plan_water_t0(ctx(level=2.0, valve="ratio:0", below_for_s=9.0), POLICY) is None
+
+
+def test_ratio_nonzero_counts_as_open():
+    assert plan_water_t0(ctx(level=2.9, valve="ratio:33", below_for_s=5.0), POLICY).state == "closed"
+    assert plan_water_t0(ctx(level=7.0, valve="ratio:33"), POLICY) is None
+
+
+@pytest.mark.parametrize("valve", ["half", "ratio:101", "ratio:-1", "ratio:", "ratio:x", ""])
+def test_unknown_valve_state_holds(valve):
+    c = ctx(level=8.0, valve=valve)
+    assert plan_water_t0(c, POLICY) is None
+    assert water_hold_reason(c, POLICY) == "UNKNOWN_VALVE_STATE"
+
+
+def test_valve_reason_after_flag_reasons():
+    assert water_hold_reason(ctx(level=8.0, valve="half", flags={"MODEL_MISMATCH"}), POLICY) == "MODEL_MISMATCH"
+
+
+def test_evidence_count_below_one_is_config_error():
+    bad = {**POLICY, "water": {**POLICY["water"], "evidence_count": 0}}
+    with pytest.raises(ValueError):
+        plan_water_t0(ctx(level=7.0), bad)

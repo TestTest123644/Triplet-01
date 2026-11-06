@@ -28,25 +28,38 @@ class WaterContext:
     below_low_since: datetime | None
     now: datetime
     plan_version: int
+    global_tick: int
 
 
-def _is_stale(ctx: WaterContext, policy: Mapping) -> bool:
-    if not ctx.filter.initialised or not ctx.recent:
-        return True
-    stale_s = policy.get("filter", {}).get("stale_s")
-    if stale_s is None:
-        return False
-    return (ctx.now - ctx.recent[-1].sim_time).total_seconds() >= float(stale_s)
+def _valve_class(valve_state: str) -> str:
+    """Classify a valve state as "closed", "open" or "unknown"."""
+    if valve_state == CLOSED:
+        return CLOSED
+    if valve_state == OPEN:
+        return OPEN
+    prefix, _, number = valve_state.partition(":")
+    if prefix == "ratio" and number.isascii() and number.isdigit():
+        n = int(number)
+        if n == 0:
+            return CLOSED
+        if 1 <= n <= 100:
+            return OPEN
+    return "unknown"
 
 
 def water_hold_reason(ctx: WaterContext, policy: Mapping) -> str | None:
-    """Why this channel must not be planned on: STALE, STUCK, IMPLAUSIBLE_JUMP, MODEL_MISMATCH, or None."""
-    if _is_stale(ctx, policy):
+    """Why this channel must not be planned on, or None.
+
+    Order: STALE, STUCK, IMPLAUSIBLE_JUMP, MODEL_MISMATCH, UNKNOWN_VALVE_STATE.
+    """
+    if not ctx.filter.initialised or not ctx.recent or ctx.filter.is_stale(ctx.global_tick):
         return "STALE"
     flags = ctx.filter.flags
     for reason in ("STUCK", "IMPLAUSIBLE_JUMP", "MODEL_MISMATCH"):
         if reason in flags:
             return reason
+    if _valve_class(ctx.valve_state) == "unknown":
+        return "UNKNOWN_VALVE_STATE"
     return None
 
 
@@ -55,8 +68,10 @@ def plan_water_t0(ctx: WaterContext, policy: Mapping) -> ActionIntent | None:
         return None
     water = policy["water"]
     verification = policy["verification"]
+    if int(water["evidence_count"]) < 1:
+        raise ValueError("policy water.evidence_count must be at least 1")
     level = ctx.filter.level
-    if ctx.valve_state == CLOSED:
+    if _valve_class(ctx.valve_state) == CLOSED:
         if level >= water["high_band"] or "CEILING" in ctx.filter.flags:
             return _intent(
                 ctx, water, OPEN, RiskClass.R1,
