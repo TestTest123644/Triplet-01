@@ -4,18 +4,23 @@ The Twin layer simulates 42 devices across 6 zones in Greater Tunis. It streams 
 
 ---
 
-## Quick start in 3 commands
+## Quick start
 
-From the `twin/` directory:
+All commands run from the repository root.
+
+If a container named "kafka" already exists, stop or rename it first (`docker stop kafka`).
 
 ```bash
-# 1. Start the Twin layer, Kafka broker, and console
-docker compose up -d
+# 1. Start the Twin layer, Kafka broker, and console (SIM_SPEED=20 for scenario pace)
+SIM_SPEED=20 docker compose up -d --build
 
-# 2. Run an incident scenario with mock partners
-python3 ../scenarios/t5_grid_overload.py --with-mocks
+# 2. Export the red-team token generated inside the container
+export RED_TEAM_TOKEN=$(docker exec twin_layer cat /app/data/red_team.token)
 
-# 3. Open the operations console
+# 3. Run an incident scenario with mock partners
+python3 scenarios/t5_grid_overload.py --with-mocks
+
+# 4. Open the operations console
 open http://localhost:8501
 ```
 

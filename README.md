@@ -29,15 +29,27 @@ Monitors Kafka telemetry in parallel with the City Brain to protect municipal in
 
 ## 3. Quickstart
 
-To launch the complete triplet infrastructure (Kafka broker, Twin Layer simulation, and Operations Console):
+All commands run from the repository root.
+
+If a container named "kafka" already exists, stop or rename it first (`docker stop kafka`).
+
+To launch the triplet infrastructure (Kafka broker, Twin Layer simulation, and Operations Console):
 
 ```bash
-docker compose up -d
+# 1. Start infrastructure (pass SIM_SPEED=20 for scenario pace):
+SIM_SPEED=20 docker compose up -d --build
+
+# 2. Export the red-team token generated inside the container:
+export RED_TEAM_TOKEN=$(docker exec twin_layer cat /app/data/red_team.token)
+
+# 3. Run an incident scenario with mock partners:
+python3 scenarios/t5_grid_overload.py --with-mocks
 ```
 
 ### Shared Service Endpoints
 - **Apache Kafka:** `localhost:19092` (Topic: `twin.sensors`)
-- **Twin MCP Server:** `http://localhost:8000/sse`
+- **Twin MCP Server:** `http://localhost:8000/sse` and `/mcp`
+- **Red-Team Adversary API:** `http://localhost:8100/api/status`
 - **Twin Operations Console:** `http://localhost:8501`
 
 ---

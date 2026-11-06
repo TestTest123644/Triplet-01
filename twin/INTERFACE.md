@@ -82,16 +82,19 @@ Error response shape:
 | `KAFKA_PASSWORD` | *(unset)* | SASL password literal |
 | `KAFKA_PASSWORD_FILE` | *(unset)* | Path to file containing SASL password (takes priority) |
 | `MCP_HOST` / `MCP_PORT` | `0.0.0.0` / `8000` | MCP server binding address |
-| `MCP_AUTH_TOKENS` | *(unset)* | Bearer tokens format `principal:token,principal:token` |
+| `MCP_AUTH_TOKENS` | *(unset)* | Bearer tokens `principal:token,...` (off by default; callers logged as "anonymous") |
 | `RED_TEAM_PORT` | `8100` | Dedicated red-team attack injection REST port |
-| `SIM_SPEED` | `1.0` | Simulation speed multiplier (set `20.0` for scenarios) |
+| `RED_TEAM_TOKEN` | *(unset)* | Red-team API token literal |
+| `RED_TEAM_TOKEN_FILE` | *(unset)* | Path to red-team token file (compose writes to `/app/data/red_team.token`) |
+| `SIM_SPEED` | `1.0` | Simulation speed multiplier (pass `20.0` for scenarios) |
 
 ---
 
 ## Authentication
 
 1. **Telemetry signatures (Ed25519):** Partners fetch the public key via `get_device_key(device_id)`. Clean payload without `sig` key, sort keys alphabetically with compact JSON separators `(",", ":")`, and verify signature bytes against canonical UTF-8 bytes.
-2. **MCP command auth:** Set `MCP_AUTH_TOKENS="brain:tok-b,guardian:tok-g,scenario:tok-s"`. When set, callers must provide HTTP header `Authorization: Bearer <token>`. Unauthorized calls return HTTP 401 `UNAUTHORIZED`. Caller identity is logged with each action.
+2. **MCP command auth:** Set `MCP_AUTH_TOKENS="brain:tok-b,guardian:tok-g,scenario:tok-s"`. When set, callers must provide HTTP header `Authorization: Bearer <token>`. Unauthorized calls return HTTP 401 `UNAUTHORIZED`. When unset (default in compose), auth is disabled and callers are logged as "anonymous".
+3. **Red-team API auth:** Header `X-Red-Team-Token`. If unset, the Twin generates a random token; in compose it is saved to `/app/data/red_team.token`.
 
 ---
 
