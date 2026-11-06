@@ -1,0 +1,8 @@
+# T02: a channel rises past the high band with nothing attacking it, then drains back into band.
+duration_s: 300
+guardian_policy: trust_all
+inject: []
+expect:
+  valve: z1-wl1
+  level_limit: 6.05
+  verdict: verified
