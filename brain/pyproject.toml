@@ -32,3 +32,8 @@ addopts = "--import-mode=importlib"
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
+markers = [
+    "triplet: needs the Twin MCP endpoint (BRAIN_TWIN_MCP)",
+    "kafka: needs a Kafka broker (BRAIN_KAFKA_BOOTSTRAP)",
+    "twin_live: needs a live Twin (BRAIN_TWIN_MCP)",
+]
