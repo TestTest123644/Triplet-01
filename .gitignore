@@ -35,6 +35,9 @@ DEV_LOGS.md
 devlogs.md
 instructions.md
 
+# Local planning and roadmap scratchpad
+REWORK_ROADMAP.md
+
 # Temporary / Scratch Files
 test_*.png
 page_*.png
@@ -42,6 +45,30 @@ scratch/
 hackathon_shell.sh
 REVIEW_PROMPT_FOR_CLAUDE.md
 
-# Secrets & Local Identity Keystores
-device_keys.json
+# Temporary and intermediate scenario logs
+*.tmp.log
+logs/*.tmp.log
+
+# Process ID files
+*.pid
+
+# Streamlit secrets configuration
+.streamlit/secrets.toml
+
+# Environment files and overrides (preserve example templates)
+.env
+.env.*
+!.env.example
+!twin/.env.example
+
+# Secrets, credentials, certificates, and tokens
+*password*.txt
+*_tokens*.txt
 *.token
+*.pem
+*.key
+*.crt
+
+# Keystores and private key material
+device_keys.json
+*keys*.json

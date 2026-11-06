@@ -14,13 +14,14 @@ The operations console runs with dark theme styling (`#0b0f14` background, `#121
 
 ### Top status bar and operational KPIs
 
-The top status bar provides a single-line overview of the runtime environment:
-- Simulation time: Full RFC 3339 timestamp formatted in monospace without truncation.
-- Simulation speed: Configured multiplier relative to real time (for example, 20x).
-- Throughput: Current wire publication velocity in messages per second.
-- Kafka broker status: Online or offline indicator for the telemetry streaming broker.
-- MCP server status: Online or offline indicator for the synchronous tool-call server.
-- Recent callers: Identities observed calling MCP tools within the last 5 simulation minutes (such as brain and guardian).
+The main visible heading reads **Twin operations console**. Directly beneath it, the top status bar provides a single-line overview of the runtime environment:
+- Sim time: Full RFC 3339 timestamp formatted in monospace without truncation (`YYYY-MM-DDTHH:MM:SSZ`).
+- Speed: Configured simulation multiplier relative to real time (for example, `20x`).
+- Throughput: Current wire publication velocity in messages per second (nominal ~420 msg/s).
+- API: Online or offline indicator for the Twin Red Team REST API (`Twin online` or `Twin API down`).
+- Kafka: Online or degraded indicator for the telemetry streaming broker (`Kafka ok` or `Kafka {state}`).
+- MCP: Online or offline indicator for the synchronous tool-call server (`MCP up` or `MCP down`).
+- Recent callers: Identities observed calling MCP tools within the last 5 simulation minutes (such as `brain`, `guardian`, or `scenario`).
 
 Below the status bar, four headline KPI tiles display key operational metrics:
 - Readings: Total count of logged telemetry records.
@@ -43,9 +44,24 @@ The timeline tab is the primary operational view. It correlates events across fi
 2. Guardian lane: Automated containment and countermeasure actions, including quarantine, isolation, release, reinstatement, and reading rollback operations.
 3. Brain lane: Supervisory command decisions, including incident dispatch and valve adjustments.
 4. Actuator lane: Physical actuation execution results, distinguishing successful operations from refused commands (such as refusal under an actuator tampering attack).
-5. Test harness lane: Diagnostic actions originating from scenario test runners, kept collapsed by default to preserve operational clarity.
+5. Test harness lane: Diagnostic actions originating from scenario test runners (such as device reinstatement or settle commands), kept collapsed in an expander by default to preserve operational clarity.
 
-Incident chains correlate related events from the incident origin through its resolution plus a 120 simulation-second cooldown window. A summary list above the table displays full incident chain narratives (newest first), while the operational data grid presents columns for Time, Lane, Event, Target, Reaction time, Summary, and Chain identifier. Selecting any row in the timeline data grid displays its full underlying JSON record for deep forensic inspection.
+#### Incident chains and operational data grid
+
+Above the timeline table, an **Incident chains** narrative list displays correlated chains sorted newest first. Each entry provides the full lifecycle story from detection through escalation and final resolution (for example: `- INC-001: rain_storm in zone-2 escalated to flood; Brain opened valve; water receded below 5m`).
+
+The main data grid presents columns for Time, Lane, Event, Target, Reaction, Summary, and Chain identifier:
+- Time: Simulation timestamp formatted as `HH:MM:SS`.
+- Lane: Originating lane (`Twin`, `Guardian`, `Brain`, `Actuator`).
+- Event: Event type identifier (`attack_inject`, `isolate_device`, `dispatch`, `set_valve`, etc.).
+- Target: Device identifier or zone.
+- Reaction: Reaction latency relative to incident origin (for example, `+12.4s`).
+- Summary: Narrative description of the action and arguments.
+- Chain: Correlated incident chain identifier (`INC-NNN`).
+
+#### Interactive row selection
+
+Selecting any row in the operational data grid triggers an interactive inspection view below the table (**Inspect selected event payload**), displaying the complete underlying raw JSON record for deep forensic analysis.
 
 ---
 
@@ -61,7 +77,7 @@ The city map tab presents a 3D tactical visualization of Greater Tunis divided i
 - Central University and Medical District (`zone-5`)
 - South Logistics Hub (`zone-6`)
 
-Each sensor is represented as a 3D column positioned at its registered geographic coordinates. Column heights are individually normalised to each device type's configured range (`[min_val, max_val]`), preventing disparate units (such as megawatts and air quality index) from distorting relative visual scale. Pillars reflect device status through semantic coloring (neutral for nominal, red for attacked, and amber for contained). Interactive tooltips provide exact device identifiers, device types, broadcast values, physical units, and active threat conditions.
+Each sensor is represented as a 3D column positioned at its registered geographic coordinates. Column heights are individually normalised to each device type's configured range (`[min_val, max_val]`), preventing disparate units (such as megawatts and air quality index) from distorting relative visual scale. Pillars reflect device status through semantic coloring (green for nominal, red for active attack, amber for contained or isolated, and purple for refused actuation). Interactive tooltips provide exact device identifiers, device types, broadcast values, physical units, and operational status.
 
 ---
 
@@ -106,19 +122,52 @@ Enables targeted adversary capabilities against specific devices or zones:
 - `link`: Manipulates network communication (corrupt bytes, invalid signature, replay, delay, frame drop).
 - `rogue`: Introduces unauthorized transmitters into a target zone.
 - `sensor_fault`: Injects calibration drift or stuck values.
-- `actuator`: Forces actuation mechanisms to refuse supervisory commands.
+- `actuator`: Forces actuation mechanisms to refuse supervisory commands while reporting success.
 
 ### Physical events
 Injects municipal conditions into selected zones:
 - Types: `rain_storm`, `traffic_accident`, `fire`, `grid_overload`, `air_hazard`.
 - Parameters: Target zone, intensity multiplier, and simulation duration.
 
-### Active threats and events
-Displays an inventory of all currently active exploits and environmental conditions. Each row provides a one-click clearance button, and a global "Clear all threats" button restores all devices and actuators to nominal baseline.
+### Active attacks and events
+Displays a real-time list of all currently active exploits and environmental conditions. Each active entry displays a dedicated **Clear** button for immediate individual deactivation. A global **Clear all threats** button flushes all active attacks and events simultaneously, immediately releasing any queued delay frames and restoring nominal sensor kinetics.
 
 ---
 
-## 4. Operational verification workflow
+## 4. Running the demo and caller attribution
+
+### Token configuration for clean timeline lanes
+To route automated test harness actions into the dedicated **Test harness** lane rather than polluting the operational lanes, configure distinct principal tokens:
+
+```bash
+export MCP_AUTH_TOKENS="brain:tok-b,guardian:tok-g,scenario:tok-s"
+export RED_TEAM_TOKEN="$(docker exec twin_layer cat /app/data/red_team.token)"
+```
+
+When running scenarios or tests, authenticate the test runner with `scenario:tok-s`. Tool calls issued by the test runner (such as initial settle steps, baseline resets, or test-time device reinstatements) are automatically attributed to caller `scenario` and categorized under the collapsed **Test harness** lane, while partner actions from Layer 2 and Layer 3 appear in the **Brain** and **Guardian** lanes.
+
+### Running with live mocks for manual testing
+For manual testing and demonstration, you can run standalone mock processes:
+
+```bash
+# Start the live Guardian mock in one terminal:
+python3 -m twin.mocks.mock_guardian
+
+# Start the live City Brain mock in another terminal:
+python3 -m twin.mocks.mock_brain
+```
+
+While these mocks are running, you can inject attacks or physical events through the console sidebar and watch the mocks react in real time on the Timeline and Map tabs.
+
+> [!IMPORTANT]
+> **Stop standalone mocks before running automated scenarios:** If you run automated test scripts with `--with-mocks`, stop any standalone mock processes first (`pkill -f "twin.mocks.mock_"`). Otherwise, multiple mock processes will consume from the same Kafka consumer groups or issue conflicting actuation commands.
+
+### Containment persistence across restarts
+Device containment enforced by Guardian (or the console) is fully persistent. When a device is isolated or quarantined, its status is updated in the SQLite ledger (`devices.status`) and recorded in `containment_log`. If the Twin container or simulator process restarts on an existing ledger, all device containment states and rogue hardware blocklists are restored before the first simulation tick. Devices do not revert to nominal status until an authorized caller explicitly invokes `reinstate_device` or `release_device`.
+
+---
+
+## 5. Operational verification workflow
 
 To verify complete end-to-end telemetry and defense responses:
 1. Start the Twin unified runtime and console.

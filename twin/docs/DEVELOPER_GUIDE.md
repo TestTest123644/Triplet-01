@@ -1,6 +1,6 @@
 # Twin Layer: Developer & Integration Guide
 
-This guide walks you through setting up, running, testing, and integrating with Layer 1 (Twin Layer). Whether you are developing Layer 2 (City Brain), Layer 3 (Guardian), or contributing to Layer 1, this document provides the exact commands, code snippets, and network parameters you need.
+This guide walks you through setting up, running, testing, and integrating with Layer 1 (Twin Layer). Whether you are developing Layer 2 (City Brain), Layer 3 (Guardian), or contributing to Layer 1, this document provides the exact commands, code snippets, network parameters, and architectural contracts you need.
 
 ---
 
@@ -34,7 +34,11 @@ Layer 1 simulates 42 physical IoT devices across 6 geographic zones in Greater T
 
 ### Core Architecture Rules
 1. **Unidirectional Streaming on Kafka:** Twin Layer streams telemetry to the Kafka topic `twin.sensors`. Partners only consume from this topic; never publish data to it. The topic must already exist on the broker (the Twin never creates topics or modifies broker settings). Messages are keyed by `device_id` to maintain strict per-device ordering within partitions.
-2. **Durable Producer Configuration:** Outbound streaming uses `acks="all"` and `enable.idempotence=True` by default to prevent message loss across a 3-node broker cluster. Overridable via `KAFKA_ACKS` (`all`, `1`, `0`). Supports comma-separated broker addresses (`KAFKA_BOOTSTRAP_SERVERS=host1:port,host2:port,host3:port`) and optional TLS CA certificates (`KAFKA_SSL_CA_LOCATION`). Set `WAIT_FOR_KAFKA=false` if partner ACLs disallow describing the cluster.
+2. **Durable Producer Configuration:** Outbound streaming uses `acks="all"` and `enable.idempotence=True` by default to prevent message loss across multi-node broker clusters.
+   - Configurable via `KAFKA_ACKS`: `"all"` (default, enables idempotence), `"1"` (leader only, disables idempotence), or `"0"` (fire-and-forget). Any other value raises a startup error.
+   - Multi-broker clusters: `KAFKA_BOOTSTRAP_SERVERS` supports comma-separated addresses (`host1:9092,host2:9092,host3:9092`).
+   - Custom TLS certificates: `KAFKA_SSL_CA_LOCATION` points to a CA certificate bundle for `SASL_SSL` brokers.
+   - Pre-flight connection: Set `WAIT_FOR_KAFKA=false` if partner ACLs restrict broker metadata queries.
 3. **Synchronous Commands over MCP:** Actuation commands (`dispatch`, `set_valve`, etc.) and queries (`get_device_key`, `list_devices`) run strictly over the Model Context Protocol (MCP) HTTP/SSE interface on port `8000`. We do not send commands over Kafka.
 4. **Dual Clocks:**
    - **Simulation Time (`ts`):** RFC 3339 UTC string with second precision ending in `'Z'` (e.g. `2026-10-18T14:00:00Z`). All sensor timestamps reflect simulation time.
@@ -45,187 +49,105 @@ Layer 1 simulates 42 physical IoT devices across 6 geographic zones in Greater T
 
 ---
 
-## 2. Quickstart: Running the System
+## 2. Secrets Management & Zero-Downtime Reload
 
-### Option A: Docker Compose (Recommended for Teams)
-This launches official Apache Kafka (`apache/kafka:latest` in KRaft mode), the Twin Layer daemon (simulation + MCP server), and the Streamlit 3D Dashboard.
+The Twin provides a pluggable secrets resolver and hot-reloading mechanism for runtime secrets:
+- `KAFKA_PASSWORD`: SASL authentication credential.
+- `MCP_AUTH_TOKENS`: Principal bearer tokens (`principal:token,...`).
+- `RED_TEAM_TOKEN`: Authentication token for the Red Team REST API.
 
-```bash
-# 1. Start all services
-docker compose up -d
+> [!NOTE]
+> Device signing keys located at `KEYSTORE_PATH` are long-term identity keys and are not runtime secrets. They do not rotate at runtime.
 
-# 2. Check container status
-docker compose ps
+### Secret Resolution Order
+For any secret `NAME`, the resolution precedence is:
+1. `TWIN_SECRET_HOOK`: Pluggable hook in `module:func` format. If configured, the function is invoked as `func(name) -> Optional[str]`. This allows clean integration with HashiCorp Vault, AWS Secrets Manager, or custom key stores without adding external dependencies.
+2. `<NAME>_FILE`: File path containing the secret (e.g. `KAFKA_PASSWORD_FILE`, `RED_TEAM_TOKEN_FILE`, `MCP_AUTH_TOKENS_FILE`), suitable for Docker secrets, Kubernetes secrets, or Vault Agent sinks.
+3. `<NAME>`: Standard environment variable.
 
-# 3. View Twin Layer logs
-docker compose logs -f twin_layer
-```
+### Hot Reloading Without Downtime
+Secrets can be refreshed at runtime without restarting the simulation loop:
+- **REST endpoint:** `POST http://localhost:8100/api/secrets/reload` (authenticated with current `X-Red-Team-Token`).
+- **Signal handler:** `kill -HUP <twin_pid>`.
+- **Periodic background polling:** Configured via `TWIN_SECRET_RELOAD_SECONDS=<seconds>`.
 
-#### Network Endpoints
-
-| Service | Host Address | Docker Internal Address | Description |
-| :--- | :--- | :--- | :--- |
-| **Apache Kafka** | `localhost:19092` | `kafka:9092` | Outbound telemetry stream (`twin.sensors`) |
-| **MCP Command Server** | `http://localhost:8000/sse` | `http://twin_layer:8000/sse` | JSON-RPC actuation and query endpoints |
-| **Red Team Adversary API** | `http://localhost:8100/api/...` | `http://twin_layer:8100/api/...` | Isolated control endpoints (attacks, status; requires X-Red-Team-Token) |
-| **3D Operations Console**| `http://localhost:8501` | `http://dashboard:8501` | Streamlit tactical dashboard |
+### Credential Probe Before Swap
+When a new Kafka password is provided during reload, the Twin executes a safety probe before swapping credentials:
+1. A candidate producer is initialized with the candidate password.
+2. A metadata query probe (`list_topics(timeout=5.0)`) verifies that the broker accepts the new credentials.
+3. If the check succeeds, the candidate producer is swapped in and the old producer is drained.
+4. If the check fails or times out, the candidate producer is immediately discarded, the existing producer remains active without dropping messages, and the reload endpoint reports an error without leaking secret values.
 
 ---
 
-### Option B: Local Python Development (No Docker)
-If you want to run or debug the code directly in your local Python environment:
+## 3. Containment Persistence Across Restarts
 
+Device containment enforced by Layer 3 (Guardian) persists across process restarts:
+- When Guardian calls `isolate_device` or `quarantine_device`, the device's operational status in SQLite table `devices.status` is updated in the same atomic transaction as the `containment_log` audit record.
+- Rogue device identifiers (hardware not registered in `devices`) are recorded in `containment_log`.
+- Upon simulator startup, the Twin reads `devices.status` and `containment_log` to restore all device isolation states and blocked rogue IDs before the first simulation tick executes.
+- Devices remain contained until an authorized principal invokes `reinstate_device` or `release_device`.
+
+---
+
+## 4. Adversary Delay Backlog & Visibility
+
+When an adversary activates the `link` capability in `delay` mode, frames for the targeted sensor are buffered in memory:
+- **Queue visibility:** The Red Team status endpoint (`GET http://localhost:8100/api/status`) exposes `delayed_frames_pending`, indicating the total number of frames currently buffered across all delay queues.
+- **Immediate FIFO flush:** When a delay attack is deactivated (via `/api/attack/clear`, individual attack clear, or simulator settle), all held frames are emitted immediately to the Kafka wire in chronological FIFO order, and `delayed_frames_pending` drops to 0.
+
+---
+
+## 5. Scenario Settle Step & Testing Discipline
+
+Automated scenarios in `scenarios/` employ a deterministic settle procedure to ensure test independence and consecutive run stability:
+1. **Clear adversary state:** Clears all active attacks and physical events via the Red Team API.
+2. **Drain delay backlog:** Waits until `delayed_frames_pending == 0`.
+3. **Reset actuators:** Restores traffic cameras to `normal` and power loads to `grid_a`.
+4. **Reinstate devices:** Calls `reinstate_device` as caller `scenario` for any isolated or quarantined devices.
+5. **Drain flood water:** Polls water level sensors until readings drop below 5.0 m (temporarily commanding drainage valves to `open`, then restoring them to `half`).
+6. **Verify quiet baseline:** Confirms that no new containment or command events appear in the journal for at least 10 simulation seconds.
+7. **Attribution boundary:** Scenario false-positive guards filter out journal entries prior to settle completion (`sim_ts <= settle_end_sim_time`), preventing cross-scenario false alarms.
+
+---
+
+## 6. Mock Lifecycle & Process Management
+
+Live mock implementations (`twin.mocks.mock_brain`, `twin.mocks.mock_guardian`) feature safe lifecycle management:
+- `--exit-with-parent`: When launched by scenario runners or parent processes, mocks continuously monitor parent process liveness and terminate cleanly if the parent exits.
+- Signal traps: Standard `SIGINT` and `SIGTERM` handlers ensure orderly consumer disconnects and socket closures.
+
+---
+
+## 7. Quickstart: Running the System
+
+### Docker Compose
 ```bash
-# 1. Clone repository & create virtual environment
+# Start all services with accelerated simulation speed:
+SIM_SPEED=20 docker compose up -d --build
+
+# Retrieve the red-team token generated at container boot:
+export RED_TEAM_TOKEN=$(docker exec twin_layer cat /app/data/red_team.token)
+
+# View running container status:
+docker compose ps
+```
+
+### Local Development (No Docker)
+```bash
 python3 -m venv venv
 source venv/bin/activate
+pip install -r twin/requirements.txt
 
-# 2. Install dependencies
-pip install -r requirements.txt
-
-# 3. Run the full test suite (41 tests)
-pytest tests/ -v
-
-# 4. Run the Twin Layer runtime
-# Note: If no Kafka broker is reachable, it automatically buffers to an internal local sink.
-python -m twin.main
-
-# 5. In a second terminal, launch the Streamlit console
-streamlit run dashboard.py
+# Start the Twin runtime:
+python3 -m twin.main
 ```
 
 ---
 
-## 3. Partner Integration: Layer 2 (City Brain)
+## 8. Complete MCP Tool Reference
 
-City Brain consumes sensor telemetry from Kafka to detect city incidents, then issues actuation commands through MCP to resolve them.
-
-### Step 1: Consuming Sensor Telemetry
-Connect any standard Kafka client to `localhost:19092` and subscribe to `twin.sensors`.
-
-```python
-import json
-from confluent_kafka import Consumer
-
-conf = {
-    'bootstrap.servers': 'localhost:19092',
-    'group.id': 'city-brain-worker',
-    'auto.offset.reset': 'latest'
-}
-consumer = Consumer(conf)
-consumer.subscribe(['twin.sensors'])
-
-while True:
-    msg = consumer.poll(timeout=1.0)
-    if msg is None:
-        continue
-    if msg.error():
-        print(f"Consumer error: {msg.error()}")
-        continue
-
-    payload = json.loads(msg.value().decode('utf-8'))
-    device_id = payload['device_id']
-    reading_value = payload['reading']
-    reading_type = payload['type']
-    timestamp = payload['ts']
-    print(f"[{timestamp}] {device_id} ({reading_type}): {reading_value}")
-```
-
-### Step 2: Calling MCP Actuation Tools
-Use the standard HTTP POST interface or the official Python MCP SDK to trigger city actions.
-
-#### Python MCP Client Example
-```python
-import asyncio
-from mcp.client.session import ClientSession
-from mcp.client.sse import sse_client
-
-async def trigger_emergency_dispatch():
-    async with sse_client("http://localhost:8000/sse") as (read_stream, write_stream):
-        async with ClientSession(read_stream, write_stream) as session:
-            await session.initialize()
-
-            # 1. Dispatch emergency units to Zone 1
-            dispatch_result = await session.call_tool(
-                "dispatch",
-                arguments={"incident_type": "fire", "zone_id": "zone-1"}
-            )
-            print("Dispatch Response:", dispatch_result.content[0].text)
-
-            # 2. Adjust traffic lights to green wave along Avenue Habib Bourguiba
-            signal_result = await session.call_tool(
-                "set_signal_plan",
-                arguments={"device_id": "z1-tc1", "target_state": "green_wave"}
-            )
-            print("Traffic Signal Response:", signal_result.content[0].text)
-
-            # 3. Open flood drainage valves during high water levels
-            valve_result = await session.call_tool(
-                "set_valve",
-                arguments={"device_id": "z1-wl1", "target_state": "open"}
-            )
-            print("Valve Response:", valve_result.content[0].text)
-
-asyncio.run(trigger_emergency_dispatch())
-```
-
----
-
-## 4. Partner Integration: Layer 3 (Guardian)
-
-Guardian verifies the cryptographic integrity of every Kafka reading, detects cyberattacks, and enforces containment.
-
-### Step 1: Verifying Ed25519 Signatures
-Each device has an Ed25519 public key. Fetch it once via MCP `get_device_key(device_id)`, then cache it. Verify each message against the canonical JSON string.
-
-```python
-import json
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
-
-def canonical_bytes(payload: dict) -> bytes:
-    """Reconstruct exact canonical JSON bytes excluding the signature."""
-    ordered_payload = {
-        "reading_id": payload["reading_id"],
-        "device_id": payload["device_id"],
-        "type": payload["type"],
-        "ts": payload["ts"],
-        "reading": payload["reading"],
-        "status": payload["status"]
-    }
-    return json.dumps(ordered_payload, separators=(',', ':'), sort_keys=False).encode('utf-8')
-
-def verify_telemetry(payload: dict, public_key_hex: str) -> bool:
-    sig_bytes = bytes.fromhex(payload['sig'])
-    pub_key_bytes = bytes.fromhex(public_key_hex)
-    public_key = Ed25519PublicKey.from_public_bytes(pub_key_bytes)
-
-    try:
-        public_key.verify(sig_bytes, canonical_bytes(payload))
-        return True
-    except Exception:
-        return False
-```
-
-### Step 2: Quarantining Compromised Devices
-When a signature fails or sensor readings drift into physically impossible values, invoke MCP containment tools:
-
-```python
-async def quarantine_rogue_sensor(session, device_id: str, reading_id: str):
-    # 1. Sever network authority (drops subsequent readings from stream)
-    await session.call_tool("quarantine_device", arguments={"device_id": device_id})
-
-    # 2. Mark falsified reading in audit ledger
-    await session.call_tool("rollback_reading", arguments={"reading_id": reading_id})
-
-    # 3. Isolate physical zone circuit
-    await session.call_tool("isolate_device", arguments={"device_id": device_id})
-```
-
----
-
-## 5. Complete MCP Tool Reference
-
-All tools are accessible via `http://localhost:8000/sse` using standard MCP JSON-RPC format.
+All tools are accessible via `http://localhost:8000/sse` and `/mcp` using standard MCP JSON-RPC format.
 
 ### Queries
 
@@ -252,63 +174,23 @@ All tools are accessible via `http://localhost:8000/sse` using standard MCP JSON
 
 | Tool | Parameters | Description |
 | :--- | :--- | :--- |
-| `quarantine_device` | `device_id` (str) | Revokes device network authority; stops broadcasting its packets to Kafka. |
-| `release_device` | `device_id` (str) | Restores network authority after threat removal. |
-| `isolate_device` | `device_id` (str) | Disconnects device's physical subsystem. |
-| `reinstate_device` | `device_id` (str) | Reconnects physical subsystem. |
-| `rollback_reading` | `reading_id` (str) | Flags a specific falsified reading as `rolled_back` in the historical buffer. |
+| `quarantine_device` | `device_id` (str) | Revokes device network authority; drops future wire transmissions. |
+| `release_device` | `device_id` (str) | Restores network authority after threat clearance. |
+| `isolate_device` | `device_id` (str) | Disconnects device physical subsystem. |
+| `reinstate_device` | `device_id` (str) | Reconnects physical subsystem to nominal status ok. |
+| `rollback_reading` | `reading_id` (str) | Marks poisoned reading as rolled_back in broadcast cache. |
 
 ---
 
-## 6. Testing & Benchmark Reproduction
-
-### Running Automated Test Suites
-Our test suite validates physics kinetics, cryptographic signing, adversary injection, sub-300-byte budget compliance, MCP tool calls, and dashboard DOM mounting:
+## 9. Running Tests
 
 ```bash
-# Run all 41 unit and conformance tests
-pytest tests/ -v
+# Run unit and conformance tests inside twin directory:
+cd twin && python3 -m pytest -q
+
+# Run complete test suite from repository root:
+python3 -m pytest -q
+
+# Run all 11 integration scenarios against running Twin:
+python3 scenarios/run_all.py --with-mocks
 ```
-
-### Running the 30-Second Stress Benchmark
-This benchmark tests our streaming producer under continuous 10 Hz load across all 42 devices:
-
-```bash
-pytest tests/test_qa_conformance.py -k test_30_second_high_throughput_stress_benchmark -s
-```
-**Expected Benchmark Results:**
-- Cycles executed: 300 cycles (30 simulated seconds).
-- Messages produced: 12,600 payloads.
-- Throughput rate: >2,500 messages/sec (surpasses the 420 msgs/s requirement by 6x).
-- Memory delta: <30 MB RSS delta over entire run.
-
-### Inspecting the Ground Truth Ledger Directly
-To inspect the ground-truth SQLite database locally:
-
-```bash
-sqlite3 ground_truth.db "SELECT count(*) FROM readings_truth;"
-sqlite3 ground_truth.db "SELECT * FROM attacks_injected WHERE active = 1;"
-sqlite3 ground_truth.db "SELECT device_id, type, zone_id, status FROM devices LIMIT 10;"
-```
-
----
-
-## 7. Troubleshooting & Gotchas
-
-### 1. `ConnectionRefusedError: [Errno 61]` on Kafka port 19092
-- **Cause:** Apache Kafka in KRaft mode takes 5 to 10 seconds to finish controller quorum elections on initial boot.
-- **Fix:** Wait 10 seconds or check container health with `docker compose ps`. Our `twin.main` runner automatically retries connecting up to 30 times (`KAFKA_WAIT_RETRIES=30`).
-
-### 2. `sqlite3.OperationalError: database is locked`
-- **Cause:** Concurrent reads from the Streamlit dashboard while the simulation engine is inserting batches at 10 Hz.
-- **Fix:** We resolved this in `twin/src/twin/db_ledger.py` by enabling Write-Ahead Logging (`PRAGMA journal_mode = WAL;`) and a 10-second busy timeout (`PRAGMA busy_timeout = 10000;`). If you open the database in a custom script, always use `timeout=10.0`.
-
-### 3. Port Conflicts (`8000`, `8501`, `19092`)
-- If port `8000` is already in use by another local web service, override it via environment variable:
-  ```bash
-  MCP_PORT=8001 python -m twin.main
-  ```
-- If port `8501` is taken, launch Streamlit on another port:
-  ```bash
-  streamlit run dashboard.py --server.port 8502
-  ```
