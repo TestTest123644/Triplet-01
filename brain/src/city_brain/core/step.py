@@ -11,13 +11,13 @@ from city_brain.core.events import (
     RegistryLoaded,
     VerdictReceived,
 )
+from city_brain.core.records import status_event
 from city_brain.core.state import BrainState, DeviceCursor
 from city_brain.domain.types import DeviceStatus, Observation, SensorKind
 
 
 def _status(state: BrainState, reason: str) -> Publish:
-    # Placeholder until Task 14 supplies the CloudEvents builder.
-    return Publish({"type": "status", "data": {"reason": reason, "epoch": state.epoch}})
+    return Publish(status_event(state, reason, {}))
 
 
 def step(state: BrainState, event: Event) -> tuple[BrainState, list[Effect]]:

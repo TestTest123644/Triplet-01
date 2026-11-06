@@ -15,6 +15,7 @@ def is_new_epoch(cursor: DeviceCursor | None, obs: Observation, seq_drop: int, t
 def start_new_epoch(state: BrainState) -> None:
     """Advance the epoch and clear per-epoch state. Later tasks extend this."""
     state.epoch += 1
+    state.event_seq = 0
     state.seen.clear()
     state.cursors.clear()
     state.global_tick = 0
