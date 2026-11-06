@@ -12,6 +12,7 @@ from jsonschema import Draft7Validator, FormatChecker
 from city_brain.domain.ids import sig_hash
 from city_brain.domain.types import DeviceProfile, Observation, Verdict
 from city_brain.edge.profiles import (
+    BadValue,
     GuardianProfile,
     ProfileError,
     TwinProfile,
@@ -20,6 +21,8 @@ from city_brain.edge.profiles import (
 from city_brain.edge.signatures import KeyRing, verify
 
 MAX_BYTES = 4096
+MAX_SEQ = 2**53  # the largest count every JSON reader keeps exact
+MIN_YEAR, MAX_YEAR = 1900, 9000  # far from datetime's limits: sim-time arithmetic must not overflow
 
 
 @dataclass(frozen=True)
@@ -39,9 +42,9 @@ class AcceptedVerdict:
     verdict: Verdict
 
 
-def _device_id(obj: Any) -> str | None:
-    if isinstance(obj, Mapping) and isinstance(obj.get("device_id"), str):
-        return obj["device_id"]
+def _device_id(obj: Any, field: str = "device_id") -> str | None:
+    if isinstance(obj, Mapping) and isinstance(obj.get(field), str):
+        return obj[field]
     return None
 
 
@@ -60,6 +63,19 @@ def _finite(x: Any) -> bool:
         return math.isfinite(float(x))
     except (OverflowError, ValueError, TypeError):
         return False
+
+
+def _bad_position(fields: Mapping[str, Any]) -> str | None:
+    """Why `seq` or the mapped timestamp cannot be placed on the sim timeline, or None."""
+    seq = fields.get("seq")
+    if type(seq) is not int or not 0 <= seq <= MAX_SEQ:
+        return f"seq: {seq!r:.40} is not an integer in 0..2**53"
+    sim_time = fields.get("sim_time")
+    if not isinstance(sim_time, datetime) or sim_time.tzinfo is None:
+        return f"sim_time: {sim_time!r:.40} is not an aware timestamp"
+    if not MIN_YEAR <= sim_time.year <= MAX_YEAR:
+        return f"sim_time: {sim_time!r:.40} is out of range"
+    return None
 
 
 def _parse(raw: bytes) -> tuple[Any, str | None]:
@@ -84,19 +100,27 @@ class ReadingGuard:
         obj, err = _parse(raw)
         if err is not None:
             return Rejected("MALFORMED_JSON", err)
-        device_id = _device_id(obj)
+        device_id = _device_id(obj, self._profile.device_id_field)
         problem = _first_schema_error(self._validator, obj)
         if problem is not None:
             return Rejected("SCHEMA_VIOLATION", problem, device_id)
-        if not _finite(obj["value"]):
-            return Rejected("SCHEMA_VIOLATION", f"value: {obj['value']!r:.40} is not finite", device_id)
+        if not isinstance(obj, Mapping):
+            return Rejected("SCHEMA_VIOLATION", "reading is not an object", device_id)
+        mapping_error = None
+        try:
+            fields = self._profile.map_reading(obj)
+        except BadValue as exc:
+            return Rejected("SCHEMA_VIOLATION", str(exc), device_id)
+        except ProfileError as exc:
+            mapping_error = exc
         device = self._registry.get(device_id)
         if device is None:
             return Rejected("UNKNOWN_DEVICE", f"device '{device_id}' is not in the registry", device_id)
-        try:
-            fields = self._profile.map_reading(obj)
-        except ProfileError as exc:
-            return Rejected("TYPE_MISMATCH", str(exc), device_id)
+        if mapping_error is not None:
+            return Rejected("TYPE_MISMATCH", str(mapping_error), device_id)
+        problem = _bad_position(fields)
+        if problem is not None:
+            return Rejected("SCHEMA_VIOLATION", problem, device_id)
         if fields["kind"] != device.kind or fields["unit"] != device.unit:
             return Rejected(
                 "TYPE_MISMATCH",

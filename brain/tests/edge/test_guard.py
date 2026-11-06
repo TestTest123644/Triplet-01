@@ -3,8 +3,8 @@ from pathlib import Path
 
 from city_brain.domain.types import TrustState
 from city_brain.edge.guard import Accepted, AcceptedVerdict, Rejected, ReadingGuard, VerdictGuard
-from city_brain.edge.profiles import GuardianProfile
-from city_brain.edge.signatures import sign
+from city_brain.edge.profiles import GuardianProfile, TwinProfile
+from city_brain.edge.signatures import KeyRing, sign
 from mocks.guardian.mock_guardian import MockGuardian, expired, trust_all, unsigned
 from mocks.keys import derive_keypair
 from mocks.twin import MockTwin
@@ -228,3 +228,60 @@ def test_non_finite_or_huge_trust_is_schema_violation():
         text = json.dumps({**v, "trust": 0.5}).replace('"trust": 0.5', f'"trust": {literal}')
         r = vrejected(text.encode(), "SCHEMA_VIOLATION")
         assert "trust" in r.detail, literal
+
+
+def test_seq_above_two_to_the_53_is_schema_violation():
+    assert isinstance(guard.check(signed_bytes(seq=2**53)), Accepted)
+    rejected(signed_bytes(seq=2**53 + 1), "SCHEMA_VIOLATION")
+
+
+def test_timestamp_near_the_datetime_limits_is_schema_violation():
+    rejected(signed_bytes(ts="9999-12-31T23:59:59Z"), "SCHEMA_VIOLATION")
+    rejected(signed_bytes(ts="0001-01-01T00:00:00Z"), "SCHEMA_VIOLATION")
+
+
+ALT_PROFILE = Path(__file__).resolve().parents[2] / "profiles" / "twin-alt-example.yaml"
+ALT_PRIV, ALT_PUB = derive_keypair("test-alt")
+
+
+def alt_guard():
+    profile = TwinProfile.load(ALT_PROFILE)
+    keyring = KeyRing()
+    keyring.set("a1", ALT_PUB)
+    device = profile.map_device({
+        "device_id": "a1", "zone_id": "zone-1", "device_type": "flood_sensor", "unit": "cm",
+        "min_val": 0, "max_val": 1200, "status": "ok",
+        "actuator_state": {"valve_position": "closed"}})
+    return ReadingGuard(profile, keyring, {"a1": device})
+
+
+def alt_reading(**changes) -> bytes:
+    payload = {
+        "reading_id": "r-1", "device_id": "a1", "device_category": "flood_sensor", "reading": 450,
+        "unit": "cm", "location": {"zone_id": "zone-1"}, "ts": "2026-11-06T12:00:00Z", "seq": 7, "status": "ok"}
+    payload.update(changes)
+    return b({**payload, "sig": sign(payload, ALT_PRIV)})
+
+
+def test_alt_profile_works_through_the_guard():
+    result = alt_guard().check(alt_reading())
+    assert isinstance(result, Accepted)
+    assert result.observation.value == 4.5 and result.observation.zone_id == "zone-1"
+    assert result.observation.seq == 7
+
+
+def test_alt_profile_mapped_value_is_checked():
+    for bad in ("nope", None, float("inf"), 10**400):
+        rejected(alt_reading(reading=bad), "SCHEMA_VIOLATION", alt_guard())
+
+
+def test_alt_profile_mapping_errors_are_rejected_not_raised():
+    g = alt_guard()
+    rejected(alt_reading(unit="furlong"), "TYPE_MISMATCH", g)
+    rejected(alt_reading(device_category=["x"]), "TYPE_MISMATCH", g)
+    rejected(alt_reading(seq="seven"), "SCHEMA_VIOLATION", g)
+    rejected(alt_reading(ts="2026-11-06T12:00:00"), "SCHEMA_VIOLATION", g)
+    rejected(b([1, 2]), "SCHEMA_VIOLATION", g)
+    payload = json.loads(alt_reading())
+    del payload["ts"]
+    rejected(b(payload), "SCHEMA_VIOLATION", g)

@@ -36,6 +36,10 @@ class ProfileError(Exception):
     """A profile is malformed, or a partner value cannot be mapped."""
 
 
+class BadValue(ProfileError):
+    """A reading's value is not a finite number (SCHEMA_VIOLATION)."""
+
+
 class StateNotAllowed(ProfileError):
     """A canonical actuator state is outside the capability's allowlist."""
 
@@ -194,7 +198,7 @@ class TwinProfile:
         out["unit"] = _enum(CanonicalUnit, self._lookup(self.units, partner_unit, "unit"), "unit")
         out["device_status"] = _enum(
             DeviceStatus, self._lookup(self.statuses, out["device_status"], "status"), "status")
-        out["value"] = float(out["value"]) * float(self.unit_scale.get(partner_unit, 1.0))
+        out["value"] = self._scaled(out["value"], partner_unit)
         loc = out["zone_id"]
         if isinstance(loc, Mapping):
             if "zone_id" not in loc:
@@ -207,6 +211,19 @@ class TwinProfile:
             except ValueError as exc:
                 raise ProfileError(f"bad timestamp '{out['sim_time']}'") from exc
         return out
+
+    def _scaled(self, value: Any, partner_unit: str) -> float:
+        try:
+            scaled = float(value) * float(self.unit_scale.get(partner_unit, 1.0))
+        except (OverflowError, ValueError, TypeError) as exc:
+            raise BadValue(f"value: {value!r:.40} is not a number") from exc
+        if not math.isfinite(scaled):
+            raise BadValue(f"value: {value!r:.40} is not finite")
+        return scaled
+
+    @property
+    def device_id_field(self) -> str:
+        return self._canon_to_partner["device_id"]
 
     def _capability_for(self, device_type: str) -> str | None:
         for cap, spec in self.actuators.items():
