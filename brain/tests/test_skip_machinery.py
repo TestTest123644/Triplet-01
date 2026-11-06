@@ -1,3 +1,6 @@
+import socket
+from contextlib import closing
+
 import pytest
 
 from tests.partners import ENDPOINTS, reachable, skip_reason
@@ -5,6 +8,25 @@ from tests.partners import ENDPOINTS, reachable, skip_reason
 
 def test_reachable_is_false_for_closed_port():
     assert reachable("localhost:1", timeout_s=0.1) is False
+
+
+def _listening_port():
+    srv = socket.socket()
+    srv.bind(("127.0.0.1", 0))
+    srv.listen()
+    return closing(srv), srv.getsockname()[1]
+
+
+def test_reachable_is_true_for_listening_port():
+    guard, port = _listening_port()
+    with guard:
+        assert reachable(f"127.0.0.1:{port}") is True
+
+
+def test_reachable_is_true_for_listening_port_via_url():
+    guard, port = _listening_port()
+    with guard:
+        assert reachable(f"http://127.0.0.1:{port}/sse") is True
 
 
 def test_reachable_accepts_a_url():

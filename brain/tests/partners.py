@@ -18,7 +18,7 @@ class PartnerEndpoint:
 _TWIN = PartnerEndpoint("twin_live", "BRAIN_TWIN_MCP", "http://localhost:8000/sse")
 ENDPOINTS: dict[str, PartnerEndpoint] = {
     "twin_live": _TWIN,
-    "triplet": PartnerEndpoint("triplet", "BRAIN_TWIN_MCP", "http://localhost:8000/sse"),
+    "triplet": PartnerEndpoint("triplet", _TWIN.env_var, _TWIN.default),
     "kafka": PartnerEndpoint("kafka", "BRAIN_KAFKA_BOOTSTRAP", "localhost:19092"),
 }
 
