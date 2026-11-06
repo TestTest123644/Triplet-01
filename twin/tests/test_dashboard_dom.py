@@ -3,15 +3,15 @@
 Assigned to: Agent_UI & Agent_QA
 Validates via Streamlit AppTest:
 1. Complete DOM tree mounting and rendering without exceptions.
-2. Header title, subtitle, engine status banner, and scoreboard metrics.
+2. Modern status bar, sentence-case headers, and 4 KPI metric tiles with zero deltas.
 3. Zero unicode emojis across DOM elements.
-4. Multi-tab structure (Geospatial Digital Twin, Divergence, Truth Ledger, Audit Log).
-5. Interactive Hackathon Pitch Demo Presets injection (Preset 1: Physical Spoofing).
-6. Disarm All Threats recovery back to 0 active attacks.
+4. Multi-tab structure in required order: Timeline (default), City map, Truth vs broadcast, Ledger.
+5. Interactive manual threat injection and Clear all threats recovery.
 """
 
 import os
 from pathlib import Path
+import re
 import pytest
 import requests
 from starlette.testclient import TestClient
@@ -20,6 +20,22 @@ from streamlit.testing.v1 import AppTest
 from twin.db_ledger import GroundTruthLedger
 from twin.red_team_api import build_red_team_app
 from twin.simulation import CitySimulator
+
+
+# Regex to detect common unicode emojis
+EMOJI_PATTERN = re.compile(
+    r"[\U0001F600-\U0001F64F"  # Emoticons
+    r"\U0001F300-\U0001F5FF"  # Misc Symbols and Pictographs
+    r"\U0001F680-\U0001F6FF"  # Transport and Map
+    r"\U0001F700-\U0001F77F"  # Alchemical
+    r"\U0001F780-\U0001F7FF"  # Geometric Shapes Extended
+    r"\U0001F800-\U0001F8FF"  # Supplemental Arrows-C
+    r"\U0001F900-\U0001F9FF"  # Supplemental Symbols and Pictographs
+    r"\U0001FA00-\U0001FA6F"  # Chess Symbols
+    r"\U0001FA70-\U0001FAFF"  # Symbols and Pictographs Extended-A
+    r"\U00002702-\U000027B0"  # Dingbats
+    r"\U000024C2-\U0001F251]"
+)
 
 
 @pytest.fixture
@@ -77,47 +93,54 @@ def test_dashboard_dom_mounting_and_header(dom_app):
     # Verify zero uncaught exceptions in Streamlit render
     assert len(at.exception) == 0
 
-    # Verify 4 main scoreboard metrics
+    # Verify 4 main scoreboard metrics with exact sentence-case labels
     metric_labels = [m.label for m in at.metric]
-    assert "Total Telemetry Frames" in metric_labels
-    assert "Active Incidents / Tampered" in metric_labels
-    assert "Active Red Team Attacks" in metric_labels
-    assert "Simulation Clock (UTC)" in metric_labels
+    assert "Readings" in metric_labels
+    assert "Attacked readings" in metric_labels
+    assert "Active attacks" in metric_labels
+    assert "Devices contained" in metric_labels
 
-    # Verify tab headers
+    # Verify four tabs in exact required order
     assert len(at.tabs) == 4
+    tab_labels = [t.label for t in at.tabs]
+    assert tab_labels == ["Timeline", "City map", "Truth vs broadcast", "Ledger"]
 
-    # Verify sidebar buttons
+    # Verify sidebar form submit buttons and threat clear button
     btn_labels = [b.label for b in at.button]
-    assert "LAUNCH SELECTED DEMO" in btn_labels
-    assert "DISARM ALL THREATS" in btn_labels
-    assert "REFRESH TELEMETRY" in btn_labels
+    assert "Inject attack" in btn_labels
+    assert "Inject event" in btn_labels
+    assert "Clear all threats" in btn_labels
+
+    # Verify zero emojis across all DOM elements
+    for m in at.metric:
+        assert not EMOJI_PATTERN.search(m.label), f"Emoji found in metric label: {m.label}"
+    for t in at.tabs:
+        assert not EMOJI_PATTERN.search(t.label), f"Emoji found in tab label: {t.label}"
+    for b in at.button:
+        assert not EMOJI_PATTERN.search(b.label), f"Emoji found in button label: {b.label}"
 
 
 def test_dashboard_dom_demo_preset_and_disarm(dom_app):
     at = dom_app
 
-    # 1. Reset baseline
-    disarm_btn = next(b for b in at.button if b.label == "DISARM ALL THREATS")
-    disarm_btn.click().run()
+    # 1. Reset baseline by clearing all threats
+    clear_btn = next(b for b in at.button if b.label == "Clear all threats")
+    clear_btn.click().run()
 
-    atk_metric = next(m for m in at.metric if m.label == "Active Red Team Attacks")
+    atk_metric = next(m for m in at.metric if m.label == "Active attacks")
     assert int(atk_metric.value) == 0
 
-    # 2. Select and trigger Preset 1
-    demo_sb = next(s for s in at.selectbox if s.label == "Select Pitch Demo")
-    demo_sb.select("Preset 1: Physical Spoof (z1-tc1 = 185 veh/min in Downtown)")
-
-    launch_btn = next(b for b in at.button if b.label == "LAUNCH SELECTED DEMO")
-    launch_btn.click().run()
+    # 2. Inject attack via sidebar form
+    inject_btn = next(b for b in at.button if b.label == "Inject attack")
+    inject_btn.click().run()
 
     # Active attack must be reflected in the scoreboard metric
-    atk_metric_injected = next(m for m in at.metric if m.label == "Active Red Team Attacks")
+    atk_metric_injected = next(m for m in at.metric if m.label == "Active attacks")
     assert int(atk_metric_injected.value) >= 1
 
-    # 3. Disarm all threats
-    disarm_btn = next(b for b in at.button if b.label == "DISARM ALL THREATS")
-    disarm_btn.click().run()
+    # 3. Disarm all threats and verify recovery
+    clear_btn = next(b for b in at.button if b.label == "Clear all threats")
+    clear_btn.click().run()
 
-    atk_metric_recovered = next(m for m in at.metric if m.label == "Active Red Team Attacks")
+    atk_metric_recovered = next(m for m in at.metric if m.label == "Active attacks")
     assert int(atk_metric_recovered.value) == 0

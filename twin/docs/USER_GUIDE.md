@@ -1,141 +1,129 @@
-# Twin Layer: Operations & User Guide
+# Twin layer operations console guide
 
-This guide is an illustrated walkthrough of the Twin Layer Adversarial Console. It explains the visual interface, details how each sector and sensor functions, and provides a 5-minute hands-on tutorial for testing all 6 adversarial capabilities.
-
----
-
-## 1. Interface Tour & Visual System
-
-The Adversarial Console runs in dark tactical mode (`#060913` background with navy glassmorphic panels). The interface uses three status colors:
-- **Cyan (`#00e5ff`):** Nominal telemetry and healthy sensor pillars.
-- **Amber (`#ffb300`):** Minor variance, unverified key, or degraded connectivity.
-- **Crimson (`#ff1744`):** Active adversarial attack, signature failure, or physical state divergence.
-
-### A. 3D Tactical Map (Greater Tunis)
-
-![Greater Tunis 3D Tactical Map](images/3d_tactical_map_overview.png)
-
-The map displays all 6 municipal sectors across Greater Tunis, with fixed centroids on dry land:
-1. **Downtown Financial (`zone-1`):** Commercial center along Avenue Habib Bourguiba.
-2. **Port & Coastal Harbor (`zone-2`):** Radès and La Goulette harbor docks and shipping canal.
-3. **North Industrial Park (`zone-3`):** Charguia and Ariana Sud industrial hub.
-4. **West Residential Hills (`zone-4`):** Residential terrain across Bardo and Manouba hills (positioned north of Sebkhet Sijoumi lake).
-5. **Central University & Med (`zone-5`):** El Manar campus and Rabta medical district.
-6. **South Logistics Hub (`zone-6`):** Ben Arous freight rail terminal and supply warehouses.
-
-Each sensor is rendered as a 3D hexagonal column whose height scales with its current metric. When a sensor is nominal, its pillar and sector halo glow cyan. When an attack is injected, the target pillar elevates and turns crimson, surrounded by a red warning beacon.
+This guide documents the operations console for Layer 1 (the Digital Twin) in the TSYP 14 City Brain Convergence architecture. It explains the user interface layout, the live incident timeline, telemetry visualizations, audit capabilities, and the red team adversary controls.
 
 ---
 
-### B. Neighborhood Operational Cards & Red Team Sidebar
+## 1. Interface tour and visual design
 
-![Metropolitan Neighborhood Sectors and Telemetry Summary](images/adversarial_console_and_neighborhoods.png)
+The operations console runs with dark theme styling (`#0b0f14` background, `#121821` card surfaces, `#e6edf3` body text, `#3b82f6` primary accents). Telemetry and state indicators adhere to functional semantic coloring:
+- Nominal: `#22c55e` (green)
+- Contained or isolated: `#f59e0b` (amber)
+- Attacked or diverging: `#ef4444` (red)
+- Actuator refused or blocked: `#a855f7` (purple)
 
-![Red Team Threat Matrix Controls](images/red_team_sidebar_controls.png)
+### Top status bar and operational KPIs
 
-- **Neighborhood Cards (Main View):** Each card summarizes the 7 sensors operating within that zone:
-  - **Traffic Cameras (`tc1`, `tc2`):** Vehicle passage rates (0 - 200 veh/min).
-  - **Water Level Floats (`wl1`, `wl2`):** Drainage channel depth (0 - 12 meters).
-  - **Power Load Meters (`pl1`):** Electrical grid draw (5 - 120 MW).
-  - **Air Quality Stations (`aq1`):** Particulate index (10 - 350 AQI).
-  - **Emergency Dispatch (`ec1`):** Active incoming emergency calls (0 - 30 call/min).
-- **Red Team Controls (Sidebar):** Contains attack configuration controls, one-click demo presets, simulation clock pulse controls, and the active threat manifest showing all currently running exploits.
+The top status bar provides a single-line overview of the runtime environment:
+- Simulation time: Full RFC 3339 timestamp formatted in monospace without truncation.
+- Simulation speed: Configured multiplier relative to real time (for example, 20x).
+- Throughput: Current wire publication velocity in messages per second.
+- Kafka broker status: Online or offline indicator for the telemetry streaming broker.
+- MCP server status: Online or offline indicator for the synchronous tool-call server.
+- Recent callers: Identities observed calling MCP tools within the last 5 simulation minutes (such as brain and guardian).
 
----
-
-### C. Clean Vector Cartography
-
-![Clean Vector Cartography](images/vector_cartography_zoom.png)
-
-The basemap uses clean dark vector tiles (`CARTO Dark Matter`) without cluttered text labels, allowing clean zooming into street-level intersections without broken fonts or overlapping water bodies.
-
----
-
-## 2. Hands-On Tutorial: Testing the System in 5 Minutes
-
-Follow these steps to test every capability in real time.
-
-### Step 1: Open the Console & Verify Nominal Baseline
-1. Open your browser and navigate to `http://localhost:8501`.
-2. Inspect the top Scoreboard:
-   - **Total Readings:** Actively incrementing.
-   - **Active Incidents / Tampered:** 0.
-   - **Active Red Team Attacks:** 0 (`Zero Threats`).
-   - **System Status:** `[SYSTEM STATUS: AUTONOMOUS] // LOCAL SIMULATION RUNTIME ACTIVE`.
-3. Verify that all 6 neighborhood cards show green `[NOMINAL INTEGRITY // 7/7 ONLINE]` badges.
+Below the status bar, four headline KPI tiles display key operational metrics:
+- Readings: Total count of logged telemetry records.
+- Attacked readings: Total volume of records marked under active attack.
+- Active attacks: Number of active adversary capabilities currently executing.
+- Devices contained: Total number of devices under quarantine or isolation.
 
 ---
 
-### Step 2: Inject a Physical Sensor Spoof (`device_physical`)
-In this attack, the physical sensor reading is falsified on the wire, but the ground-truth database records the true physical reality.
+## 2. Console tabs
 
-1. In the sidebar under **"MANUAL THREAT MATRIX"**:
-2. Set **Target Sensor Identifier** to `z1-tc1` (Downtown Traffic Camera 1).
-3. Set **Adversary Capability Model** to `4. Physical Layer (Sensor Spoofing)`.
-4. Enter **Spoofed Telemetry Value**: `185.0` (simulating extreme artificial traffic gridlock).
-5. Click **"EXECUTE ATTACK"**.
+The console organizes monitoring and audit functions across four tabs.
 
-**What happens immediately:**
-- The Downtown Financial card flips to red: `[CRITICAL THREAT ACTIVE]`.
-- On the 3D map, the `z1-tc1` pillar elevates and pulses crimson.
-- The sidebar **Active Threat Manifest** lists `[THREAT ACTIVE] device_physical (z1-tc1)`.
+### Tab 1: Timeline
 
----
+![Operations console incident timeline](images/timeline_view.png)
 
-### Step 3: Inspect Ground Truth vs Broadcast Divergence
-1. Click **Tab 2: "Live Telemetry & Divergence Curves"**.
-2. Select Device `z1-tc1` from the dropdown.
-3. Observe the Altair time-series chart:
-   - **Solid Emerald Line:** Real physical reality (e.g., ~45 veh/min).
-   - **Dotted Crimson Line:** Spoofed broadcast value (185 veh/min).
-   - **Divergence Metric:** Shows an absolute discrepancy of ~140 veh/min.
-4. This divergence proves the physical isolation rule: the external world receives the poisoned data, but the Twin's internal SQLite ledger preserves true ground reality.
+The timeline tab is the primary operational view. It correlates events across five distinct lanes:
+1. Twin lane: Physical event lifecycles (start, escalation, resolution), adversary attack injections and clearances, and the first attacked reading for each incident.
+2. Guardian lane: Automated containment and countermeasure actions, including quarantine, isolation, release, reinstatement, and reading rollback operations.
+3. Brain lane: Supervisory command decisions, including incident dispatch and valve adjustments.
+4. Actuator lane: Physical actuation execution results, distinguishing successful operations from refused commands (such as refusal under an actuator tampering attack).
+5. Test harness lane: Diagnostic actions originating from scenario test runners, kept collapsed by default to preserve operational clarity.
+
+Incident chains link related events that share target devices or zones within a 10 simulation-minute window. Each chain displays its computed reaction time in simulation seconds. Selecting any row in the timeline data grid displays its full underlying JSON record for deep inspection.
 
 ---
 
-### Step 4: Test the Other 5 Attack Capabilities
+### Tab 2: City map
 
-You can test each capability individually using the sidebar controls:
+![Greater Tunis 3D tactical map](images/3d_tactical_map_overview.png)
 
-| Capability | Target Device | Test Configuration | Observable Result |
-| :--- | :--- | :--- | :--- |
-| **`device_key`** (Compromised Key) | `z3-pl1` (Power Load) | Replaces device key with an attacker key | Outbound signature remains valid, but Guardian detects revoked/unauthorized public key on MCP. |
-| **`link`** (Network Tampering) | `z2-wl1` (Water Float) | Corrupts raw JSON bytes or drops frames | Guardian signature validation immediately fails (`Ed25519 verification failed`); payload corrupted. |
-| **`rogue`** (Unregistered Transmitter) | `zone-4` (Residential) | Transmits unauthorized packet `rg-z41` | Packet appears on wire; Guardian MCP tool `list_devices` flags sensor as unregistered intruder. |
-| **`sensor_fault`** (Hardware Drift) | `z5-aq1` (Air Quality) | Injects additive drift (`+45.0 AQI`) | Values drift upward without triggering hard boundaries; caught by multi-sensor neighborhood correlation. |
-| **`actuator`** (Command Disobedience)| `z1-wl2` (Flood Valve) | Sets actuation state to `stuck_closed` | Device returns `"status": "ok"` to City Brain MCP call, but physically refuses to open drainage valve. |
+The city map tab presents a 3D tactical visualization of Greater Tunis divided into six municipal zones:
+- Downtown Financial (`zone-1`)
+- Port and Coastal Harbor (`zone-2`)
+- North Industrial Park (`zone-3`)
+- West Residential Hills (`zone-4`)
+- Central University and Medical District (`zone-5`)
+- South Logistics Hub (`zone-6`)
 
----
-
-### Step 5: Use One-Click Hackathon Pitch Presets
-During live presentations, you do not need to manually configure parameters. The sidebar includes **6 Pitch Presets** pre-calibrated for demonstration:
-
-1. Click **"DEMO PRESET 1: PHYSICAL SPOOF (DOWNTOWN)"**.
-   - Spikes traffic camera `z1-tc1` to 195 veh/min.
-   - Demonstrates immediate detection on 3D map.
-2. Click **"DEMO PRESET 2: FORGED KEY (INDUSTRIAL)"**.
-   - Emulates key theft on power substation `z3-pl1`.
-   - Demonstrates zero-trust key revocation.
-3. Click **"DEMO PRESET 3: LINK CORRUPTION (HARBOR)"**.
-   - Injects bitflips into harbor water level `z2-wl1`.
-   - Demonstrates signature verification failure.
+Each sensor is represented as a 3D column positioned at its registered geographic coordinates. Column heights are individually normalised to each device type's configured range (`[min_val, max_val]`), preventing disparate units (such as megawatts and air quality index) from distorting relative visual scale. Pillars reflect device status through semantic coloring (neutral for nominal, red for attacked, and amber for contained). Interactive tooltips provide exact device identifiers, device types, broadcast values, physical units, and active threat conditions.
 
 ---
 
-### Step 6: Disarm Threats & Confirm Baseline Recovery
-1. In the sidebar, click the button **"DISARM ALL THREATS"**.
-2. **Verification:**
-   - Active attacks count immediately resets to `0` (`Zero Threats`).
-   - All 6 neighborhood cards turn back to `[NOMINAL INTEGRITY // 7/7 ONLINE]`.
-   - All 3D pillars return to uniform cyan baseline.
-   - The Active Threat Manifest clears completely.
+### Tab 3: Truth vs broadcast
+
+![Ground truth versus broadcast divergence curves](images/divergence_curves_view.png)
+
+The truth versus broadcast tab compares physical reality against wire transmissions:
+- Solid green line: Ground truth value recorded in the private simulation ledger.
+- Dashed blue line: Wire telemetry broadcast over Kafka.
+- Red shaded region: Divergence between truth and wire, illustrating the impact of physical spoofing, drift, or replay attacks.
+
+A device picker grouped by municipal zone allows rapid inspection of any of the 42 city sensors. Discrepancy metrics summarise the maximum observed deviation across the selected window.
 
 ---
 
-### Step 7: Forensic Audit Ledger
-1. Click **Tab 3: "Raw Ledger & Forensic Audit"**.
-2. The table shows the immutable record of all injected attacks stored in `attacks_injected`:
-   - Exact simulation timestamp (`start_sim_time` and `end_sim_time`).
-   - Attack type, target device, and attack parameters.
-   - Active status (`1` when running, `0` once disarmed).
-3. This audit trail gives judges and security evaluators proof of attack lifecycles and response timestamps.
+### Tab 4: Ledger
+
+![Read-only ground truth ledger audit trail](images/ledger_view.png)
+
+The ledger tab exposes the read-only forensic audit trail directly from `readings_truth`. Every record includes:
+- Unique reading identifier (`r-{device_id}-{seq}`)
+- Simulation timestamp
+- Device identifier and municipal zone
+- Ground truth value and broadcast wire value
+- Attack classification flag and adversary capability type
+
+Records with active attacks are highlighted with red row tinting, allowing operators and auditors to inspect historical incidents without risk of ledger corruption.
+
+---
+
+## 3. Red team adversary controls
+
+![Red team adversary controls](images/red_team_sidebar_controls.png)
+
+The sidebar provides authenticated controls to inject attacks and physical events into the simulation:
+
+### Manual injection
+Enables targeted adversary capabilities against specific devices or zones:
+- `device_physical`: Spoofs sensor output on wire while preserving truth in the ledger.
+- `device_key`: Emulates cryptographic key theft and unauthorized signing.
+- `link`: Manipulates network communication (corrupt bytes, invalid signature, replay, delay, frame drop).
+- `rogue`: Introduces unauthorized transmitters into a target zone.
+- `sensor_fault`: Injects calibration drift or stuck values.
+- `actuator`: Forces actuation mechanisms to refuse supervisory commands.
+
+### Physical events
+Injects municipal conditions into selected zones:
+- Types: `rain_storm`, `traffic_accident`, `fire`, `grid_overload`, `air_hazard`.
+- Parameters: Target zone, intensity multiplier, and simulation duration.
+
+### Active threats and events
+Displays an inventory of all currently active exploits and environmental conditions. Each row provides a one-click clearance button, and a global "Clear all threats" button restores all devices and actuators to nominal baseline.
+
+---
+
+## 4. Operational verification workflow
+
+To verify complete end-to-end telemetry and defense responses:
+1. Start the Twin unified runtime and console.
+2. In the sidebar, select target device `z1-tc1`, capability `device_physical`, and enter a spoofed value (such as 185 veh/min). Click "Inject attack".
+3. Observe the Timeline tab: A new incident chain appears showing the attack injection, the attacked reading, and the corresponding Guardian verdict.
+4. Switch to the City map tab: The column for `z1-tc1` turns red.
+5. Switch to the Truth vs broadcast tab: View the divergence curve showing real physical traffic (~45 veh/min) against the spoofed wire reading (185 veh/min).
+6. Return to the sidebar and click "Clear all threats": The system returns to nominal baseline across all tabs and metrics.

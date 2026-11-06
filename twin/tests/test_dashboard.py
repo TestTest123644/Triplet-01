@@ -262,3 +262,64 @@ def test_spatial_twin_deck_to_json(test_sim_and_db, monkeypatch):
     get_radii = [l.get("getRadius") for l in scatter_layers]
     assert "@@=radius" in get_radii
     assert "@@=halo_radius" in get_radii
+
+
+def test_normalised_map_heights(test_sim_and_db, monkeypatch):
+    """Verify that 3D pillar elevations are normalised to each device's operating range [min_val, max_val]."""
+    sim, ledger, db_path = test_sim_and_db
+    monkeypatch.setattr(dashboard, "DB_PATH", db_path)
+
+    sensors_df = dashboard.fetch_geospatial_sensors()
+    assert not sensors_df.empty
+    assert "elevation" in sensors_df.columns
+    assert "min_val" in sensors_df.columns
+    assert "max_val" in sensors_df.columns
+
+    # Elevate should strictly stay within [50.0, 500.0]
+    elevations = sensors_df["elevation"].values
+    assert (elevations >= 50.0).all()
+    assert (elevations <= 500.0).all()
+
+    # Verify normalisation formula across diverse sensor units
+    for _, row in sensors_df.iterrows():
+        b_val = float(row["broadcast_value"])
+        min_v = float(row["min_val"])
+        max_v = float(row["max_val"])
+        norm = max(0.0, min(1.0, (b_val - min_v) / (max_v - min_v)))
+        expected_elevation = 50.0 + norm * 450.0
+        assert abs(row["elevation"] - expected_elevation) < 1e-4
+
+
+def test_missing_journal_error_message(monkeypatch):
+    """Verify that a missing or unreachable journal API returns a clear error message with env vars."""
+    def mock_get_fail(url, *args, **kwargs):
+        raise requests.exceptions.ConnectionError("Connection refused")
+
+    monkeypatch.setattr(requests, "get", mock_get_fail)
+    monkeypatch.setattr(dashboard, "DB_PATH", "/nonexistent/test.db")
+
+    entries, error_msg = dashboard.fetch_timeline_events()
+    assert len(entries) == 0
+    assert error_msg is not None
+    assert "TWIN_API_URL" in error_msg
+    assert "Cannot connect to journal API" in error_msg
+
+
+def test_console_never_opens_ledger_writable(test_sim_and_db, monkeypatch):
+    """Verify that get_db_connection() strictly opens SQLite in read-only mode."""
+    sim, ledger, db_path = test_sim_and_db
+    monkeypatch.setattr(dashboard, "DB_PATH", db_path)
+
+    conn = dashboard.get_db_connection()
+    try:
+        # All write operations must be rejected by sqlite3
+        with pytest.raises(sqlite3.OperationalError, match="readonly database"):
+            conn.execute("DELETE FROM readings_truth")
+
+        with pytest.raises(sqlite3.OperationalError, match="readonly database"):
+            conn.execute("UPDATE devices SET status = 'tampered'")
+
+        with pytest.raises(sqlite3.OperationalError, match="readonly database"):
+            conn.execute("INSERT INTO physical_events (event_id) VALUES ('fake')")
+    finally:
+        conn.close()
