@@ -683,3 +683,9 @@ def test_reading_from_a_contained_device_stays_weightless_after_release(verdict_
     [record] = s.actions.values()
     assert record.status is ActionStatus.BLOCKED and "TRUST_INSUFFICIENT" in record.reasons
     assert any(r.device_status is DeviceStatus.QUARANTINED for r in record.intent.evidence)
+
+
+def test_dispatched_is_published_before_the_command_is_sent():
+    s, _ = dispatched_open()
+    published = s.last_effects.index(Publish(commands(s.last_effects, "DISPATCHED")[0]))
+    assert published < s.last_effects.index(only(SendCommand, s.last_effects))

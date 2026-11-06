@@ -40,9 +40,10 @@ def _status(state: BrainState, reason: str) -> Publish:
 def step(state: BrainState, event: Event) -> tuple[BrainState, list[Effect]]:
     effects: list[Effect] = []
     if isinstance(event, RegistryLoaded):
+        reason = "registry_reloaded" if state.registry else "startup"
         state.registry = {d.device_id: d for d in event.devices}
         state.allowlist = event.allowlist
-        effects.append(_status(state, "startup"))
+        effects.append(_status(state, reason))
     elif isinstance(event, ReadingRejected):
         state.counters[event.code] += 1
     elif isinstance(event, ReadingReceived):

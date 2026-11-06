@@ -80,6 +80,34 @@ def test_prune_drops_old_and_keeps_recent():
     assert led.lookup("new", "0123456789abcdef", T0) is not None
 
 
+def test_prune_ignores_arrival_order():
+    led = VerdictLedger()
+    led.add(make_verdict(reading_id="new", issued_at=T0 + timedelta(seconds=100)))
+    led.add(make_verdict(reading_id="old", issued_at=T0, expires_at=T0 + timedelta(seconds=999)))
+    led.prune(T0 + timedelta(seconds=130))
+    assert led.latest("old", "0123456789abcdef") is None
+    assert led.latest("new", "0123456789abcdef") is not None
+
+
+def test_prune_judges_a_replaced_verdict_by_its_replacement():
+    led = VerdictLedger()
+    led.add(make_verdict(reading_id="r", issued_at=T0))
+    led.add(make_verdict(reading_id="r", issued_at=T0 + timedelta(seconds=100), trust=0.5))
+    led.prune(T0 + timedelta(seconds=130))
+    assert led.latest("r", "0123456789abcdef").trust == 0.5
+    led.prune(T0 + timedelta(seconds=230))
+    assert led.latest("r", "0123456789abcdef") is None
+
+
+def test_clear_forgets_pending_prunes():
+    led = VerdictLedger()
+    led.add(make_verdict(reading_id="r", issued_at=T0))
+    led.clear()
+    led.add(make_verdict(reading_id="r", issued_at=T0 + timedelta(seconds=100)))
+    led.prune(T0 + timedelta(seconds=130))
+    assert led.latest("r", "0123456789abcdef") is not None
+
+
 def test_clear_empties_ledger():
     led = VerdictLedger()
     led.add(make_verdict())

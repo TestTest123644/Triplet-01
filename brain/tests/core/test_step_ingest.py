@@ -86,3 +86,17 @@ def test_reading_rejected_counted_by_code():
     s, fx = step(fresh_state(), ReadingRejected("BAD_SIGNATURE", "d1"))
     s, _ = step(s, ReadingRejected("BAD_SIGNATURE", None))
     assert s.counters["BAD_SIGNATURE"] == 2 and fx == []
+
+
+def test_a_second_registry_load_is_reported_as_a_reload():
+    from city_brain.domain.types import (
+        CanonicalUnit, DeviceProfile, DeviceStatus, SensorKind,
+    )
+
+    dev = DeviceProfile(
+        device_id="d1", zone_id="z", kind=SensorKind.WATER_LEVEL, unit=CanonicalUnit.M,
+        min_val=0.0, max_val=10.0, status=DeviceStatus.OK, actuator=None,
+    )
+    s, _ = step(fresh_state(), RegistryLoaded((dev,)))
+    _, fx = step(s, RegistryLoaded((dev,)))
+    assert [e.event["data"]["reason"] for e in fx if isinstance(e, Publish)] == ["registry_reloaded"]

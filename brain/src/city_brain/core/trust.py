@@ -1,5 +1,6 @@
 """Verdict ledger, trust weights and risk-class trust requirements (spec 7.2, 8.1, 8.6)."""
 
+import heapq
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timedelta
 
@@ -21,6 +22,8 @@ class VerdictLedger:
 
     def __init__(self) -> None:
         self._verdicts: dict[_Key, Verdict] = {}
+        # Oldest first, so that pruning on every verdict does not rescan the ledger.
+        self._by_issued_at: list[tuple[datetime, _Key]] = []
 
     def add(self, verdict: Verdict) -> list[_Key]:
         """Keep the latest verdict per key by `issued_at`.
@@ -34,6 +37,7 @@ class VerdictLedger:
         if current is not None and verdict.issued_at < current.issued_at:
             return []
         self._verdicts[key] = verdict
+        heapq.heappush(self._by_issued_at, (verdict.issued_at, key))
         if current is not None and (current.state, current.trust) == (verdict.state, verdict.trust):
             return []
         return [key]
@@ -50,11 +54,15 @@ class VerdictLedger:
 
     def prune(self, now: datetime, keep_s: float = 120.0) -> None:
         cutoff = now - timedelta(seconds=keep_s)
-        for key in [k for k, v in self._verdicts.items() if v.issued_at < cutoff]:
-            del self._verdicts[key]
+        while self._by_issued_at and self._by_issued_at[0][0] < cutoff:
+            _, key = heapq.heappop(self._by_issued_at)
+            current = self._verdicts.get(key)
+            if current is not None and current.issued_at < cutoff:  # else replaced by a newer one
+                del self._verdicts[key]
 
     def clear(self) -> None:
         self._verdicts.clear()
+        self._by_issued_at.clear()
 
 
 def trust_weight(verdict: Verdict | None, device_status: DeviceStatus, caps: Mapping[str, float]) -> float:

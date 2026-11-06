@@ -135,9 +135,10 @@ def dispatch(state: BrainState, record: ActionRecord) -> list[Effect]:
     intent = record.intent
     state.in_flight.add(intent.target)
     state.last_command_at[intent.target] = state.sim_now
+    # Published first: the log must show the dispatch even if the send never returns.
     return [
-        SendCommand(intent.action_id, record.key, intent.capability, intent.target, intent.state),
         _transition(state, record, ActionStatus.DISPATCHED, ()),
+        SendCommand(intent.action_id, record.key, intent.capability, intent.target, intent.state),
     ]
 
 
