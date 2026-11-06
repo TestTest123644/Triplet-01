@@ -204,3 +204,22 @@ def test_new_epoch_clears_filters():
     assert s.filters
     s, _ = step(s, ReadingReceived(make_observation(seq=3, reading_id="n", sig_hash="n", sim_time=T0)))
     assert s.epoch == 1 and list(s.filters) == ["z1-wl1"] and s.filters["z1-wl1"].last_tick == 3
+
+
+def test_lone_spike_does_not_reach_observed_slope():
+    f = run_series(seconds=10, ratio=0.0)
+    start = f.last_tick - 29
+    f.update(value=f.level + 1.0, tick=f.last_tick + 1, weight=1.0, u=0.0)
+    for _ in range(10):
+        f.update(value=round(f.level + 0.0015, 2), tick=f.last_tick + 1, weight=1.0, u=0.0)
+    assert "IMPLAUSIBLE_JUMP" not in f.flags
+    assert f.observed_slope(since_tick=start) == pytest.approx(0.015, abs=0.005)
+
+
+def test_initialised_false_until_first_weighted_reading():
+    f = WaterFilter(FP)
+    assert not f.initialised
+    f.update(value=3.0, tick=1, weight=0.0, u=0.0)
+    assert not f.initialised
+    f.update(value=3.0, tick=2, weight=1.0, u=0.0)
+    assert f.initialised

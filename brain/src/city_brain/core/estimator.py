@@ -33,12 +33,18 @@ class WaterFilter:
         self._last_weighted_tick = 0
         self._flags: set[str] = set()
         self._ring: deque[tuple[int, float]] = deque(maxlen=RING_SIZE)
+        # Gated readings wait here: a spike is dropped, a sustained disagreement joins the ring on reset.
+        self._pending: list[tuple[int, float]] = []
         self._last_value: float | None = None
         self._same_run = 0
         self._gated_run = 0
         self._ungated_run = 0
 
     # ----- read-only state -----
+
+    @property
+    def initialised(self) -> bool:
+        return self._initialised
 
     @property
     def level(self) -> float:
@@ -107,7 +113,6 @@ class WaterFilter:
         if weight <= 0.0:
             return
         prior_rate = float(self._x[1] - self._b * u)
-        self._ring.append((tick, value))
         self._last_weighted_tick = tick
         self._flags.discard("CEILING")
         if at_ceiling:
@@ -117,11 +122,14 @@ class WaterFilter:
         innovation = value - self._x[0]
         if abs(innovation) > self._jump_sigma * float(np.sqrt(s)):
             self._flags.add("IMPLAUSIBLE_JUMP")
+            self._pending.append((tick, value))
             self._ungated_run = 0
             self._gated_run += 1
             if self._gated_run >= GATED_RUN_FOR_RESET:
                 self._reinitialise(value, tick, u)
             return
+        self._pending.clear()
+        self._ring.append((tick, value))
         gain = self._p[:, 0] / s
         self._x = self._x + gain * innovation
         self._p = self._p - np.outer(gain, self._p[0, :])
@@ -159,6 +167,8 @@ class WaterFilter:
 
     def _reinitialise(self, value: float, tick: int, u: float) -> None:
         """Sustained disagreement: trust the measurements over the model."""
+        self._ring.extend(sorted(self._pending))
+        self._pending.clear()
         slope = self.observed_slope(since_tick=tick - RESET_SLOPE_WINDOW)
         inflow = float(self._x[1]) if slope is None else slope + self._b * u
         self._x = np.array([value, inflow])
