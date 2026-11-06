@@ -182,3 +182,29 @@ def test_city_state_and_keys():
     t = MockTwin(); s = t.get_city_state()
     assert s["total_devices"] == 42 and len(s["zones"]) == 6 and s["sim_time"] == "2026-10-17T12:00:00Z"
     assert t.get_device_key("nope") is None
+
+
+def test_renamed_state_field_still_drives_physics():
+    p = TwinProfile.load("profiles/twin-triplet07.yaml")
+    acts = {k: dict(v) for k, v in p.actuators.items()}
+    acts["signal"]["state_field"] = "plan_x"
+    t = MockTwin(profile=TwinProfile({**p._data, "actuators": acts}, p.schema))
+    t.handle_tool("set_signal_plan", {"device_id": "z1-tc1", "target_state": "red_restriction"})
+    assert t.devices["z1-tc1"].actuator_state["plan_x"] == "red_restriction"
+    assert t.devices["z1-tc1"].signal_plan == "red_restriction"
+    base = MockTwin()
+    for _ in range(300):
+        t.tick(); base.tick()
+    assert t.devices["z1-tc1"].value < base.devices["z1-tc1"].value - 5
+
+
+def test_seed_changes_keys_and_values():
+    a, b = MockTwin(seed=1), MockTwin(seed=2)
+    assert a.get_device_key("z1-wl1") != b.get_device_key("z1-wl1")
+    assert [r["value"] for r in a.tick()] != [r["value"] for r in b.tick()]
+
+
+def test_restart_is_deterministic_for_the_same_seed():
+    a, b = MockTwin(seed=3), MockTwin(seed=3)
+    a.tick(); a.restart(); b.tick(); b.restart()
+    assert a.tick() == b.tick() and a.get_device_key("z1-wl1") != MockTwin(seed=3).get_device_key("z1-wl1")

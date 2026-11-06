@@ -93,3 +93,10 @@ def test_unsigned_has_no_sig():
 
 def test_derive_keypair_is_deterministic_and_distinct():
     assert derive_keypair("a") == derive_keypair("a") and derive_keypair("a") != derive_keypair("b")
+
+
+def test_unknown_policy_kind_raises():
+    import pytest
+    from mocks.guardian.mock_guardian import GuardianPolicy
+    with pytest.raises(ValueError):
+        GuardianPolicy("trsut_all")

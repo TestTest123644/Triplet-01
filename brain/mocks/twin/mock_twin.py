@@ -20,7 +20,7 @@ _START = datetime(2026, 10, 17, 12, 0, 0, tzinfo=timezone.utc)
 _CAPABILITIES = ("device_physical", "device_key", "sensor_fault", "link", "actuator")
 # wire order of a reading (kafka_streamer.TwinSensorReading), as canonical field names
 _WIRE_ORDER = ("reading_id", "device_id", "kind", "sim_time", "seq", "value", "unit", "zone_id", "device_status")
-_CONTAINED = ("isolated", "quarantined")
+_CONTAINED = ("ISOLATED", "QUARANTINED")  # canonical statuses the Twin keeps actuating
 
 
 @dataclass(frozen=True)
@@ -51,18 +51,19 @@ class MockDevice:
     drift_offset: float = 0.0
     last_broadcast: dict[str, Any] | None = None
     active_attack: dict[str, Any] | None = None
+    state_fields: dict[str, str] = field(default_factory=dict)  # capability -> actuator_state key
 
     @property
     def valve_ratio(self) -> float:
-        return self.actuator_state.get("valve_ratio", 0.0)
+        return self.actuator_state.get(physics.VALVE_RATIO_KEY, 0.0)
 
     @property
     def signal_plan(self) -> str:
-        return self.actuator_state.get("signal_plan", "normal")
+        return self.actuator_state.get(self.state_fields["signal"], "normal")
 
     @property
     def grid_state(self) -> str:
-        return self.actuator_state.get("grid_state", "grid_a")
+        return self.actuator_state.get(self.state_fields["grid"], "grid_a")
 
 
 def _fmt(dt: datetime) -> str:
@@ -83,6 +84,9 @@ class MockTwin:
             if canon not in self._wire:
                 raise ProfileError(f"fields map has no partner field for '{canon}'")
         self._status_ok = next(p for p, c in self.profile.statuses.items() if c == "OK")
+        self._state_fields = {cap: spec["state_field"] for cap, spec in self.profile.actuators.items()
+                              if "state_field" in spec}
+        self._contained = {p for p, c in self.profile.statuses.items() if c in _CONTAINED}
         self._tools = {spec["tool"]: cap for cap, spec in self.profile.actuators.items()}
         self._reset()
 
@@ -115,7 +119,7 @@ class MockTwin:
                     min_val=float(row["min"]), max_val=float(row["max"]),
                     private_key=priv, public_key=pub, value=float(row["init"]),
                     actuator_state=dict(row.get("initial_actuator") or {}),
-                    status=self._status_ok)
+                    status=self._status_ok, state_fields=self._state_fields)
 
     def restart(self) -> None:
         """A Twin process restart: new keys, seq, clock, attacks and caches."""
@@ -235,7 +239,7 @@ class MockTwin:
         if key and not self.defects.reexecute_repeated_keys and key in self.command_results:
             return self.command_results[key]
         spec = self.profile.actuators[cap]
-        if "states" not in spec:
+        if spec["target"] == "zone":
             result = self._dispatch(args["zone_id"], args["incident_type"])
         else:
             result = self._set_state(cap, spec, args["device_id"], args["target_state"])
@@ -247,7 +251,7 @@ class MockTwin:
         dev = self.devices.get(device_id)
         if not dev or dev.device_type != spec["device_type"]:
             return {"status": "error", "message": f"Device {device_id} is not a valid {spec['device_type']}"}
-        if not self.defects.actuate_contained and dev.status in _CONTAINED:
+        if not self.defects.actuate_contained and dev.status in self._contained:
             return {"status": "error", "message": f"Device {device_id} is {dev.status}"}
         if not self.defects.accept_unknown_states and not self.profile.accepts_partner_state(cap, target):
             return {"status": "error", "message": f"Invalid target_state for {cap}: {target}"}
@@ -255,7 +259,7 @@ class MockTwin:
         if not blocked:  # actuator attack: replies ok, executes nothing
             dev.actuator_state[spec["state_field"]] = target
             if "ratio" in spec["states"]:
-                dev.actuator_state["valve_ratio"] = physics.valve_ratio(target)
+                dev.actuator_state[physics.VALVE_RATIO_KEY] = physics.valve_ratio(target)
         return {"status": "ok", "device_id": device_id, spec["state_field"]: target}
 
     def _dispatch(self, zone_id: str, incident_type: str) -> dict[str, Any]:

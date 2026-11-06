@@ -5,6 +5,7 @@ import random
 from datetime import datetime
 
 DT = 0.1  # seconds per tick
+VALVE_RATIO_KEY = "valve_ratio"  # numeric the Twin stores beside the valve state word
 
 PLAN_FACTORS = {"green_wave": 1.35, "red_restriction": 0.55}
 GRID_FACTORS = {"grid_b": 0.85, "shed": 0.40, "standby": 0.20}

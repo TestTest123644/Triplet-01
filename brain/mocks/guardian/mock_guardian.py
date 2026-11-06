@@ -11,12 +11,19 @@ from city_brain.edge.signatures import sign
 _TS = "%Y-%m-%dT%H:%M:%SZ"
 
 
+_KINDS = ("trust_all", "delay", "silent", "flip_after", "untrusted", "quarantine_at", "expired", "unsigned")
+
+
 @dataclass(frozen=True)
 class GuardianPolicy:
     kind: str
     device: str | None = None
     seconds: float = 0.0
     count: int = 0
+
+    def __post_init__(self) -> None:
+        if self.kind not in _KINDS:
+            raise ValueError(f"unknown guardian policy kind: {self.kind!r}")
 
 
 def trust_all() -> GuardianPolicy:
