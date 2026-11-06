@@ -4,6 +4,7 @@ from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
+from city_brain.core.estimator import WaterFilter
 from city_brain.domain.types import DeviceProfile
 
 
@@ -24,6 +25,7 @@ class BrainState:
     seen: set[tuple[str, str]] = field(default_factory=set)
     global_tick: int = 0
     epoch_origin: tuple[datetime, int] | None = None
+    filters: dict[str, WaterFilter] = field(default_factory=dict)
     counters: Counter[str] = field(default_factory=Counter)
     event_seq: int = 0
 

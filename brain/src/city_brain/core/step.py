@@ -1,5 +1,6 @@
 """The pure transition function: (state, event) -> (state, effects)."""
 
+from city_brain.core.estimator import WaterFilter
 from city_brain.core.epochs import is_new_epoch, start_new_epoch
 from city_brain.core.events import (
     Effect,
@@ -10,6 +11,7 @@ from city_brain.core.events import (
     RegistryLoaded,
 )
 from city_brain.core.state import BrainState, DeviceCursor
+from city_brain.domain.types import DeviceStatus, Observation, SensorKind
 
 
 def _status(state: BrainState, reason: str) -> Publish:
@@ -49,3 +51,16 @@ def _ingest(state: BrainState, event: ReadingReceived, effects: list[Effect]) ->
     if state.epoch_origin is None:
         state.epoch_origin = (obs.sim_time, obs.seq)
     state.global_tick = max(state.global_tick, obs.seq)
+    if obs.kind is SensorKind.WATER_LEVEL:
+        _update_water_filter(state, obs)
+
+
+def _update_water_filter(state: BrainState, obs: Observation) -> None:
+    water_filter = state.filters.get(obs.device_id)
+    if water_filter is None:
+        water_filter = state.filters[obs.device_id] = WaterFilter(state.params["filter"])
+    # Task 15 replaces this weight with `estimate_weight` and `u` with the commanded ratio.
+    weight = 1.0 if obs.device_status is DeviceStatus.OK else 0.0
+    water_filter.update(
+        obs.value, obs.seq, weight, u=0.0, at_ceiling="AT_CEILING" in obs.flags
+    )

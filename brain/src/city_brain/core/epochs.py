@@ -19,3 +19,4 @@ def start_new_epoch(state: BrainState) -> None:
     state.cursors.clear()
     state.global_tick = 0
     state.epoch_origin = None
+    state.filters.clear()

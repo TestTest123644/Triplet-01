@@ -1,12 +1,13 @@
 from datetime import timedelta
 
+from city_brain.config import load_config
 from city_brain.core.events import Publish, ReadingReceived, ReadingRejected, RegistryLoaded
 from city_brain.core.state import BrainState
 from city_brain.core.step import step
 from tests.factories import T0, make_observation
 
 POLICY = {"epochs": {"seq_drop": 100, "ts_back_s": 60}}
-PARAMS = {"filter": {"sample_period_s": 0.1}}
+PARAMS = load_config("config/standalone.yaml").params
 
 
 def fresh_state():
