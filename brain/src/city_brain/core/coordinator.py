@@ -9,7 +9,15 @@ from city_brain.core.shield import ShieldContext, evaluate
 from city_brain.core.state import ActionRecord, BrainState
 from city_brain.core.trust import evidence_ref, meets_requirement, trust_weight
 from city_brain.domain.ids import idempotency_key
-from city_brain.domain.types import ActionIntent, ActionStatus, DeviceStatus, EvidenceRef, StateKind
+from city_brain.domain.types import (
+    ActionIntent,
+    ActionStatus,
+    DeviceStatus,
+    EvidenceRef,
+    Observation,
+    StateKind,
+    TrustState,
+)
 
 RULE = "water_t0"
 VERDICT_WAIT = "verdict_wait"
@@ -18,14 +26,18 @@ SETTLE_TICKS = 5  # skip the first 0.5 s after acceptance while the valve takes 
 ACTIVE = frozenset(
     {ActionStatus.PROPOSED, ActionStatus.AWAITING_TRUST, ActionStatus.DISPATCHED, ActionStatus.VERIFYING}
 )
+# A lost reply freezes the target until reconciliation (P7): the Twin may have obeyed.
+GATES_PLANNING = ACTIVE | {ActionStatus.UNKNOWN}
+EPOCH_CHANGED = "EPOCH_CHANGED"  # the restart settled the question, so the target is free again
+COUNTS_FOR_VERIFICATION = (TrustState.TRUSTED, TrustState.DOUBTFUL)
 
 
 # ----- planning gates -----
 
 
 def may_propose(state: BrainState, intent: ActionIntent) -> bool:
-    """One active action per target, and one attempt per cooldown after BLOCKED."""
-    if any(r.status in ACTIVE and r.intent.target == intent.target for r in state.actions.values()):
+    """One open action per target, and one attempt per cooldown after BLOCKED."""
+    if any(_gates_planning(r) and r.intent.target == intent.target for r in state.actions.values()):
         return False
     blocked_at = state.last_blocked_at.get(intent.target)
     if blocked_at is None:
@@ -154,14 +166,21 @@ def on_result(state: BrainState, result: CommandResult) -> list[Effect]:
     ]
 
 
-def on_estimate(state: BrainState, device_id: str) -> list[Effect]:
+def note_reading(state: BrainState, obs: Observation) -> None:
+    """Remember the channel's readings during verification, to check their verdicts at close."""
+    for record in state.actions.values():
+        if record.status is ActionStatus.VERIFYING and record.intent.expected_effect.channel == obs.device_id:
+            record.window_readings.append((obs.seq, obs.reading_id, obs.sig_hash))
+
+
+def on_estimate(state: BrainState) -> list[Effect]:
+    """Close every window that is due, on any reading: a silent sensor must not leave one open."""
     effects: list[Effect] = []
     for action_id in sorted(state.actions):
         record = state.actions[action_id]
-        expected = record.intent.expected_effect
-        if record.status is not ActionStatus.VERIFYING or expected.channel != device_id:
+        if record.status is not ActionStatus.VERIFYING:
             continue
-        if (state.sim_now - record.dispatched_at).total_seconds() >= expected.window_s:
+        if (state.sim_now - record.dispatched_at).total_seconds() >= record.intent.expected_effect.window_s:
             effects.extend(_verify(state, record))
     return effects
 
@@ -171,11 +190,13 @@ def on_new_epoch(state: BrainState) -> list[Effect]:
     effects: list[Effect] = []
     for action_id in sorted(state.actions):
         record = state.actions[action_id]
+        if record.status is ActionStatus.UNKNOWN:
+            record.reasons = (*record.reasons, EPOCH_CHANGED)
         if record.status not in ACTIVE:
             continue
         if record.status is ActionStatus.AWAITING_TRUST:
             effects.append(CancelTimer(_timer_id(action_id)))
-        effects.append(_transition(state, record, ActionStatus.UNKNOWN, ("EPOCH_CHANGED",)))
+        effects.append(_transition(state, record, ActionStatus.UNKNOWN, (EPOCH_CHANGED,)))
         effects.append(Publish(alert_event(
             state, "operator", "warning", "EPOCH_CHANGED_ACTION_UNKNOWN",
             f"The Twin restarted during {record.intent.state} on {record.intent.target}.",
@@ -185,6 +206,10 @@ def on_new_epoch(state: BrainState) -> list[Effect]:
 
 
 # ----- helpers -----
+
+
+def _gates_planning(record: ActionRecord) -> bool:
+    return record.status in GATES_PLANNING and EPOCH_CHANGED not in record.reasons
 
 
 def _timer_id(action_id: str) -> str:
@@ -200,11 +225,15 @@ def _refs(intent: ActionIntent) -> dict:
 
 
 def _resolve(state: BrainState, ref: EvidenceRef) -> tuple[EvidenceRef, bool]:
-    """The ref as the ledger and registry see it now, and whether its verdict has gone."""
+    """The ref as the ledger and registry see it now, and whether its verdict has gone.
+
+    Contained at arrival or contained now both mean zero weight: release does not launder a
+    reading taken during containment. An unregistered device carries no weight either.
+    """
     verdict = state.ledger.lookup(ref.reading_id, ref.sig_hash, state.sim_now)
     device = state.registry.get(ref.device_id)
-    # An unregistered device carries no evidence weight.
-    status = device.status if device is not None else DeviceStatus.ISOLATED
+    current = device.status if device is not None else DeviceStatus.ISOLATED
+    status = current if ref.device_status is DeviceStatus.OK else ref.device_status
     weight = trust_weight(verdict, status, state.policy["trust"]["caps"])
     return evidence_ref(ref, verdict, weight), verdict is None and ref.verdict_id is not None
 
@@ -263,11 +292,22 @@ def _adopt_state(state: BrainState, intent: ActionIntent) -> None:
     state.registry[intent.target] = device.model_copy(update={"actuator": actuator})
 
 
+def _untrusted_ticks(state: BrainState, record: ActionRecord) -> list[int]:
+    """Window ticks whose reading has no TRUSTED or DOUBTFUL verdict as the window closes (spec 8.8)."""
+    ticks = []
+    for tick, reading_id, sig_hash in record.window_readings:
+        verdict = state.ledger.lookup(reading_id, sig_hash, state.sim_now)
+        if verdict is None or verdict.state not in COUNTS_FOR_VERIFICATION:
+            ticks.append(tick)
+    return ticks
+
+
 def _verify(state: BrainState, record: ActionRecord) -> list[Effect]:
     intent = record.intent
     expected = intent.expected_effect
     since_tick = record.dispatch_tick + SETTLE_TICKS
-    slope = state.filters[expected.channel].observed_slope(since_tick=since_tick)
+    excluded = _untrusted_ticks(state, record)
+    slope = state.filters[expected.channel].observed_slope(since_tick, exclude_ticks=frozenset(excluded))
     if slope is None:
         verdict = "inconclusive"
     elif expected.comparator == "<=":
@@ -277,13 +317,18 @@ def _verify(state: BrainState, record: ActionRecord) -> list[Effect]:
     record.status = ActionStatus.VERIFIED if verdict == "verified" else ActionStatus.UNVERIFIED
     state.in_flight.discard(intent.target)
     effects: list[Effect] = [Publish(verification_event(
-        state, intent.action_id, expected, {"slope": slope, "since_tick": since_tick}, verdict,
+        state, intent.action_id, expected,
+        {"slope": slope, "since_tick": since_tick, "excluded_ticks": excluded}, verdict,
         target=intent.target, incident_id=intent.incident_id,
     ))]
     if verdict == "verified":
         return effects
     state.suspect.add(intent.target)
-    message = f"{intent.state} on {intent.target} had no observed effect; the command is not resent."
+    if slope is None:
+        message = f"No measurements were available to check {intent.state} on {intent.target}."
+    else:
+        message = f"{intent.state} on {intent.target} had no observed effect."
+    message += " The command is not resent."
     refs = {**_refs(intent), "observed_slope": slope}
     for audience in ("operator", "guardian"):
         effects.append(Publish(alert_event(state, audience, "critical", "ACTUATOR_NO_EFFECT", message, refs)))

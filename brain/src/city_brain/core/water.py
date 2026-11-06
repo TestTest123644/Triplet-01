@@ -31,29 +31,36 @@ class WaterContext:
     global_tick: int
 
 
+def commanded_ratio(valve_state: str) -> float | None:
+    """Valve opening in [0, 1], or None for a state that cannot be read."""
+    if valve_state == CLOSED:
+        return 0.0
+    if valve_state == OPEN:
+        return 1.0
+    prefix, _, number = valve_state.partition(":")
+    if prefix == "ratio" and number.isascii() and number.isdigit() and int(number) <= 100:
+        return int(number) / 100
+    return None
+
+
 def _valve_class(valve_state: str) -> str:
     """Classify a valve state as "closed", "open" or "unknown"."""
-    if valve_state == CLOSED:
-        return CLOSED
-    if valve_state == OPEN:
-        return OPEN
-    prefix, _, number = valve_state.partition(":")
-    if prefix == "ratio" and number.isascii() and number.isdigit():
-        n = int(number)
-        if n == 0:
-            return CLOSED
-        if 1 <= n <= 100:
-            return OPEN
-    return "unknown"
+    ratio = commanded_ratio(valve_state)
+    if ratio is None:
+        return "unknown"
+    return OPEN if ratio > 0 else CLOSED
 
 
 def water_hold_reason(ctx: WaterContext, policy: Mapping) -> str | None:
     """Why this channel must not be planned on, or None.
 
-    Order: STALE, STUCK, IMPLAUSIBLE_JUMP, MODEL_MISMATCH, UNKNOWN_VALVE_STATE.
+    Order: STALE, INSUFFICIENT_EVIDENCE, STUCK, IMPLAUSIBLE_JUMP, MODEL_MISMATCH,
+    UNKNOWN_VALVE_STATE.
     """
     if not ctx.filter.initialised or not ctx.recent or ctx.filter.is_stale(ctx.global_tick):
         return "STALE"
+    if len(ctx.recent) < int(policy["water"]["evidence_count"]):
+        return "INSUFFICIENT_EVIDENCE"
     flags = ctx.filter.flags
     for reason in ("STUCK", "IMPLAUSIBLE_JUMP", "MODEL_MISMATCH"):
         if reason in flags:

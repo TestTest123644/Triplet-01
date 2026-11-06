@@ -124,6 +124,7 @@ class EvidenceRef(_Frozen):
     verdict_id: str | None
     trust_state: TrustState
     weight: float
+    device_status: DeviceStatus = DeviceStatus.OK  # as reported when the reading arrived
 
 
 class ExpectedEffect(_Frozen):

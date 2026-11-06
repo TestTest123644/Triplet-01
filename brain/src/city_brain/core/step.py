@@ -19,12 +19,13 @@ from city_brain.core.events import (
 from city_brain.core.records import decision_event, status_event
 from city_brain.core.state import BrainState, DeviceCursor
 from city_brain.core.trust import estimate_weight, evidence_ref, trust_weight
-from city_brain.core.water import OPEN, WaterContext, plan_water_t0, water_hold_reason
+from city_brain.core.water import WaterContext, commanded_ratio, plan_water_t0, water_hold_reason
 from city_brain.domain.types import Observation, SensorKind
 
 UNKNOWN_VALVE_STATE = ""  # no registry entry or no actuator: the planner holds on it
 WOULD_CHANGE_IF = {
     "STALE": "weighted readings arrive on this channel again",
+    "INSUFFICIENT_EVIDENCE": "enough readings arrive on this channel to cite",
     "STUCK": "the sensor value moves again",
     "IMPLAUSIBLE_JUMP": "readings agree with the estimate again",
     "MODEL_MISMATCH": "readings stay consistent with the model",
@@ -83,6 +84,8 @@ def _ingest(state: BrainState, event: ReadingReceived, effects: list[Effect]) ->
     _note_device_status(state, obs)
     if obs.kind is SensorKind.WATER_LEVEL:
         _water_reading(state, obs, effects)
+    else:
+        effects.extend(coordinator.on_estimate(state))
 
 
 def _note_device_status(state: BrainState, obs: Observation) -> None:
@@ -94,7 +97,8 @@ def _note_device_status(state: BrainState, obs: Observation) -> None:
 def _water_reading(state: BrainState, obs: Observation, effects: list[Effect]) -> None:
     device_id = obs.device_id
     valve_state = _valve_state(state, device_id)
-    u = _commanded_ratio(valve_state)
+    # A state we cannot read is treated as no drain; the planner holds on it.
+    u = commanded_ratio(valve_state) or 0.0
     water_filter = _update_water_filter(state, obs, u)
     _track_low_band(state, device_id, water_filter, u)
     context = WaterContext(
@@ -108,7 +112,8 @@ def _water_reading(state: BrainState, obs: Observation, effects: list[Effect]) -
         plan_version=state.plan_version.get(device_id, 0) + 1,
         global_tick=state.global_tick,
     )
-    effects.extend(coordinator.on_estimate(state, device_id))
+    coordinator.note_reading(state, obs)
+    effects.extend(coordinator.on_estimate(state))
     intent = plan_water_t0(context, state.policy)
     if intent is not None and coordinator.may_propose(state, intent):
         effects.extend(coordinator.propose(state, intent))
@@ -122,31 +127,23 @@ def _valve_state(state: BrainState, device_id: str) -> str:
     return device.actuator.current_state
 
 
-def _commanded_ratio(valve_state: str) -> float:
-    """Valve opening in [0, 1]. A state we cannot read is treated as no drain; the planner holds."""
-    if valve_state == OPEN:
-        return 1.0
-    prefix, _, number = valve_state.partition(":")
-    if prefix == "ratio" and number.isascii() and number.isdigit() and int(number) <= 100:
-        return int(number) / 100
-    return 0.0
-
-
 def _update_water_filter(state: BrainState, obs: Observation, u: float) -> WaterFilter:
     water_filter = state.filters.get(obs.device_id)
     if water_filter is None:
         water_filter = state.filters[obs.device_id] = WaterFilter(state.params["filter"])
     trust = state.policy["trust"]
-    verdict = state.ledger.lookup(obs.reading_id, obs.sig_hash, state.sim_now)
     in_range = "OUT_OF_RANGE" not in obs.flags
     weight = 0.0
     if in_range:
-        weight = estimate_weight(verdict, obs.device_status, trust["caps"], float(trust["pending_weight"]))
+        # An expired verdict is still not "no verdict": expired UNTRUSTED must not count as pending.
+        latest = state.ledger.latest(obs.reading_id, obs.sig_hash)
+        weight = estimate_weight(latest, obs.device_status, trust["caps"], float(trust["pending_weight"]))
     water_filter.update(obs.value, obs.seq, weight, u=u, at_ceiling="AT_CEILING" in obs.flags)
     if in_range:
         recent = state.recent.setdefault(
             obs.device_id, deque(maxlen=int(state.policy["water"]["evidence_count"]))
         )
+        verdict = state.ledger.lookup(obs.reading_id, obs.sig_hash, state.sim_now)
         recent.append(evidence_ref(obs, verdict, trust_weight(verdict, obs.device_status, trust["caps"])))
     return water_filter
 

@@ -4,7 +4,7 @@ from types import SimpleNamespace
 import pytest
 
 from city_brain.config import load_config
-from city_brain.core.water import WaterContext, plan_water_t0, water_hold_reason
+from city_brain.core.water import WaterContext, commanded_ratio, plan_water_t0, water_hold_reason
 from city_brain.core.estimator import WaterFilter
 from city_brain.domain.ids import action_id
 from city_brain.domain.types import RiskClass, StateKind, TrustState, EvidenceRef
@@ -125,6 +125,26 @@ def test_real_filter_goes_stale():
 def test_no_evidence_is_stale():
     c = ctx(level=8.0, recent=())
     assert plan_water_t0(c, POLICY) is None and water_hold_reason(c, POLICY) == "STALE"
+
+
+def test_too_few_readings_is_no_intent_and_a_hold():
+    c = ctx(level=8.0, recent=refs(2))
+    assert plan_water_t0(c, POLICY) is None
+    assert water_hold_reason(c, POLICY) == "INSUFFICIENT_EVIDENCE"
+    assert plan_water_t0(ctx(level=8.0, recent=refs(3)), POLICY) is not None
+
+
+def test_stale_outranks_insufficient_evidence_which_outranks_filter_flags():
+    assert water_hold_reason(ctx(level=8.0, recent=refs(1), stale=True), POLICY) == "STALE"
+    assert water_hold_reason(ctx(level=8.0, recent=refs(1), flags={"STUCK"}), POLICY) == "INSUFFICIENT_EVIDENCE"
+
+
+@pytest.mark.parametrize("state, ratio", [
+    ("open", 1.0), ("closed", 0.0), ("ratio:40", 0.4), ("ratio:0", 0.0), ("ratio:100", 1.0),
+    ("ratio:300", None), ("ratio:", None), ("jammed", None), ("", None),
+])
+def test_commanded_ratio(state, ratio):
+    assert commanded_ratio(state) == ratio
 
 
 def test_hold_reason_priority():

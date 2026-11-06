@@ -44,6 +44,10 @@ class VerdictLedger:
             return None
         return verdict
 
+    def latest(self, reading_id: str, sig_hash: str) -> Verdict | None:
+        """The newest verdict even if expired: an old UNTRUSTED still says the reading is bad."""
+        return self._verdicts.get((reading_id, sig_hash))
+
     def prune(self, now: datetime, keep_s: float = 120.0) -> None:
         cutoff = now - timedelta(seconds=keep_s)
         for key in [k for k, v in self._verdicts.items() if v.issued_at < cutoff]:
@@ -92,6 +96,7 @@ def evidence_ref(obs: Observation | EvidenceRef, verdict: Verdict | None, weight
         verdict_id=verdict.verdict_id if verdict is not None else None,
         trust_state=verdict.state if verdict is not None else TrustState.UNKNOWN,
         weight=weight,
+        device_status=obs.device_status,
     )
 
 

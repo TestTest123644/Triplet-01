@@ -2,6 +2,8 @@
 
 from datetime import timedelta
 
+import pytest
+
 from city_brain.core.coordinator import ActionRecord, dispatch
 from city_brain.core.events import (
     CancelTimer,
@@ -12,7 +14,14 @@ from city_brain.core.events import (
     TimerFired,
     VerdictReceived,
 )
-from city_brain.domain.types import ActionStatus, DeviceStatus, StateKind, TrustState
+from city_brain.domain.types import (
+    ActionStatus,
+    CanonicalUnit,
+    DeviceStatus,
+    SensorKind,
+    StateKind,
+    TrustState,
+)
 from tests.factories import T0
 from tests.helpers_coordinator import (
     CFG,
@@ -44,8 +53,9 @@ def commands(effects, status):
             if e.event["type"].endswith(".command.v1") and e.event["data"]["status"] == status]
 
 
-def decisions(effects):
-    return [e.event for e in of_type(Publish, effects) if e.event["type"].endswith(".decision.v1")]
+def act_decisions(effects):
+    return [e.event for e in of_type(Publish, effects)
+            if e.event["type"].endswith(".decision.v1") and e.event["data"]["outcome"] == "act"]
 
 
 def records(s, status):
@@ -99,8 +109,8 @@ def test_awaiting_trust_starts_the_verdict_timer():
     s, record = awaiting_open()
     action_id = record.intent.action_id
     assert only(StartTimer, s.last_effects) == StartTimer(f"verdict:{action_id}", "verdict_wait", 2.0)
-    [decision] = decisions(s.last_effects)
-    assert decision["data"]["outcome"] == "act" and decision["actionid"] == action_id
+    [decision] = act_decisions(s.last_effects)
+    assert decision["actionid"] == action_id
     assert decision["correlationid"] == record.intent.incident_id and decision["subject"] == "zone-1"
     assert len(commands(s.last_effects, "AWAITING_TRUST")) == 1
 
@@ -258,7 +268,7 @@ def test_refused_action_is_recorded_with_its_codes():
     assert record.status is ActionStatus.REFUSED and record.reasons == ("STATE_NOT_ALLOWED",)
     [refused] = commands(s.last_effects, "REFUSED")
     assert refused["data"]["shield"]["passed"] is False
-    assert len(decisions(s.last_effects)) == 1
+    assert len(act_decisions(s.last_effects)) == 1
     assert not of_type(SendCommand, s.last_effects)
 
 
@@ -395,8 +405,21 @@ def test_timeout_is_unknown_and_never_resent():
     assert s.registry[DEVICE].actuator.current_state == "closed"
     s = feed_channel(s, DEVICE, seconds=30.0, rate=0.02)
     keys = [c.idempotency_key for c in of_type(SendCommand, s.last_effects)]
-    # The planner may decide afresh after the cooldown, as a new action with a new key.
-    assert keys.count(send.idempotency_key) == 1 and len(keys) == 2
+    assert keys == [send.idempotency_key]
+    assert len(s.actions) == 1
+
+
+def test_lost_reply_frees_the_target_only_when_the_twin_restarts():
+    s, send = dispatched_open()
+    s = apply(s, CommandResult(send.action_id, "UNKNOWN", {}))
+    s = restart(later(s))
+    record = s.actions[send.action_id]
+    assert record.status is ActionStatus.UNKNOWN and "EPOCH_CHANGED" in record.reasons
+    assert alerts(s.last_effects, "EPOCH_CHANGED_ACTION_UNKNOWN") == []
+    s.last_effects = []
+    s = feed_tick(s, {DEVICE: 5.95}, verdict_first=True)
+    s = feed_rising_channel(s, DEVICE, until_level=6.1, verdict_first=True)
+    assert only(SendCommand, s.last_effects).idempotency_key != send.idempotency_key
 
 
 def test_results_outside_dispatched_are_counted_and_ignored():
@@ -438,6 +461,88 @@ def test_no_measurements_in_the_window_is_inconclusive_and_alerts():
     assert verification["data"]["verdict"] == "inconclusive"
     assert verification["data"]["observed"]["slope"] is None
     assert alerts(s.last_effects, "ACTUATOR_NO_EFFECT") == ["operator", "guardian"]
+
+
+def alert_messages(effects):
+    return [e.event["data"]["message"] for e in of_type(Publish, effects)
+            if e.event["type"].endswith(".alert.v1")]
+
+
+@pytest.mark.parametrize("reading_fields", [
+    {},
+    {"kind": SensorKind.TRAFFIC_FLOW, "unit": CanonicalUnit.VEH_PER_MIN},
+], ids=["water", "other_kind"])
+def test_silent_sensor_ends_verification_on_any_other_reading(reading_fields):
+    s, send = verifying_open()
+    for _ in range(35):
+        s = feed_tick(s, {"z2-wl1": 40.0}, verdict=None, **reading_fields)
+    record = s.actions[send.action_id]
+    assert record.status is ActionStatus.UNVERIFIED and DEVICE not in s.in_flight
+    assert DEVICE in s.suspect
+    messages = alert_messages(s.last_effects)
+    assert len(messages) == 2 and all("No measurements were available" in m for m in messages)
+
+
+def test_alert_for_a_measured_failure_says_no_effect():
+    s, send = verifying_open()
+    s = feed_channel(s, DEVICE, seconds=3.5, rate=0.02)
+    assert all("no observed effect" in m for m in alert_messages(s.last_effects))
+
+
+@pytest.mark.parametrize("verdict_first", [False, True])
+def test_forged_falling_readings_cannot_verify_a_dead_valve(verdict_first):
+    s, send = verifying_open()
+    s = feed_channel(s, DEVICE, seconds=3.5, rate=-0.025, verdict=TrustState.UNTRUSTED,
+                     verdict_first=verdict_first)
+    record = s.actions[send.action_id]
+    assert record.status is ActionStatus.UNVERIFIED
+    [verification] = [e.event for e in of_type(Publish, s.last_effects)
+                      if e.event["type"].endswith(".verification.v1")]
+    assert verification["data"]["verdict"] == "inconclusive"
+    assert DEVICE in s.suspect
+
+
+def test_readings_awaiting_a_verdict_at_close_do_not_count():
+    s, send = verifying_open()
+    s = feed_channel(s, DEVICE, seconds=3.5, rate=-0.025, verdict=None)
+    assert s.actions[send.action_id].status is ActionStatus.UNVERIFIED
+
+
+def test_trusted_readings_decide_when_forgeries_are_mixed_in():
+    """Dead valve: true readings keep rising, forged ones between them fall."""
+    s, send = verifying_open()
+    start = s.levels[DEVICE]
+    for n in range(1, 36):
+        forged = n % 3 == 0
+        value = start + 0.002 * n - (0.015 if forged else 0.0)
+        s = feed_tick(s, {DEVICE: value}, TrustState.UNTRUSTED if forged else TrustState.TRUSTED)
+    record = s.actions[send.action_id]
+    assert record.status is ActionStatus.UNVERIFIED
+    [verification] = [e.event for e in of_type(Publish, s.last_effects)
+                      if e.event["type"].endswith(".verification.v1")]
+    assert verification["data"]["verdict"] == "unverified"
+    assert verification["data"]["observed"]["slope"] == pytest.approx(0.02, abs=1e-6)
+
+
+def test_another_channel_on_the_same_tick_does_not_affect_verification():
+    other = "z2-wl1"
+    s = state_with_registry(DEVICE, other)
+    for n in range(120):
+        s = feed_tick(s, {DEVICE: 5.8 + 0.002 * n, other: 4.0 + 0.001 * n})
+    send = only(SendCommand, s.last_effects)
+    s = apply(s, CommandResult(send.action_id, "ACCEPTED", {}))
+    start = s.levels[DEVICE]
+    for n in range(1, 36):
+        seq = s.global_tick + 1
+        s = feed_tick(s, {other: 4.1 + 0.001 * n}, verdict=None, seq=seq)
+        s = feed_tick(s, {DEVICE: start - 0.0025 * n}, seq=seq)
+    assert s.actions[send.action_id].status is ActionStatus.VERIFIED
+
+
+def test_doubtful_readings_count_for_verification():
+    s, send = verifying_open()
+    s = feed_channel(s, DEVICE, seconds=3.5, rate=-0.025, verdict=TrustState.DOUBTFUL)
+    assert s.actions[send.action_id].status is ActionStatus.VERIFIED
 
 
 def test_first_half_second_after_accept_is_not_measured():
@@ -503,14 +608,12 @@ def test_new_epoch_clears_per_epoch_state_and_keeps_plan_versions():
     s.below_low_since[DEVICE] = s.sim_now
     s.last_blocked_at[DEVICE] = s.sim_now
     s.last_refusal[(DEVICE, "open")] = ("COOLDOWN",)
-    s.last_hold[DEVICE] = "STUCK"
     s.below_low_since["z2-wl1"] = s.sim_now
     s.last_hold["z2-wl1"] = "STUCK"
     s = restart(later(s))
     assert "z2-wl1" not in s.below_low_since and "z2-wl1" not in s.last_hold
     assert s.in_flight == set() and s.last_command_at == {} and s.last_blocked_at == {}
     assert s.last_refusal == {} and s.below_low_since.get(DEVICE) is None
-    assert s.last_hold.get(DEVICE) is None
     assert [r.reading_id for r in s.recent[DEVICE]] == [f"r-{DEVICE}-3"]
     assert s.plan_version[DEVICE] == 1 and send.action_id in s.actions
 
@@ -535,14 +638,24 @@ def test_rate_limit_refills_after_a_restart_rewinds_sim_time():
     assert s.bucket.take(s.sim_now)
 
 
-def test_suspect_survives_an_epoch():
+def test_suspect_clears_on_a_new_epoch():
     s, send = verifying_open()
     s = feed_channel(s, DEVICE, seconds=3.5, rate=0.02)
-    s = restart(later(s))
     assert DEVICE in s.suspect
+    s = restart(later(s))
+    assert s.suspect == set()
 
 
 # ----- registry status -----
+
+
+def test_shield_refuses_a_contained_target_after_a_status_sync():
+    s = state_with_registry()
+    s = feed_rising_channel(s, DEVICE, until_level=5.995, verdict=None)
+    s = feed_channel(s, DEVICE, seconds=1.0, rate=0.02, verdict=None, device_status=DeviceStatus.ISOLATED)
+    [record] = s.actions.values()
+    assert record.status is ActionStatus.REFUSED and "TARGET_CONTAINED" in record.reasons
+    assert not of_type(SendCommand, s.last_effects)
 
 
 def test_reading_status_updates_the_registry():
@@ -552,3 +665,21 @@ def test_reading_status_updates_the_registry():
     assert s.registry[DEVICE].actuator.current_state == "closed"
     s = feed_tick(s, {DEVICE: 5.0})
     assert s.registry[DEVICE].status is DeviceStatus.OK
+
+
+# ----- evidence from a contained device -----
+
+
+@pytest.mark.parametrize("verdict_first", [False, True])
+def test_reading_from_a_contained_device_stays_weightless_after_release(verdict_first):
+    s = state_with_registry()
+    for seq in range(1, 25):
+        s = feed_tick(s, {DEVICE: 5.75 + 0.01 * seq}, verdict_first=verdict_first)
+    s = feed_tick(s, {DEVICE: 6.0}, verdict_first=verdict_first, device_status=DeviceStatus.QUARANTINED)
+    s = feed_tick(s, {DEVICE: 6.01}, verdict_first=verdict_first)
+    s = feed_tick(s, {DEVICE: 6.02}, verdict_first=verdict_first)
+    assert s.global_tick == 27 and s.registry[DEVICE].status is DeviceStatus.OK
+    assert not of_type(SendCommand, s.last_effects)
+    [record] = s.actions.values()
+    assert record.status is ActionStatus.BLOCKED and "TRUST_INSUFFICIENT" in record.reasons
+    assert any(r.device_status is DeviceStatus.QUARANTINED for r in record.intent.evidence)

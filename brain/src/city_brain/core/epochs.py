@@ -15,8 +15,9 @@ def is_new_epoch(cursor: DeviceCursor | None, obs: Observation, seq_drop: int, t
 def start_new_epoch(state: BrainState) -> None:
     """Advance the epoch and clear per-epoch state.
 
-    `actions`, `plan_version` and `suspect` survive: history stays, action ids stay unique, and a
-    suspect actuator stays suspect. Sim time rewinds, so everything stamped with it goes too.
+    `actions` and `plan_version` survive: history stays and action ids stay unique. Sim time
+    rewinds, so everything stamped with it goes too. A restarted Twin starts its actuators afresh,
+    so `suspect` goes as well.
     """
     state.epoch += 1
     state.event_seq = 0
@@ -27,6 +28,7 @@ def start_new_epoch(state: BrainState) -> None:
     state.filters.clear()
     state.ledger.clear()
     state.in_flight.clear()
+    state.suspect.clear()
     state.last_command_at.clear()
     state.last_blocked_at.clear()
     state.last_refusal.clear()

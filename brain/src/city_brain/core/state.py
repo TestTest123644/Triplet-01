@@ -28,6 +28,8 @@ class ActionRecord:
     reasons: tuple[str, ...]
     shield: ShieldResult
     dispatch_tick: int | None = None
+    # (tick, reading_id, sig_hash) of the channel's readings while VERIFYING.
+    window_readings: list[tuple[int, str, str]] = field(default_factory=list)
 
 
 def new_token_bucket(policy: Mapping) -> TokenBucket:

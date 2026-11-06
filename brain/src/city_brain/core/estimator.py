@@ -1,7 +1,7 @@
 """Two-state Kalman filter for a water channel (spec 8.2)."""
 
 from collections import deque
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 
 import numpy as np
 
@@ -79,9 +79,9 @@ class WaterFilter:
             return True
         return global_tick - self._last_weighted_tick >= self._stale_ticks
 
-    def observed_slope(self, since_tick: int) -> float | None:
-        """Least-squares slope (m/s) over the measurements since `since_tick`."""
-        pts = [(t, v) for t, v in self._ring if t >= since_tick]
+    def observed_slope(self, since_tick: int, exclude_ticks: Collection[int] = ()) -> float | None:
+        """Least-squares slope (m/s) over the measurements since `since_tick`, less `exclude_ticks`."""
+        pts = [(t, v) for t, v in self._ring if t >= since_tick and t not in exclude_ticks]
         if len(pts) < MIN_SLOPE_POINTS:
             return None
         t = np.array([p[0] for p in pts], dtype=float)

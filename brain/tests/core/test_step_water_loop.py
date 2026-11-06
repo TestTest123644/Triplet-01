@@ -45,6 +45,15 @@ def hold_reasons(effects):
     return [e["data"]["incident"]["hold_reason"] for e in holds(effects)]
 
 
+def enough_readings(s=None, level=5.0, **tick_fields):
+    """Fill the evidence buffer, so only the reason under test can hold."""
+    s = state_with_registry() if s is None else s
+    for _ in range(CFG.policy["water"]["evidence_count"]):
+        s = feed_tick(s, {DEVICE: level}, **tick_fields)
+    s.last_effects = []
+    return s
+
+
 def set_valve_state(s, valve):
     device = s.registry[DEVICE]
     actuator = device.actuator.model_copy(update={"current_state": valve})
@@ -99,15 +108,14 @@ def test_hold_record_emitted_once_per_reason_change():
     frozen = s.levels[DEVICE]
     for _ in range(100):
         s = feed_tick(s, {DEVICE: frozen}, verdict=None)
-    assert hold_reasons(s.last_effects) == ["STUCK"]
+    assert hold_reasons(s.last_effects) == ["INSUFFICIENT_EVIDENCE", "STUCK"]
     assert s.last_hold[DEVICE] == "STUCK"
-    [hold] = holds(s.last_effects)
+    hold = holds(s.last_effects)[-1]
     assert hold["data"]["would_change_if"] and hold["subject"] == "zone-1"
 
 
 def test_hold_cleared_then_same_reason_is_emitted_again():
-    s = state_with_registry()
-    s = feed_tick(s, {DEVICE: 5.0})
+    s = enough_readings()
     set_valve_state(s, "jammed")
     s = feed_tick(s, {DEVICE: 5.001})
     s = feed_tick(s, {DEVICE: 5.002})
@@ -121,8 +129,7 @@ def test_hold_cleared_then_same_reason_is_emitted_again():
 
 
 def test_an_intent_ends_the_hold_so_the_same_reason_is_recorded_next_time():
-    s = state_with_registry()
-    s = feed_tick(s, {DEVICE: 6.1}, verdict=None)
+    s = enough_readings(level=6.1, verdict=None)
     [record] = s.actions.values()
     s = apply(s, TimerFired(f"verdict:{record.intent.action_id}", "verdict_wait"))
     set_valve_state(s, "jammed")
@@ -135,10 +142,21 @@ def test_an_intent_ends_the_hold_so_the_same_reason_is_recorded_next_time():
 
 def test_unregistered_channel_holds_once_and_never_acts():
     s = state_with_registry("z2-wl1")
-    s = feed_tick(s, {DEVICE: 7.0})
-    s = feed_tick(s, {DEVICE: 7.0})
-    assert hold_reasons(s.last_effects) == ["UNKNOWN_VALVE_STATE"]
+    for _ in range(5):
+        s = feed_tick(s, {DEVICE: 7.0})
+    assert hold_reasons(s.last_effects) == ["INSUFFICIENT_EVIDENCE", "UNKNOWN_VALVE_STATE"]
     assert s.actions == {}
+
+
+def test_one_reading_above_the_band_is_not_enough_to_act():
+    s = state_with_registry()
+    s = feed_tick(s, {DEVICE: 8.0})
+    assert s.actions == {}
+    assert hold_reasons(s.last_effects) == ["INSUFFICIENT_EVIDENCE"]
+    s = feed_tick(s, {DEVICE: 8.0})
+    assert s.actions == {}
+    s = feed_tick(s, {DEVICE: 8.0})
+    assert len(s.actions) == 1 and s.last_hold[DEVICE] is None
 
 
 def test_hold_on_a_contained_first_reading_needs_no_estimate():
@@ -170,6 +188,19 @@ def test_recent_evidence_is_bounded_and_carries_a_verdict_seen_first():
     assert all(r.verdict_id is not None and r.weight == 1.0 for r in s.recent[DEVICE])
 
 
+def test_expired_untrusted_verdict_seen_first_leaves_the_filter_unmoved():
+    s = state_with_registry()
+    s = feed_rising_channel(s, DEVICE, until_level=5.5)
+    level, slope = s.filters[DEVICE].level, s.filters[DEVICE].observed_slope(0)
+    seq = s.global_tick + 1
+    expired = verdict_for(DEVICE, seq, TrustState.UNTRUSTED, trust=0.0, expires_at=s.sim_now)
+    s = apply(s, VerdictReceived(expired))
+    s = feed_tick(s, {DEVICE: s.levels[DEVICE] + 0.01}, verdict=None)
+    assert "IMPLAUSIBLE_JUMP" not in s.filters[DEVICE].flags
+    assert s.filters[DEVICE].level == pytest.approx(level, abs=0.005)
+    assert s.filters[DEVICE].observed_slope(0) == slope
+
+
 def test_commanded_ratio_drives_the_filter():
     s = state_with_registry(valve="ratio:40")
     s = feed_tick(s, {DEVICE: 5.0})
@@ -180,11 +211,9 @@ def test_commanded_ratio_drives_the_filter():
 
 @pytest.mark.parametrize("valve", ["ratio:300", "ratio:", "jammed"])
 def test_unparseable_valve_state_is_no_drain_and_a_hold(valve):
-    s = state_with_registry(valve=valve)
-    s = feed_tick(s, {DEVICE: 5.0})
-    s = feed_tick(s, {DEVICE: 5.0})
+    s = enough_readings(state_with_registry(valve=valve))
     assert s.filters[DEVICE].rate == pytest.approx(s.filters[DEVICE].inflow)
-    assert hold_reasons(s.last_effects) == ["UNKNOWN_VALVE_STATE"]
+    assert s.last_hold[DEVICE] == "UNKNOWN_VALVE_STATE"
 
 
 def test_below_low_since_set_while_open_and_cleared_above_the_band():
