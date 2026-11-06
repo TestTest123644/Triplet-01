@@ -49,7 +49,7 @@ python3 scenarios/t5_grid_overload.py --with-mocks
 ### Shared Service Endpoints
 - **Apache Kafka:** `localhost:19092` (Topic: `twin.sensors`, pre-existing, supports comma-separated brokers)
 - **Twin MCP Server:** `http://localhost:8000/sse` and `/mcp`
-- **Red-Team Adversary API:** `http://localhost:8100/api/status`
+- **Red-Team Adversary API:** `http://localhost:8100/api/status` (and `POST /api/secrets/reload`)
 - **Twin Operations Console:** `http://localhost:8501`
 
 ---

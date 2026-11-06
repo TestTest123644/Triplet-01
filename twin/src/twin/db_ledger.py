@@ -309,6 +309,19 @@ class GroundTruthLedger:
         except Exception:
             pass
 
+        # Migration: ensure secret_rotations table exists
+        self._writer_conn.execute("""
+        CREATE TABLE IF NOT EXISTS secret_rotations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            sim_ts TEXT NOT NULL,
+            wall_ts TEXT NOT NULL,
+            results_json TEXT NOT NULL
+        );
+        """)
+        self._writer_conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_secret_rotations_sim_ts ON secret_rotations(sim_ts);"
+        )
+
         self._writer_conn.commit()
 
     # Run lifecycle tracking
@@ -633,6 +646,23 @@ class GroundTruthLedger:
         with self._get_connection(read_only=True) as conn:
             cur = conn.execute("SELECT * FROM containment_log ORDER BY id DESC LIMIT ?", (limit,))
             return [dict(row) for row in cur.fetchall()]
+
+    def log_secret_rotation(
+        self, sim_ts: str, results: Dict[str, str], wall_ts: Optional[str] = None
+    ) -> None:
+        """Record a secret rotation event in secret_rotations table."""
+        if wall_ts is None:
+            wall_ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+        with self._writer_lock:
+            self._writer_conn.execute(
+                """
+                INSERT INTO secret_rotations (
+                    sim_ts, wall_ts, results_json
+                ) VALUES (?, ?, ?)
+                """,
+                (sim_ts, wall_ts, json.dumps(results, separators=(",", ":"))),
+            )
+            self._writer_conn.commit()
 
     # Physical events tracking (Phase 6)
     def record_physical_event(

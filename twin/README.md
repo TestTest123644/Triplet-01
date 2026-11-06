@@ -50,8 +50,20 @@ PYTHONPATH=src streamlit run dashboard.py
 
 - **Kafka telemetry:** `localhost:19092` (internal `kafka:9092`, topic `twin.sensors`). Accepts comma-separated brokers (`host1:port,host2:port,host3:port`) via `KAFKA_BOOTSTRAP_SERVERS`. The topic `twin.sensors` must already exist on the broker (the Twin never creates topics or modifies broker settings). Messages are keyed by `device_id` to ensure strict per-device ordering within partitions. Producer uses durable delivery (`acks=all`, `enable.idempotence=True`), overridable via `KAFKA_ACKS` (`all`, `1`, `0`). Set `WAIT_FOR_KAFKA=false` if broker ACLs disallow cluster description. Optional TLS CA file via `KAFKA_SSL_CA_LOCATION`.
 - **MCP command server:** `http://localhost:8000/sse` and `/mcp` (JSON-RPC)
-- **Red-team adversary API:** `http://localhost:8100/api/status` (header `X-Red-Team-Token`)
+- **Red-team adversary API:** `http://localhost:8100/api/status` (header `X-Red-Team-Token`). Includes `POST /api/secrets/reload` for zero-downtime secret rotation without restarting.
 - **Operations console:** `http://localhost:8501` (Streamlit)
+
+---
+
+## Secrets and dynamic rotation
+
+Secrets (`KAFKA_PASSWORD`, `MCP_AUTH_TOKENS`, `RED_TEAM_TOKEN`) resolve via pluggable hook (`TWIN_SECRET_HOOK`), files (`<NAME>_FILE`), or environment variables. Reload secrets at runtime without restarting via:
+
+```bash
+curl -X POST http://localhost:8100/api/secrets/reload -H "X-Red-Team-Token: $RED_TEAM_TOKEN"
+```
+
+Or send `kill -HUP <twin_pid>`, or configure `TWIN_SECRET_RELOAD_SECONDS`. Device signing keys never rotate at runtime.
 
 ---
 

@@ -255,3 +255,71 @@ Error response schema:
 | `IDEMPOTENCY_CONFLICT` | Key reused with different tool or arguments |
 | `READING_NOT_FOUND` | `get_reading("r-nonexistent-1")` |
 
+---
+
+## 5. Secrets and Runtime Rotation
+
+The Twin manages three operational secrets: `KAFKA_PASSWORD`, `MCP_AUTH_TOKENS`, and `RED_TEAM_TOKEN`. Ed25519 device signing keys (`KEYSTORE_PATH`) are static identity keys; they never rotate at runtime because partner services verify telemetry against keys returned by `get_device_key`.
+
+### Secret resolution order
+
+When resolving any secret name `<NAME>`, the Twin checks sources in order and uses the first non-empty value:
+
+1. **Python hook (`TWIN_SECRET_HOOK="package.module:function"`):**
+   The function is invoked with the secret name and returns the secret string or `None`. Uncaught exceptions and missing modules are logged as warnings and fall through without leaking secret data.
+2. **File (`<NAME>_FILE`):**
+   Reads file path from environment variable (`KAFKA_PASSWORD_FILE`, `MCP_AUTH_TOKENS_FILE`, `RED_TEAM_TOKEN_FILE`). Strips one trailing newline. Works with HashiCorp Vault Agent, Kubernetes secrets, or Docker secrets.
+3. **Environment variable (`<NAME>`):**
+   Reads `<NAME>` directly from the process environment (`KAFKA_PASSWORD`, `MCP_AUTH_TOKENS`, `RED_TEAM_TOKEN`).
+
+### Example HashiCorp Vault KV v2 hook
+
+A partner team using HashiCorp Vault can supply secrets via a hook without installing third-party libraries:
+
+```python
+import os, json, urllib.request
+
+def vault_hook(name: str) -> str | None:
+    addr = os.getenv("VAULT_ADDR", "http://127.0.0.1:8200")
+    token = os.getenv("VAULT_TOKEN", "")
+    path = os.getenv("VAULT_SECRET_PATH", "secret/data/twin")
+    req = urllib.request.Request(f"{addr}/v1/{path}", headers={"X-Vault-Token": token})
+    try:
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            return data.get("data", {}).get("data", {}).get(name)
+    except Exception:
+        return None
+```
+
+Set `TWIN_SECRET_HOOK="my_module:vault_hook"` to enable it.
+
+### Reloading secrets at runtime
+
+Secrets can be reloaded without process restarts or losing simulator state:
+
+- **REST endpoint:** `POST http://localhost:8100/api/secrets/reload`
+  - Authentication: Header `X-Red-Team-Token` (checked against the existing active token before rotation).
+  - Response payload:
+    ```json
+    {
+      "status": "ok",
+      "results": {
+        "KAFKA_PASSWORD": "unchanged",
+        "MCP_AUTH_TOKENS": "changed",
+        "RED_TEAM_TOKEN": "unchanged"
+      },
+      "reloaded_at_sim": "2026-10-17T16:15:30Z",
+      "reloaded_at_wall": "2026-11-06T19:00:00Z"
+    }
+    ```
+- **POSIX signal:** Send `SIGHUP` to the Twin process (`kill -HUP <pid>`).
+- **Periodic polling:** Set `TWIN_SECRET_RELOAD_SECONDS=<seconds>` to trigger automated periodic checks in the background.
+
+During reload:
+- MCP tokens swap atomically; in-flight calls complete with the prior token map.
+- Red-team API token swaps immediately after validating the reload request.
+- Kafka producer swaps without losing message sequence continuity (`seq` numbers increment continuously).
+- Rotation events are written to the SQLite ledger `secret_rotations` table and visible via `GET /api/journal`.
+
+

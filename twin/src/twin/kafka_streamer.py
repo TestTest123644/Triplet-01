@@ -168,6 +168,7 @@ class KafkaStreamer:
         self._error_history: collections.deque[float] = collections.deque(maxlen=1000)
         self._kafka_state: str = "disabled" if mock_mode else "ok"
         self._producer_conf: Dict[str, Any] = {}
+        self._cached_password: Optional[str] = None
 
         # Validate KAFKA_ACKS env var on startup (raises ValueError if invalid)
         get_producer_acks_config()
@@ -178,6 +179,7 @@ class KafkaStreamer:
 
                 conf = self.build_producer_config(self.bootstrap_servers, producer_config)
                 self._producer_conf = dict(conf)
+                self._cached_password = conf.get("sasl.password")
                 self.producer = confluent_kafka.Producer(conf)
                 self._kafka_state = "ok"
             except ValueError:
@@ -213,6 +215,55 @@ class KafkaStreamer:
         if producer_config:
             conf.update(producer_config)
         return conf
+
+    def reload_kafka_password(self) -> str:
+        """Hot-swap Kafka producer with re-resolved SASL password without losing messages.
+
+        Returns 'changed', 'unchanged', or 'error: <short reason>'.
+        """
+        from twin.secrets import get_secret
+
+        protocol = os.getenv("KAFKA_SECURITY_PROTOCOL", "PLAINTEXT").strip()
+        if protocol == "PLAINTEXT":
+            return "unchanged"
+
+        new_password = get_secret("KAFKA_PASSWORD")
+        if not new_password:
+            return "error: missing or empty KAFKA_PASSWORD"
+
+        if self._cached_password == new_password:
+            return "unchanged"
+
+        if self.mock_mode:
+            self._cached_password = new_password
+            return "changed"
+
+        # Build new producer configuration with updated password
+        new_conf = dict(self._producer_conf)
+        new_conf["sasl.password"] = new_password
+
+        try:
+            import confluent_kafka
+
+            new_producer = confluent_kafka.Producer(new_conf)
+
+            # Flush old producer before swapping (deadline 5 s)
+            if self.producer is not None:
+                try:
+                    self.producer.flush(timeout=5.0)
+                except Exception as flush_err:
+                    logger.warning(f"Error flushing previous Kafka producer: {flush_err}")
+
+            # Atomically swap producer reference
+            self.producer = new_producer
+            self._producer_conf = new_conf
+            self._cached_password = new_password
+            self._kafka_state = "ok"
+            logger.info("Kafka SASL producer swapped successfully with rotated credentials")
+            return "changed"
+        except Exception as e:
+            logger.error(f"Failed to hot-swap Kafka producer with new credentials: {e}")
+            return f"error: {e}"
 
     def _record_error(self) -> None:
         """Record error timestamp and handle transition to degraded state."""

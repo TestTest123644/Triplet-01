@@ -86,9 +86,12 @@ Error response shape:
 | `WAIT_FOR_KAFKA` | `true` | Set `false` to skip describe cluster check if broker ACLs disallow it |
 | `MCP_HOST` / `MCP_PORT` | `0.0.0.0` / `8000` | MCP server binding address |
 | `MCP_AUTH_TOKENS` | *(unset)* | Bearer tokens `principal:token,...` (off by default; callers logged as "anonymous") |
+| `MCP_AUTH_TOKENS_FILE` | *(unset)* | Path to file containing bearer tokens (takes priority over `MCP_AUTH_TOKENS`) |
 | `RED_TEAM_PORT` | `8100` | Dedicated red-team attack injection REST port |
 | `RED_TEAM_TOKEN` | *(unset)* | Red-team API token literal |
 | `RED_TEAM_TOKEN_FILE` | *(unset)* | Path to red-team token file (compose writes to `/app/data/red_team.token`) |
+| `TWIN_SECRET_HOOK` | *(unset)* | Pluggable secret resolver `module:func` called as `func(name) -> str | None` |
+| `TWIN_SECRET_RELOAD_SECONDS` | *(unset)* | Periodic background reload interval in seconds (optional) |
 | `SIM_SPEED` | `1.0` | Simulation speed multiplier (pass `20.0` for scenarios) |
 
 ---
@@ -98,6 +101,13 @@ Error response shape:
 1. **Telemetry signatures (Ed25519):** Partners fetch the public key via `get_device_key(device_id)`. Clean payload without `sig` key, sort keys alphabetically with compact JSON separators `(",", ":")`, and verify signature bytes against canonical UTF-8 bytes.
 2. **MCP command auth:** Set `MCP_AUTH_TOKENS="brain:tok-b,guardian:tok-g,scenario:tok-s"`. When set, callers must provide HTTP header `Authorization: Bearer <token>`. Unauthorized calls return HTTP 401 `UNAUTHORIZED`. When unset (default in compose), auth is disabled and callers are logged as "anonymous".
 3. **Red-team API auth:** Header `X-Red-Team-Token`. If unset, the Twin generates a random token; in compose it is saved to `/app/data/red_team.token`.
+
+---
+
+## Secrets and rotation
+
+Secrets (`KAFKA_PASSWORD`, `MCP_AUTH_TOKENS`, `RED_TEAM_TOKEN`) resolve via: (1) `TWIN_SECRET_HOOK="pkg.mod:func"` (Vault or custom secret store), (2) file `<NAME>_FILE` (Vault Agent, Docker secret, k8s), (3) env `<NAME>`. Device signing keys (`KEYSTORE_PATH`) never rotate at runtime.
+Reload secrets without restarting via `POST http://localhost:8100/api/secrets/reload` (header `X-Red-Team-Token` checked against old token), sending `kill -HUP <twin_pid>`, or setting `TWIN_SECRET_RELOAD_SECONDS`.
 
 ---
 

@@ -48,34 +48,16 @@ def kafka_client_config() -> Dict[str, str]:
             "Missing required environment variable for SASL authentication: KAFKA_USERNAME"
         )
 
-    password: str = ""
-    pw_file = os.getenv("KAFKA_PASSWORD_FILE", "").strip()
-    if pw_file:
-        if not os.path.exists(pw_file):
-            raise ValueError(
-                f"Password file specified by KAFKA_PASSWORD_FILE does not exist: '{pw_file}'"
-            )
-        try:
-            with open(pw_file, "r", encoding="utf-8") as f:
-                content = f.read()
-                password = content.rstrip("\r\n")
-        except Exception as e:
-            raise ValueError(
-                f"Unreadable password file specified by KAFKA_PASSWORD_FILE '{pw_file}': {e}"
-            )
-        if not password:
-            raise ValueError(
-                f"Password file specified by KAFKA_PASSWORD_FILE is empty: '{pw_file}'"
-            )
-    elif "KAFKA_PASSWORD" in os.environ:
-        password = os.environ["KAFKA_PASSWORD"]
-        if not password:
-            raise ValueError(
-                "Environment variable KAFKA_PASSWORD is set but empty. Must provide non-empty password."
-            )
-    else:
+    from twin.secrets import get_secret
+
+    password = get_secret("KAFKA_PASSWORD")
+    if password is None:
         raise ValueError(
             "Missing required environment variable for SASL authentication: KAFKA_PASSWORD or KAFKA_PASSWORD_FILE"
+        )
+    if not password:
+        raise ValueError(
+            "Environment variable KAFKA_PASSWORD is set but empty. Must provide non-empty password."
         )
 
     config: Dict[str, str] = {

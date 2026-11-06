@@ -57,13 +57,19 @@ mcp = MCPServer("TwinLayerCommandServer")
 # Authentication and Request Context Handling
 # ============================================================================
 
+from twin.secrets import get_secret
+
+_ACTIVE_TOKEN_MAP: Dict[str, str] = {}
+_INITIALIZED_TOKENS: bool = False
+
+
 def parse_auth_tokens() -> Dict[str, str]:
     """Parse configured MCP_AUTH_TOKENS into a dict of {token: principal_name}."""
-    raw = os.getenv("MCP_AUTH_TOKENS", "").strip()
+    raw = get_secret("MCP_AUTH_TOKENS")
     if not raw:
         return {}
     tokens: Dict[str, str] = {}
-    for part in raw.split(","):
+    for part in raw.strip().split(","):
         part = part.strip()
         if ":" in part:
             principal, token = part.split(":", 1)
@@ -71,9 +77,33 @@ def parse_auth_tokens() -> Dict[str, str]:
     return tokens
 
 
+def get_active_tokens() -> Dict[str, str]:
+    """Get active token map, lazily initializing on first call."""
+    global _ACTIVE_TOKEN_MAP, _INITIALIZED_TOKENS
+    if not _INITIALIZED_TOKENS:
+        _ACTIVE_TOKEN_MAP = parse_auth_tokens()
+        _INITIALIZED_TOKENS = True
+    return _ACTIVE_TOKEN_MAP
+
+
+def reload_auth_tokens() -> str:
+    """Re-resolve MCP_AUTH_TOKENS and swap active token map atomically."""
+    global _ACTIVE_TOKEN_MAP, _INITIALIZED_TOKENS
+    new_tokens = parse_auth_tokens()
+    current = get_active_tokens()
+    if new_tokens != current:
+        _ACTIVE_TOKEN_MAP = new_tokens
+        _INITIALIZED_TOKENS = True
+        logger.info(
+            f"MCP bearer authentication tokens rotated ({len(new_tokens)} principals configured)"
+        )
+        return "changed"
+    return "unchanged"
+
+
 def get_caller(ctx: Optional[Context] = None) -> str:
     """Determine authenticated caller identity from tool execution context."""
-    tokens = parse_auth_tokens()
+    tokens = get_active_tokens()
     if not tokens:
         return "anonymous"
     if ctx is None:
@@ -103,7 +133,7 @@ class MCPAuthMiddleware:
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] == "http":
-            tokens = parse_auth_tokens()
+            tokens = get_active_tokens()
             if tokens:
                 path = scope.get("path", "")
                 if path.startswith(("/sse", "/messages", "/mcp")):
@@ -151,7 +181,8 @@ class CatchValidationFailedMiddleware:
 
 def build_mcp_app() -> Starlette:
     """Build unified Starlette ASGI application exposing /sse, /messages/, and /mcp transports."""
-    tokens = parse_auth_tokens()
+    reload_auth_tokens()
+    tokens = get_active_tokens()
     if not tokens:
         logger.warning("[ALERT] MCP authentication disabled: open access mode active (MCP_AUTH_TOKENS unset)")
 

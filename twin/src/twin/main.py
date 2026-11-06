@@ -186,10 +186,50 @@ async def main() -> None:
         except (ValueError, AttributeError):
             pass
 
-    # 6. Run all three tasks concurrently in the same event loop
+    from twin.secrets import reload_secrets
+
+    def handle_sighup(*_):
+        logger.info("Received SIGHUP signal. Triggering secrets reload...")
+        try:
+            reload_secrets(sim=sim, streamer=streamer)
+        except Exception as e:
+            logger.error(f"Error during SIGHUP secrets reload: {e}")
+
+    try:
+        if hasattr(signal, "SIGHUP"):
+            signal.signal(signal.SIGHUP, handle_sighup)
+    except (ValueError, AttributeError):
+        pass
+
+    # 6. Run concurrent tasks in event loop
     sim_task = asyncio.create_task(run_simulation_stream_loop(sim, streamer, stop_event))
     mcp_task = asyncio.create_task(mcp_server.serve())
     red_team_task = asyncio.create_task(red_team_server.serve())
+    tasks = [sim_task, mcp_task, red_team_task]
+
+    reload_seconds_raw = os.getenv("TWIN_SECRET_RELOAD_SECONDS", "").strip()
+    if reload_seconds_raw:
+        try:
+            interval = float(reload_seconds_raw)
+            if interval > 0:
+                async def periodic_reload_loop():
+                    while not stop_event.is_set():
+                        try:
+                            await asyncio.sleep(interval)
+                            if stop_event.is_set():
+                                break
+                            logger.info(f"Triggering periodic secret reload ({interval}s interval)...")
+                            reload_secrets(sim=sim, streamer=streamer)
+                        except asyncio.CancelledError:
+                            break
+                        except Exception as err:
+                            logger.error(f"Error in periodic secret reload: {err}")
+
+                periodic_task = asyncio.create_task(periodic_reload_loop())
+                tasks.append(periodic_task)
+                logger.info(f"Configured periodic secret reload every {interval}s")
+        except ValueError:
+            logger.warning(f"Invalid TWIN_SECRET_RELOAD_SECONDS: '{reload_seconds_raw}'")
 
     logger.info(f"Twin Layer online. MCP Command Server listening on http://{mcp_host}:{mcp_port}/sse")
     logger.info(f"Red Team Adversary API listening on http://{red_team_host}:{red_team_port}/api/status")
@@ -197,7 +237,7 @@ async def main() -> None:
 
     try:
         done, pending = await asyncio.wait(
-            [sim_task, mcp_task, red_team_task],
+            tasks,
             return_when=asyncio.FIRST_COMPLETED,
         )
         stop_event.set()

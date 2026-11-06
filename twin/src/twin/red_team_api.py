@@ -28,11 +28,32 @@ from twin.simulation import AttackConflictError, CitySimulator
 logger = logging.getLogger("twin.red_team_api")
 
 
+from twin.secrets import get_secret
+
+_ACTIVE_RED_TEAM_TOKEN: Optional[str] = None
+
+
+def get_active_red_team_token() -> str:
+    """Get active Red Team API token, initializing lazily if needed."""
+    global _ACTIVE_RED_TEAM_TOKEN
+    if _ACTIVE_RED_TEAM_TOKEN is None:
+        _ACTIVE_RED_TEAM_TOKEN = get_or_create_red_team_token()
+    return _ACTIVE_RED_TEAM_TOKEN
+
+
+def set_active_red_team_token(token: str) -> None:
+    """Set active Red Team API token atomically."""
+    global _ACTIVE_RED_TEAM_TOKEN
+    _ACTIVE_RED_TEAM_TOKEN = token
+
+
 def get_or_create_red_team_token() -> str:
-    """Retrieve RED_TEAM_TOKEN from env or generate/persist token to RED_TEAM_TOKEN_FILE with mode 600."""
-    env_token = os.getenv("RED_TEAM_TOKEN")
-    if env_token:
-        return env_token.strip()
+    """Retrieve RED_TEAM_TOKEN via get_secret or generate/persist token to RED_TEAM_TOKEN_FILE with mode 600."""
+    sec = get_secret("RED_TEAM_TOKEN")
+    if sec:
+        token = sec.strip()
+        set_active_red_team_token(token)
+        return token
 
     token_file = os.getenv("RED_TEAM_TOKEN_FILE")
     if not token_file:
@@ -47,6 +68,7 @@ def get_or_create_red_team_token() -> str:
             with open(token_file, "r", encoding="utf-8") as f:
                 content = f.read().strip()
                 if content:
+                    set_active_red_team_token(content)
                     return content
         except Exception as e:
             logger.warning(f"Failed to read existing token file {token_file}: {e}")
@@ -63,19 +85,33 @@ def get_or_create_red_team_token() -> str:
         pass
 
     logger.info(f"Generated new Red Team API token and persisted to {token_file}")
+    set_active_red_team_token(new_token)
     return new_token
+
+
+def reload_red_team_token() -> str:
+    """Re-resolve RED_TEAM_TOKEN and swap active token atomically."""
+    current = get_active_red_team_token()
+    new_token = get_secret("RED_TEAM_TOKEN")
+    if new_token and new_token.strip() != current:
+        set_active_red_team_token(new_token.strip())
+        logger.info("Red Team adversary API token rotated successfully")
+        return "changed"
+    return "unchanged"
 
 
 class RedTeamAuthMiddleware(BaseHTTPMiddleware):
     """Enforces X-Red-Team-Token header validation on every incoming request."""
 
-    def __init__(self, app, token: str):
+    def __init__(self, app, token: Optional[str] = None):
         super().__init__(app)
-        self.token = token
+        if token:
+            set_active_red_team_token(token)
 
     async def dispatch(self, request: Request, call_next):
         header_token = request.headers.get("X-Red-Team-Token")
-        if not header_token or not hmac.compare_digest(header_token, self.token):
+        expected_token = get_active_red_team_token()
+        if not header_token or not hmac.compare_digest(header_token, expected_token):
             return JSONResponse(
                 {
                     "status": "error",
@@ -246,6 +282,29 @@ def _query_journal_sync(db_path: str, since_sim_ts: Optional[str], limit: int) -
                         },
                     })
 
+            # 5. secret_rotations
+            try:
+                cur = conn.execute(
+                    "SELECT id AS rowid, sim_ts, results_json "
+                    "FROM secret_rotations WHERE sim_ts >= ? ORDER BY sim_ts ASC LIMIT ?",
+                    (since_sim_ts, limit),
+                )
+                for r in cur.fetchall():
+                    try:
+                        res = json.loads(r["results_json"]) if r["results_json"] else {}
+                    except Exception:
+                        res = {}
+                    entries.append({
+                        "key": f"secrets:{r['rowid']}",
+                        "sim_ts": r["sim_ts"],
+                        "source": "secrets",
+                        "detail": {
+                            "results": res,
+                        },
+                    })
+            except sqlite3.OperationalError:
+                pass
+
             entries.sort(key=lambda x: x["sim_ts"])
             return entries[:limit]
 
@@ -384,6 +443,29 @@ def _query_journal_sync(db_path: str, since_sim_ts: Optional[str], limit: int) -
                             "target_zone_id": r["target_zone_id"],
                         },
                     })
+
+            # 5. secret_rotations
+            try:
+                cur = conn.execute(
+                    "SELECT id AS rowid, sim_ts, results_json "
+                    "FROM secret_rotations ORDER BY sim_ts DESC LIMIT ?",
+                    (limit,),
+                )
+                for r in cur.fetchall():
+                    try:
+                        res = json.loads(r["results_json"]) if r["results_json"] else {}
+                    except Exception:
+                        res = {}
+                    entries.append({
+                        "key": f"secrets:{r['rowid']}",
+                        "sim_ts": r["sim_ts"],
+                        "source": "secrets",
+                        "detail": {
+                            "results": res,
+                        },
+                    })
+            except sqlite3.OperationalError:
+                pass
 
             # Sort descending to find the top latest limit entries
             entries.sort(key=lambda x: x["sim_ts"], reverse=True)
@@ -645,6 +727,12 @@ def build_red_team_app(sim: CitySimulator, token: str, streamer: Optional[Any] =
             "journal": truncated_entries,
         })
 
+    async def api_secrets_reload(request: Request) -> JSONResponse:
+        from twin.secrets import reload_secrets
+
+        result = reload_secrets(sim=sim, streamer=streamer)
+        return JSONResponse(result)
+
     app = Starlette(
         middleware=[Middleware(RedTeamAuthMiddleware, token=token)],
     )
@@ -656,6 +744,7 @@ def build_red_team_app(sim: CitySimulator, token: str, streamer: Optional[Any] =
     app.add_route("/api/event/clear", api_clear_event, methods=["POST"])
     app.add_route("/api/event/active", api_active_events, methods=["GET"])
     app.add_route("/api/journal", api_journal, methods=["GET"])
+    app.add_route("/api/secrets/reload", api_secrets_reload, methods=["POST"])
 
     return app
 
