@@ -306,18 +306,24 @@ def _resolve(
     Contained at arrival or contained now both mean zero weight: release does not launder a
     reading taken during containment. An unregistered device carries no weight either.
 
-    `honour_history` is the containment exception (spec 8.7): the reading is weighed as the
-    device reported itself when it arrived, so an R3 may cite the last trusted readings from
-    before the containment. A reading taken while the device itself reported containment
-    still carries nothing, and only an operator can let the action through.
+    `honour_history` is the containment exception (spec 8.7). The request cites readings from
+    before the containment, so by the time an operator sees it their verdicts may have
+    expired or been pruned entirely. On this path the reading is weighed as it was taken: the
+    device's status at the time, and the newest verdict the ledger still holds whether or not
+    it has expired. A later downgrade or revocation therefore still bites, and a verdict the
+    ledger has forgotten leaves the record standing as it was made. Expiry alone does not
+    block the request, because the whole point of an R3 is that a person decides.
     """
-    verdict = state.ledger.lookup(ref.reading_id, ref.sig_hash, state.sim_now)
     device = state.registry.get(ref.device_id)
     current = device.status if device is not None else DeviceStatus.ISOLATED
     if honour_history:
-        status = ref.device_status
-    else:
-        status = current if ref.device_status is DeviceStatus.OK else ref.device_status
+        verdict = state.ledger.latest(ref.reading_id, ref.sig_hash)
+        if verdict is None:
+            return ref, False
+        weight = trust_weight(verdict, ref.device_status, state.policy["trust"]["caps"])
+        return evidence_ref(ref, verdict, weight), False
+    verdict = state.ledger.lookup(ref.reading_id, ref.sig_hash, state.sim_now)
+    status = current if ref.device_status is DeviceStatus.OK else ref.device_status
     weight = trust_weight(verdict, status, state.policy["trust"]["caps"])
     known = ref.verdict_id is not None or state.ledger.latest(ref.reading_id, ref.sig_hash) is not None
     return evidence_ref(ref, verdict, weight), verdict is None and known

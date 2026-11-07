@@ -87,6 +87,7 @@ def step(state: BrainState, event: Event) -> tuple[BrainState, list[Effect]]:
         state.guardian_heard = True
         state.ledger.add(event.verdict)
         _note_device_verdict(state, event.verdict)
+        _note_trusted_evidence(state, event.verdict)
         # sim_now is undefined before the first accepted reading; park without pruning.
         if state.epoch_origin is not None:
             state.ledger.prune(state.sim_now)
@@ -217,11 +218,53 @@ def _channel_reading(state: BrainState, obs: Observation) -> None:
 
 
 def _remember_evidence(state: BrainState, obs: Observation) -> None:
-    recent = state.recent.setdefault(
-        obs.device_id, deque(maxlen=int(state.policy["water"]["evidence_count"])))
+    """Record what this reading is worth, and keep the last ones that were worth something.
+
+    `trusted_recent` is what the containment exception cites: once a channel is contained its
+    readings carry nothing, so the only honest thing to show an operator is the last window
+    that did (spec 8.7).
+    """
+    depth = int(state.policy["water"]["evidence_count"])
     trust = state.policy["trust"]
     verdict = state.ledger.lookup(obs.reading_id, obs.sig_hash, state.sim_now)
-    recent.append(evidence_ref(obs, verdict, trust_weight(verdict, obs.device_status, trust["caps"])))
+    ref = evidence_ref(obs, verdict, trust_weight(verdict, obs.device_status, trust["caps"]))
+    state.recent.setdefault(obs.device_id, deque(maxlen=depth)).append(ref)
+    if ref.weight > 0.0:  # the verdict was already here when the reading arrived
+        _keep_trusted(state, obs.device_id, ref)
+
+
+def _keep_trusted(state: BrainState, device_id: str, ref: EvidenceRef) -> None:
+    """Add a ref to the trusted window, unless it is already the newest one in it."""
+    depth = int(state.policy["water"]["evidence_count"])
+    window = state.trusted_recent.setdefault(device_id, deque(maxlen=depth))
+    key = (ref.reading_id, ref.sig_hash)
+    if window and (window[-1].reading_id, window[-1].sig_hash) == key:
+        return
+    window.append(ref)
+
+
+def _note_trusted_evidence(state: BrainState, verdict: Verdict) -> None:
+    """A verdict landing on a reading we kept: record what that reading was worth.
+
+    Readings almost always arrive before the verdict that judges them, so this is where the
+    trusted window actually fills. It is what an R3 cites once the channel has been contained
+    and its later readings carry nothing (spec 8.7).
+    """
+    if verdict.state is not TrustState.TRUSTED:
+        return
+    window = state.recent.get(verdict.device_id)
+    if not window:
+        return
+    key = (verdict.reading_id, verdict.sig_hash)
+    for ref in window:
+        if (ref.reading_id, ref.sig_hash) != key:
+            continue
+        if ref.device_status is not DeviceStatus.OK:
+            return  # the device said it was contained when it spoke; that reading is not evidence
+        weight = trust_weight(verdict, ref.device_status, state.policy["trust"]["caps"])
+        if weight > 0.0:
+            _keep_trusted(state, verdict.device_id, evidence_ref(ref, verdict, weight))
+        return
 
 
 def _device_trust(state: BrainState, device_id: str) -> float:
@@ -349,6 +392,7 @@ def _water_reading(state: BrainState, obs: Observation, effects: list[Effect]) -
         min_val=device.min_val if device is not None else 0.0,
         max_val=device.max_val if device is not None else 0.0,
         trusted_since=state.trusted_since.get(device_id),
+        trusted_recent=tuple(state.trusted_recent.get(device_id, ())),
     )
     coordinator.note_reading(state, obs)
     effects.extend(coordinator.on_estimate(state))
@@ -410,11 +454,7 @@ def _update_water_filter(state: BrainState, obs: Observation, u: float) -> Water
         weight = estimate_weight(latest, obs.device_status, trust["caps"], _pending_weight(state, obs))
     water_filter.update(obs.value, obs.seq, weight, u=u, at_ceiling="AT_CEILING" in obs.flags)
     if in_range:
-        recent = state.recent.setdefault(
-            obs.device_id, deque(maxlen=int(state.policy["water"]["evidence_count"]))
-        )
-        verdict = state.ledger.lookup(obs.reading_id, obs.sig_hash, state.sim_now)
-        recent.append(evidence_ref(obs, verdict, trust_weight(verdict, obs.device_status, trust["caps"])))
+        _remember_evidence(state, obs)
     return water_filter
 
 

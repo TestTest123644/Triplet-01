@@ -34,6 +34,8 @@ class WaterContext:
     contained: bool = False  # the Guardian has isolated or quarantined this channel
     min_val: float = 0.0     # the channel's range, for the MPC's forward simulation
     max_val: float = 0.0
+    # The last readings that carried weight: what an R3 cites once the channel has gone dark.
+    trusted_recent: Sequence[EvidenceRef] = ()
     trusted_since: datetime | None = None  # when this channel last started reading trusted
 
 
@@ -69,6 +71,24 @@ def critical_ahead(ctx: WaterContext, policy: Mapping) -> bool:
     return level >= high and rate > 0.0
 
 
+def drain_is_the_lesser_evil(ctx: WaterContext, policy: Mapping) -> bool:
+    """Whether draining a contained channel is worth asking the operator about (spec 8.7).
+
+    This is the one case where the Brain looks past its own holds. A contained channel is
+    normally held, and a channel whose readings no longer carry weight is held twice over —
+    but if the last trusted estimate, carried forward by the model, says the tank is heading
+    for the critical band with its valve shut, then holding is itself the dangerous act. The
+    Brain does not resolve that: it raises an R3 and puts the choice to a person.
+    """
+    if not ctx.contained or not ctx.filter.initialised:
+        return False
+    if _valve_class(ctx.valve_state) != CLOSED:
+        return False
+    if not ctx.trusted_recent:
+        return False  # nothing trustworthy was ever seen, so there is nothing to argue from
+    return critical_ahead(ctx, policy)
+
+
 def water_hold_reason(ctx: WaterContext, policy: Mapping) -> str | None:
     """Why this channel must not be planned on, or None.
 
@@ -79,6 +99,8 @@ def water_hold_reason(ctx: WaterContext, policy: Mapping) -> str | None:
     exception (spec 8.7) lets a predicted crossing of the critical band through, as an R3
     the operator has to approve.
     """
+    if drain_is_the_lesser_evil(ctx, policy):
+        return None  # the containment exception: an R3 for the operator, not a hold
     if not ctx.filter.initialised or not ctx.recent or ctx.filter.is_stale(ctx.global_tick):
         return "STALE"
     if ctx.untrusted:
@@ -146,6 +168,15 @@ def plan_water_t0(ctx: WaterContext, policy: Mapping) -> ActionIntent | None:
     )
 
 
+def cited_evidence(
+    ctx: WaterContext, water: Mapping, containment_override: bool = False
+) -> tuple[EvidenceRef, ...]:
+    """What an intent rests on: the channel's latest readings, or its last trusted ones."""
+    count = int(water["evidence_count"])
+    refs = ctx.trusted_recent if containment_override else ctx.recent
+    return tuple(refs)[-count:]
+
+
 def _intent(ctx, water, state, risk, effect, rationale, alternative,
             containment_override: bool = False) -> ActionIntent:
     incident_id = f"flood-risk:{ctx.device_id}:{ctx.plan_version}"
@@ -158,7 +189,7 @@ def _intent(ctx, water, state, risk, effect, rationale, alternative,
         state=state,
         risk_class=risk,
         expected_effect=effect,
-        evidence=tuple(ctx.recent[-int(water["evidence_count"]):]),
+        evidence=cited_evidence(ctx, water, containment_override),
         rationale=rationale,
         alternatives=(alternative,),
         containment_override=containment_override,

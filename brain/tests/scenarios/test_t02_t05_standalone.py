@@ -109,8 +109,12 @@ def test_t05_valve_stays_suspect(t05_events):
 
 
 def test_environment_overrides_reach_the_config(monkeypatch, capsys):
+    """The env override flips the standalone config into triplet mode, which then refuses to
+    start without an operator token: argparse exits 2 for a usage error."""
     monkeypatch.setenv("BRAIN__MODE", "triplet")
-    assert main(["--config", str(BRAIN / "config" / "standalone.yaml"), "--scenario", "T02"]) == 2
+    with pytest.raises(SystemExit) as exit_info:
+        main(["--config", str(BRAIN / "config" / "standalone.yaml"), "--scenario", "T02"])
+    assert exit_info.value.code == 2
 
 
 def test_triplet_logs_go_to_the_repo_root():

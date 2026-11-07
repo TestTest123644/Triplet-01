@@ -51,6 +51,7 @@ def start_new_epoch(state: BrainState) -> None:
     state.trusted_since.clear()
     state.last_hold.clear()
     state.recent.clear()
+    state.trusted_recent.clear()
     state.epoch_candidates.clear()
     state.epoch_candidate_tick = None
     state.device_verdicts.clear()

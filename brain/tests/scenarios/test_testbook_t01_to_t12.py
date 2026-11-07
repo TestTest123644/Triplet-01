@@ -217,18 +217,41 @@ def test_t10_degrades_and_comes_back(t10_log):
     assert changes[:len(expected)] == expected, changes
 
 
-def test_t10_refuses_risky_actions_while_blind(t10_events):
-    code = load_scenario("T10").expect["refusal_code"]
-    refused = [
-        e for e in matching(t10_events, type=COMMAND, status="REFUSED")
-        if code in e["data"]["shield"]["refusals"]
+def degraded_windows(events):
+    """The sim-time spans the Brain spent blind, read off its own mode records."""
+    windows, opened = [], None
+    for event in matching(events, type=STATUS):
+        data = event["data"]
+        if data.get("reason") != "mode_changed":
+            continue
+        if data.get("mode") == "GUARDIAN_DEGRADED":
+            opened = event["simtime"]
+        elif opened is not None:
+            windows.append((opened, event["simtime"]))
+            opened = None
+    if opened is not None:
+        windows.append((opened, "9999"))
+    return windows
+
+
+def test_t10_dispatches_nothing_while_it_is_blind(t10_events):
+    """The outage must be visible, and no command may leave while it lasts."""
+    windows = degraded_windows(t10_events)
+    assert windows, "the outage must be visible in the log"
+    inside = [
+        (event["simtime"], event["data"]["capability"], event["data"]["target"])
+        for event in dispatched(t10_events)
+        for start, end in windows
+        if start <= event["simtime"] < end
     ]
-    degraded = [
-        e for e in matching(t10_events, type=STATUS)
-        if e["data"].get("mode") == "GUARDIAN_DEGRADED"
-    ]
-    assert degraded, "the outage must be visible in the log"
-    assert refused or dispatched(t10_events) == [], "nothing risky may slip through the outage"
+    assert inside == [], f"commands slipped through the outage: {inside}"
+
+
+def test_t10_acts_again_once_it_can_see(t10_events):
+    """Degrading is not giving up: the Brain resumes after the Guardian comes back."""
+    windows = degraded_windows(t10_events)
+    after = [e for e in dispatched(t10_events) if e["simtime"] >= windows[-1][1]]
+    assert after, "the Brain must take the city back once it can see again"
 
 
 def test_t10_trusts_nothing_from_the_outage_window(t10_events):

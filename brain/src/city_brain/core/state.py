@@ -81,6 +81,9 @@ class BrainState:
     last_hold: dict[str, str | None] = field(default_factory=dict)
     plan_version: dict[str, int] = field(default_factory=dict)
     recent: dict[str, deque[EvidenceRef]] = field(default_factory=dict)
+    # The last refs that carried weight, kept apart from `recent` so a channel that has gone
+    # dark can still be spoken for: the containment exception cites these (spec 8.7).
+    trusted_recent: dict[str, deque[EvidenceRef]] = field(default_factory=dict)
     # Devices seen going backwards, and the global tick of the first: a restart needs several.
     epoch_candidates: set[str] = field(default_factory=set)
     epoch_candidate_tick: int | None = None
