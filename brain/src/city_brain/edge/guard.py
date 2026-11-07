@@ -10,7 +10,15 @@ from typing import Any
 from jsonschema import Draft7Validator, FormatChecker
 
 from city_brain.domain.ids import sig_hash
-from city_brain.domain.types import DeviceProfile, Observation, Verdict
+from city_brain.domain.types import (
+    DeviceProfile,
+    GuardianContainment,
+    GuardianHeartbeat,
+    GuardianNotice,
+    GuardianRevocation,
+    Observation,
+    Verdict,
+)
 from city_brain.edge.profiles import (
     BadValue,
     GuardianProfile,
@@ -40,6 +48,11 @@ class Rejected:
 @dataclass(frozen=True)
 class AcceptedVerdict:
     verdict: Verdict
+
+
+@dataclass(frozen=True)
+class AcceptedGuardianEvent:
+    notice: GuardianNotice
 
 
 def _device_id(obj: Any, field: str = "device_id") -> str | None:
@@ -184,3 +197,48 @@ class VerdictGuard:
         except (ValueError, TypeError) as exc:  # e.g. RFC 3339 forms fromisoformat cannot read
             return Rejected("SCHEMA_VIOLATION", f"invalid verdict: {exc}", device_id)
         return AcceptedVerdict(verdict)
+
+
+class GuardianEventGuard:
+    """Validates one raw `guardian.events` message: heartbeat, containment or revocation (spec 8.9)."""
+
+    def __init__(self, profile: GuardianProfile):
+        schema = dict(profile.event_schema)
+        self._profile = profile
+        self._validator = Draft7Validator(schema, format_checker=FormatChecker())
+
+    def check(self, raw: bytes) -> AcceptedGuardianEvent | Rejected:
+        if len(raw) > MAX_BYTES:
+            return Rejected("OVERSIZED", f"{len(raw)} bytes exceeds {MAX_BYTES}")
+        obj, err = _parse(raw)
+        if err is not None:
+            return Rejected("MALFORMED_JSON", err)
+        device_id = _device_id(obj)
+        problem = _first_schema_error(self._validator, obj)
+        if problem is not None:
+            return Rejected("SCHEMA_VIOLATION", problem, device_id)
+        try:
+            key = self._profile.public_key_b64
+        except ProfileError as exc:
+            return Rejected("BAD_SIGNATURE", str(exc), device_id)
+        if not verify(obj, key):
+            return Rejected("BAD_SIGNATURE", "event signature missing or invalid", device_id)
+        try:
+            notice = _notice(obj)
+        except (ValueError, TypeError) as exc:  # timestamps the schema's format checker let through
+            return Rejected("SCHEMA_VIOLATION", f"invalid guardian event: {exc}", device_id)
+        return AcceptedGuardianEvent(notice)
+
+
+def _notice(obj: Mapping[str, Any]) -> GuardianNotice:
+    issued_at = datetime.fromisoformat(obj["issued_at"])
+    kind = obj["kind"]
+    if kind == "heartbeat":
+        return GuardianHeartbeat(
+            evaluated_through=datetime.fromisoformat(obj["evaluated_through"]), issued_at=issued_at)
+    if kind == "containment":
+        return GuardianContainment(
+            device_id=obj["device_id"], action=obj["action"],
+            effective_at=datetime.fromisoformat(obj["effective_at"]),
+            reasons=frozenset(obj["reasons"]), issued_at=issued_at)
+    return GuardianRevocation(verdict_id=obj["verdict_id"], issued_at=issued_at)

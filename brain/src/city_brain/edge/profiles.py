@@ -343,14 +343,22 @@ class GuardianProfile:
         data, p = _read_yaml(path)
         return cls(data, p, public_key_b64)
 
+    def _schema(self, key: str) -> dict[str, Any]:
+        name = self._data.get(key)
+        found = _find(str(name), self._path) if name else None
+        if found is None:
+            raise ProfileError(f"{key} '{name}' not found for profile {self._path}")
+        return json.loads(found.read_text(encoding="utf-8"))
+
     @property
     def verdict_schema(self) -> dict[str, Any]:
         """The verdict JSON schema named by the profile's `verdict_schema` path."""
-        name = self._data.get("verdict_schema")
-        found = _find(str(name), self._path) if name else None
-        if found is None:
-            raise ProfileError(f"verdict schema '{name}' not found for profile {self._path}")
-        return json.loads(found.read_text(encoding="utf-8"))
+        return self._schema("verdict_schema")
+
+    @property
+    def event_schema(self) -> dict[str, Any]:
+        """The `guardian.events` JSON schema named by the profile's `event_schema` path."""
+        return self._schema("event_schema")
 
     def map_state(self, partner_state: str | None) -> TrustState:
         if partner_state is None:

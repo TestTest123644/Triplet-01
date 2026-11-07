@@ -22,6 +22,13 @@ trust:
     DOUBTFUL: 0.5
     UNTRUSTED: 0.0
     UNKNOWN: 0.0
+modes:
+  guardian_heartbeat_timeout_s: 5.0
+  verdict_lag_degraded_s: 3.0
+  verdict_lag_recover_s: 1.0
+  recover_sustain_s: 5.0
+  twin_stale_timeout_s: 2.0
+  safe_baseline_r1: false
 epochs:
   seq_drop: 100
   ts_back_s: 60

@@ -108,7 +108,7 @@ class MockGuardian:
             return
         self._quarantined = True
         event = {"kind": "containment", "device_id": p.device, "action": "quarantined",
-                 "effective_at": _fmt(now), "reasons": ["SCRIPTED"]}
+                 "effective_at": _fmt(now), "reasons": ["SCRIPTED"], "issued_at": _fmt(now)}
         event["sig"] = sign(event, self._key)
         self._events.append(json.dumps(event, separators=(",", ":")).encode("utf-8"))
 

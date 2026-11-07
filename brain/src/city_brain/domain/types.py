@@ -52,6 +52,21 @@ class RiskClass(StrEnum):
     R3 = "R3"
 
 
+class BrainMode(StrEnum):
+    WARMUP = "WARMUP"
+    NORMAL = "NORMAL"
+    GUARDIAN_DEGRADED = "GUARDIAN_DEGRADED"
+    TWIN_DEGRADED = "TWIN_DEGRADED"
+    PAUSED = "PAUSED"
+
+
+class CapabilityTier(StrEnum):
+    T0 = "T0"
+    T1 = "T1"
+    T2 = "T2"
+    T3 = "T3"
+
+
 class ActionStatus(StrEnum):
     PROPOSED = "PROPOSED"
     REFUSED = "REFUSED"
@@ -94,6 +109,33 @@ class Verdict(_Frozen):
     reasons: frozenset[str]
     issued_at: datetime
     expires_at: datetime
+
+
+class GuardianHeartbeat(_Frozen):
+    """The Guardian says it has judged every reading up to `evaluated_through` (spec 8.9)."""
+
+    evaluated_through: datetime
+    issued_at: datetime
+
+
+class GuardianContainment(_Frozen):
+    """The Guardian has contained (or released) a device."""
+
+    device_id: str
+    action: Literal["isolated", "quarantined", "released", "rolled_back"]
+    effective_at: datetime
+    reasons: frozenset[str]
+    issued_at: datetime
+
+
+class GuardianRevocation(_Frozen):
+    """The Guardian withdraws a verdict it issued earlier."""
+
+    verdict_id: str
+    issued_at: datetime
+
+
+GuardianNotice = GuardianHeartbeat | GuardianContainment | GuardianRevocation
 
 
 class ActuatorCapability(_Frozen):

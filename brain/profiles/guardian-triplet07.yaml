@@ -1,6 +1,7 @@
 profile: guardian-triplet07
 observed: {commit: none, date: 2026-11-06, by: city-brain-team, method: assumed}
 verdict_schema: schemas/guardian-verdict.v1.schema.json
+event_schema: schemas/guardian-event.v1.schema.json
 public_key_file: keys/guardian-triplet07.pub   # not committed; standalone runs pass the key in memory
 vocabulary:        # partner state -> canonical TrustState
   TRUSTED: TRUSTED
