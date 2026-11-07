@@ -83,7 +83,7 @@ services:
 
 networks:
   twin_network:
-    name: twin_network
+    name: ${TRIPLET_NETWORK:-city_network}
     driver: bridge
 
 volumes:

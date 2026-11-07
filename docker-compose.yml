@@ -123,7 +123,7 @@ services:
 
 networks:
   city_network:
-    name: city_network
+    name: ${TRIPLET_NETWORK:-city_network}
     driver: bridge
 
 volumes:

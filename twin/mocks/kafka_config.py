@@ -11,6 +11,22 @@ import os
 from typing import Dict
 
 
+def get_broker_address_family() -> str:
+    """Parse and validate KAFKA_BROKER_ADDRESS_FAMILY environment variable.
+
+    Returns:
+        One of 'any' (default), 'v4', 'v6'.
+        Raises ValueError if invalid.
+    """
+    raw = os.getenv("KAFKA_BROKER_ADDRESS_FAMILY", "any").strip().lower()
+    allowed = ("any", "v4", "v6")
+    if raw not in allowed:
+        raise ValueError(
+            f"Invalid KAFKA_BROKER_ADDRESS_FAMILY: '{raw}'. Allowed: {', '.join(allowed)}"
+        )
+    return raw
+
+
 def kafka_client_config() -> Dict[str, str]:
     """Build shared security configuration dictionary for mock Kafka clients.
 

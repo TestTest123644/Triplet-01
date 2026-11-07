@@ -5,7 +5,7 @@ import tempfile
 import pytest
 from unittest.mock import MagicMock, patch
 
-from twin.kafka_config import kafka_client_config
+from twin.kafka_config import get_broker_address_family, kafka_client_config
 from twin.kafka_streamer import KafkaStreamer
 from twin.main import wait_for_kafka_ready
 from mocks.reading_source import KafkaSource
@@ -309,6 +309,74 @@ def test_mock_kafka_config_ssl_ca_location(monkeypatch):
     finally:
         if os.path.exists(ca_file):
             os.remove(ca_file)
+
+
+def test_broker_address_family_default(monkeypatch):
+    """Default broker address family is 'any'."""
+    monkeypatch.delenv("KAFKA_BROKER_ADDRESS_FAMILY", raising=False)
+    assert get_broker_address_family() == "any"
+
+
+def test_broker_address_family_valid(monkeypatch):
+    """Explicit valid families 'v4', 'v6', and 'any' (case-insensitive)."""
+    monkeypatch.setenv("KAFKA_BROKER_ADDRESS_FAMILY", "v4")
+    assert get_broker_address_family() == "v4"
+
+    monkeypatch.setenv("KAFKA_BROKER_ADDRESS_FAMILY", "V6")
+    assert get_broker_address_family() == "v6"
+
+    monkeypatch.setenv("KAFKA_BROKER_ADDRESS_FAMILY", "any")
+    assert get_broker_address_family() == "any"
+
+
+def test_broker_address_family_invalid_raises(monkeypatch):
+    """Invalid family raises ValueError naming KAFKA_BROKER_ADDRESS_FAMILY."""
+    monkeypatch.setenv("KAFKA_BROKER_ADDRESS_FAMILY", "ipv4")
+    with pytest.raises(ValueError, match="KAFKA_BROKER_ADDRESS_FAMILY"):
+        get_broker_address_family()
+
+
+def test_producer_receives_broker_address_family(monkeypatch):
+    """Producer configuration includes broker.address.family."""
+    monkeypatch.setenv("KAFKA_BROKER_ADDRESS_FAMILY", "v4")
+    conf = KafkaStreamer.build_producer_config(bootstrap_servers="mock:9092")
+    assert conf["broker.address.family"] == "v4"
+
+
+def test_streamer_init_invalid_broker_address_family_raises(monkeypatch):
+    """KafkaStreamer raises ValueError on startup if KAFKA_BROKER_ADDRESS_FAMILY is invalid."""
+    monkeypatch.setenv("KAFKA_BROKER_ADDRESS_FAMILY", "invalid_family")
+    with pytest.raises(ValueError, match="KAFKA_BROKER_ADDRESS_FAMILY"):
+        KafkaStreamer(bootstrap_servers="mock:9092", mock_mode=False)
+
+
+def test_consumer_receives_broker_address_family(monkeypatch):
+    """KafkaSource Consumer receives broker.address.family."""
+    monkeypatch.setenv("KAFKA_BROKER_ADDRESS_FAMILY", "v6")
+
+    captured_conf = {}
+
+    def mock_consumer_init(conf):
+        captured_conf.update(conf)
+        return MagicMock()
+
+    import confluent_kafka
+    monkeypatch.setattr(confluent_kafka, "Consumer", mock_consumer_init)
+
+    source = KafkaSource(bootstrap_servers="mock:9092", group_id="test-grp", topic="twin.sensors")
+    assert captured_conf.get("broker.address.family") == "v6"
+
+
+def test_mock_kafka_config_broker_address_family(monkeypatch):
+    """twin/mocks/kafka_config handles KAFKA_BROKER_ADDRESS_FAMILY identically."""
+    import mocks.kafka_config as mock_kc
+
+    monkeypatch.setenv("KAFKA_BROKER_ADDRESS_FAMILY", "v4")
+    assert mock_kc.get_broker_address_family() == "v4"
+
+    monkeypatch.setenv("KAFKA_BROKER_ADDRESS_FAMILY", "invalid")
+    with pytest.raises(ValueError, match="KAFKA_BROKER_ADDRESS_FAMILY"):
+        mock_kc.get_broker_address_family()
 
 
 def test_twin_src_never_touches_broker():
