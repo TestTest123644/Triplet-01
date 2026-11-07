@@ -6,7 +6,7 @@ The Twin layer simulates 42 devices across 6 zones in Greater Tunis. It streams 
 
 ## Quick start
 
-All commands run from the repository root.
+All commands run from the repository root. Configuration can be customized via `.env` (copied from `.env.example`); comments must be on their own line, Docker does not strip inline comments.
 
 If a container named "kafka" already exists, remove or rename it first (`docker rm -f kafka` or `docker rename kafka kafka-old`).
 
