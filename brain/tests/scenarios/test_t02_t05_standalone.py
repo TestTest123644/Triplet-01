@@ -6,6 +6,9 @@ import pytest
 from jsonschema import FormatChecker
 
 from city_brain.adapters.files.jsonl_log import verify_chain
+from mocks.keys import derive_keypair
+
+_, OTHER_PUBLIC_KEY = derive_keypair("not-the-brain")
 from city_brain.config import load_config
 from city_brain.runtime.main import main
 from scenarios.runner import load_scenario, run
@@ -83,6 +86,10 @@ def test_every_logged_event_matches_the_schema_and_the_chain_verifies(
 ):
     for path, events in ((t02_log, t02_events), (t05_log, t05_events), (restart_log, restart_events)):
         assert verify_chain(path)
+        # The run also signs every event, and writes the key beside the log (spec 11.1).
+        public_key = path.with_suffix(".pub").read_text(encoding="ascii").strip()
+        assert verify_chain(path, public_key)
+        assert not verify_chain(path, OTHER_PUBLIC_KEY)
         for event in events:
             jsonschema.validate(event, SCHEMA, format_checker=FormatChecker())
 

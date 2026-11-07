@@ -72,6 +72,11 @@ async def _run_standalone(
 ) -> None:
     dt = float(config.params["filter"]["sample_period_s"])
     twin = MockTwin(seed=SEED)
+    brain_private, brain_public = (
+        (config.signing_key, None) if config.signing_key else derive_keypair(f"{SEED}:brain"))
+    if brain_public is not None:  # so a reader can check the signatures without the Brain
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_path.with_suffix(".pub").write_text(brain_public, encoding="ascii")
     private_key, public_key = derive_keypair(f"{SEED}:guardian")
     guardian = MockGuardian(private_key, policy=GUARDIAN_POLICIES[scenario.guardian_policy]())
     guardian_profile = GuardianProfile.load(GUARDIAN_PROFILE, public_key_b64=public_key)
@@ -81,7 +86,7 @@ async def _run_standalone(
     bus = MemoryBus()
     tick = 0
     app = BrainApp(
-        config, InProcTwin(twin), clock, JsonlLog(log_path),
+        config, InProcTwin(twin), clock, JsonlLog(log_path, private_key_b64=brain_private),
         ReadingGuard(twin.profile, keyring, registry), VerdictGuard(guardian_profile),
         event_guard=GuardianEventGuard(guardian_profile), profile=twin.profile, keyring=keyring, registry=registry, wall_now=lambda: tick * dt)
     await app.start()

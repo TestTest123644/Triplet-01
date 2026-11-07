@@ -40,6 +40,9 @@ class BrainConfig(_Strict):
     policy: dict = Field(default_factory=dict)
     params: dict = Field(default_factory=dict)
     logs_dir: Path = Path("logs")
+    # Base64 Ed25519 private key the Brain signs `brain.events` with (spec 11.1). Usually set
+    # through BRAIN__SIGNING_KEY; standalone runs derive one from the scenario seed instead.
+    signing_key: str | None = None
 
 
 def _format_errors(exc: ValidationError) -> str:
