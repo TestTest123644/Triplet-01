@@ -1,0 +1,56 @@
+# ==========================================
+# Flink + PyFlink job image
+# ==========================================
+FROM flink:1.20.1-scala_2.12-java17
+
+USER root
+
+# System Python + pip
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        python3 \
+        python3-pip \
+    && rm -rf /var/lib/apt/lists/*
+
+# Flink looks for a `python` binary in some code paths
+RUN ln -sf /usr/bin/python3 /usr/bin/python
+
+WORKDIR /opt/flink/usrlib
+
+# ------------------------------------------
+# Python dependencies (installed into the
+# system site-packages so every Python
+# process in the container can import them)
+# ------------------------------------------
+COPY guardian_layer/consumer_producer/kafka_consumer/requirements.txt /tmp/requirements.txt
+
+RUN python3 -m pip install --no-cache-dir --upgrade pip && \
+    python3 -m pip install --no-cache-dir -r /tmp/requirements.txt && \
+    rm /tmp/requirements.txt
+
+# ------------------------------------------
+# Application code
+# ------------------------------------------
+
+# Root package
+COPY guardian_layer/__init__.py guardian_layer/
+
+# Consumer-producer package
+COPY guardian_layer/consumer_producer/__init__.py \
+     guardian_layer/consumer_producer/
+
+# Kafka consumer: job, jobs, mcp_client and local utils
+COPY guardian_layer/consumer_producer/kafka_consumer/ \
+     guardian_layer/consumer_producer/kafka_consumer/
+
+# ------------------------------------------
+# Python configuration
+# ------------------------------------------
+ENV PYTHON=/usr/bin/python3
+ENV PYFLINK_CLIENT_EXECUTABLE=/usr/bin/python3
+ENV PYTHONPATH=/opt/flink/usrlib
+
+# Let the flink user read the code
+RUN chown -R flink:flink /opt/flink/usrlib
+
+USER flink

@@ -1,0 +1,15 @@
+mocks/out/
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+/models/
+.env
+/secrets/
+./secrets/
+vault/secrets/
+vault/data/
+vault/tls/*.pem
+vault/init-output.json

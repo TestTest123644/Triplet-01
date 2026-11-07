@@ -1,0 +1,54 @@
+# syntax=docker/dockerfile:1
+
+# ---------- Stage 1: builder ----------
+# Installs dependencies into an isolated virtualenv that is copied to the runtime stage.
+FROM python:3.12-slim AS builder
+
+ENV PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+WORKDIR /build
+
+RUN python -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+# Copy only the requirements file first so this layer is cached
+# until the dependencies change. (Filename kept as in the repo tree.)
+COPY requiremnts.txt ./requirements.txt
+RUN pip install -r requirements.txt
+
+
+# ---------- Stage 2: runtime ----------
+FROM python:3.12-slim AS runtime
+
+ENV PATH="/opt/venv/bin:$PATH" \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    MCP_HOST=0.0.0.0 \
+    MCP_PORT=8000
+
+# Non-root user
+RUN useradd --create-home --uid 10001 appuser
+
+WORKDIR /app
+
+# Only the virtualenv comes over from the builder (no compilers, no pip cache)
+COPY --from=builder /opt/venv /opt/venv
+
+# Package layout: /app/twin/{__init__,city_simulation,mcp_server}.py
+# The mock simulator is installed AS city_simulation.py, replacing the real one.
+RUN mkdir -p /app/twin && touch /app/twin/__init__.py
+COPY city_simulation.py /app/twin/city_simulation.py
+COPY mcp_server.py     /app/twin/mcp_server.py
+RUN chown -R appuser:appuser /app
+
+USER appuser
+
+EXPOSE 8000
+
+# Simple TCP-level healthcheck (the SSE endpoint is a long-lived stream)
+HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
+    CMD python -c "import os,socket; socket.create_connection(('127.0.0.1', int(os.getenv('MCP_PORT','8000'))), 2).close()"
+
+# Entrypoint: the MCP server (runs the __main__ block with uvicorn)
+ENTRYPOINT ["python", "-m", "twin.mcp_server"]

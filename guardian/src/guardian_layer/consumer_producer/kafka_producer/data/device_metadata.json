@@ -1,0 +1,432 @@
+{
+  "zones": [
+    "zone-1",
+    "zone-2",
+    "zone-3",
+    "zone-4",
+    "zone-5",
+    "zone-6"
+  ],
+  "devices": {
+    "z1-tc1": {
+      "device_id": "z1-tc1",
+      "zone_id": "zone-1",
+      "device_type": "traffic_camera",
+      "unit": "veh/min",
+      "lat": 36.7964,
+      "lon": 10.1755,
+      "min_val": 0.0,
+      "max_val": 200.0
+    },
+    "z1-tc2": {
+      "device_id": "z1-tc2",
+      "zone_id": "zone-1",
+      "device_type": "traffic_camera",
+      "unit": "veh/min",
+      "lat": 36.7976,
+      "lon": 10.177,
+      "min_val": 0.0,
+      "max_val": 200.0
+    },
+    "z1-wl1": {
+      "device_id": "z1-wl1",
+      "zone_id": "zone-1",
+      "device_type": "water_level",
+      "unit": "meters",
+      "lat": 36.7988,
+      "lon": 10.1785,
+      "min_val": 0.0,
+      "max_val": 12.0
+    },
+    "z1-wl2": {
+      "device_id": "z1-wl2",
+      "zone_id": "zone-1",
+      "device_type": "water_level",
+      "unit": "meters",
+      "lat": 36.8,
+      "lon": 10.18,
+      "min_val": 0.0,
+      "max_val": 12.0
+    },
+    "z1-pl1": {
+      "device_id": "z1-pl1",
+      "zone_id": "zone-1",
+      "device_type": "power_load",
+      "unit": "MW",
+      "lat": 36.8012,
+      "lon": 10.1815,
+      "min_val": 5.0,
+      "max_val": 120.0
+    },
+    "z1-aq1": {
+      "device_id": "z1-aq1",
+      "zone_id": "zone-1",
+      "device_type": "air_quality",
+      "unit": "AQI",
+      "lat": 36.8024,
+      "lon": 10.183,
+      "min_val": 10.0,
+      "max_val": 350.0
+    },
+    "z1-ec1": {
+      "device_id": "z1-ec1",
+      "zone_id": "zone-1",
+      "device_type": "emergency_call",
+      "unit": "call/min",
+      "lat": 36.8036,
+      "lon": 10.1845,
+      "min_val": 0.0,
+      "max_val": 30.0
+    },
+    "z2-tc1": {
+      "device_id": "z2-tc1",
+      "zone_id": "zone-2",
+      "device_type": "traffic_camera",
+      "unit": "veh/min",
+      "lat": 36.8014,
+      "lon": 10.2655,
+      "min_val": 0.0,
+      "max_val": 200.0
+    },
+    "z2-tc2": {
+      "device_id": "z2-tc2",
+      "zone_id": "zone-2",
+      "device_type": "traffic_camera",
+      "unit": "veh/min",
+      "lat": 36.8026,
+      "lon": 10.267,
+      "min_val": 0.0,
+      "max_val": 200.0
+    },
+    "z2-wl1": {
+      "device_id": "z2-wl1",
+      "zone_id": "zone-2",
+      "device_type": "water_level",
+      "unit": "meters",
+      "lat": 36.8038,
+      "lon": 10.2685,
+      "min_val": 0.0,
+      "max_val": 12.0
+    },
+    "z2-wl2": {
+      "device_id": "z2-wl2",
+      "zone_id": "zone-2",
+      "device_type": "water_level",
+      "unit": "meters",
+      "lat": 36.805,
+      "lon": 10.27,
+      "min_val": 0.0,
+      "max_val": 12.0
+    },
+    "z2-pl1": {
+      "device_id": "z2-pl1",
+      "zone_id": "zone-2",
+      "device_type": "power_load",
+      "unit": "MW",
+      "lat": 36.8062,
+      "lon": 10.2715,
+      "min_val": 5.0,
+      "max_val": 120.0
+    },
+    "z2-aq1": {
+      "device_id": "z2-aq1",
+      "zone_id": "zone-2",
+      "device_type": "air_quality",
+      "unit": "AQI",
+      "lat": 36.8074,
+      "lon": 10.273,
+      "min_val": 10.0,
+      "max_val": 350.0
+    },
+    "z2-ec1": {
+      "device_id": "z2-ec1",
+      "zone_id": "zone-2",
+      "device_type": "emergency_call",
+      "unit": "call/min",
+      "lat": 36.8086,
+      "lon": 10.2745,
+      "min_val": 0.0,
+      "max_val": 30.0
+    },
+    "z3-tc1": {
+      "device_id": "z3-tc1",
+      "zone_id": "zone-3",
+      "device_type": "traffic_camera",
+      "unit": "veh/min",
+      "lat": 36.8444,
+      "lon": 10.2005,
+      "min_val": 0.0,
+      "max_val": 200.0
+    },
+    "z3-tc2": {
+      "device_id": "z3-tc2",
+      "zone_id": "zone-3",
+      "device_type": "traffic_camera",
+      "unit": "veh/min",
+      "lat": 36.8456,
+      "lon": 10.202,
+      "min_val": 0.0,
+      "max_val": 200.0
+    },
+    "z3-wl1": {
+      "device_id": "z3-wl1",
+      "zone_id": "zone-3",
+      "device_type": "water_level",
+      "unit": "meters",
+      "lat": 36.8468,
+      "lon": 10.2035,
+      "min_val": 0.0,
+      "max_val": 12.0
+    },
+    "z3-wl2": {
+      "device_id": "z3-wl2",
+      "zone_id": "zone-3",
+      "device_type": "water_level",
+      "unit": "meters",
+      "lat": 36.848,
+      "lon": 10.205,
+      "min_val": 0.0,
+      "max_val": 12.0
+    },
+    "z3-pl1": {
+      "device_id": "z3-pl1",
+      "zone_id": "zone-3",
+      "device_type": "power_load",
+      "unit": "MW",
+      "lat": 36.8492,
+      "lon": 10.2065,
+      "min_val": 5.0,
+      "max_val": 120.0
+    },
+    "z3-aq1": {
+      "device_id": "z3-aq1",
+      "zone_id": "zone-3",
+      "device_type": "air_quality",
+      "unit": "AQI",
+      "lat": 36.8504,
+      "lon": 10.208,
+      "min_val": 10.0,
+      "max_val": 350.0
+    },
+    "z3-ec1": {
+      "device_id": "z3-ec1",
+      "zone_id": "zone-3",
+      "device_type": "emergency_call",
+      "unit": "call/min",
+      "lat": 36.8516,
+      "lon": 10.2095,
+      "min_val": 0.0,
+      "max_val": 30.0
+    },
+    "z4-tc1": {
+      "device_id": "z4-tc1",
+      "zone_id": "zone-4",
+      "device_type": "traffic_camera",
+      "unit": "veh/min",
+      "lat": 36.8114,
+      "lon": 10.1255,
+      "min_val": 0.0,
+      "max_val": 200.0
+    },
+    "z4-tc2": {
+      "device_id": "z4-tc2",
+      "zone_id": "zone-4",
+      "device_type": "traffic_camera",
+      "unit": "veh/min",
+      "lat": 36.8126,
+      "lon": 10.127,
+      "min_val": 0.0,
+      "max_val": 200.0
+    },
+    "z4-wl1": {
+      "device_id": "z4-wl1",
+      "zone_id": "zone-4",
+      "device_type": "water_level",
+      "unit": "meters",
+      "lat": 36.8138,
+      "lon": 10.1285,
+      "min_val": 0.0,
+      "max_val": 12.0
+    },
+    "z4-wl2": {
+      "device_id": "z4-wl2",
+      "zone_id": "zone-4",
+      "device_type": "water_level",
+      "unit": "meters",
+      "lat": 36.815,
+      "lon": 10.13,
+      "min_val": 0.0,
+      "max_val": 12.0
+    },
+    "z4-pl1": {
+      "device_id": "z4-pl1",
+      "zone_id": "zone-4",
+      "device_type": "power_load",
+      "unit": "MW",
+      "lat": 36.8162,
+      "lon": 10.1315,
+      "min_val": 5.0,
+      "max_val": 120.0
+    },
+    "z4-aq1": {
+      "device_id": "z4-aq1",
+      "zone_id": "zone-4",
+      "device_type": "air_quality",
+      "unit": "AQI",
+      "lat": 36.8174,
+      "lon": 10.133,
+      "min_val": 10.0,
+      "max_val": 350.0
+    },
+    "z4-ec1": {
+      "device_id": "z4-ec1",
+      "zone_id": "zone-4",
+      "device_type": "emergency_call",
+      "unit": "call/min",
+      "lat": 36.8186,
+      "lon": 10.1345,
+      "min_val": 0.0,
+      "max_val": 30.0
+    },
+    "z5-tc1": {
+      "device_id": "z5-tc1",
+      "zone_id": "zone-5",
+      "device_type": "traffic_camera",
+      "unit": "veh/min",
+      "lat": 36.8284,
+      "lon": 10.1505,
+      "min_val": 0.0,
+      "max_val": 200.0
+    },
+    "z5-tc2": {
+      "device_id": "z5-tc2",
+      "zone_id": "zone-5",
+      "device_type": "traffic_camera",
+      "unit": "veh/min",
+      "lat": 36.8296,
+      "lon": 10.152,
+      "min_val": 0.0,
+      "max_val": 200.0
+    },
+    "z5-wl1": {
+      "device_id": "z5-wl1",
+      "zone_id": "zone-5",
+      "device_type": "water_level",
+      "unit": "meters",
+      "lat": 36.8308,
+      "lon": 10.1535,
+      "min_val": 0.0,
+      "max_val": 12.0
+    },
+    "z5-wl2": {
+      "device_id": "z5-wl2",
+      "zone_id": "zone-5",
+      "device_type": "water_level",
+      "unit": "meters",
+      "lat": 36.832,
+      "lon": 10.155,
+      "min_val": 0.0,
+      "max_val": 12.0
+    },
+    "z5-pl1": {
+      "device_id": "z5-pl1",
+      "zone_id": "zone-5",
+      "device_type": "power_load",
+      "unit": "MW",
+      "lat": 36.8332,
+      "lon": 10.1565,
+      "min_val": 5.0,
+      "max_val": 120.0
+    },
+    "z5-aq1": {
+      "device_id": "z5-aq1",
+      "zone_id": "zone-5",
+      "device_type": "air_quality",
+      "unit": "AQI",
+      "lat": 36.8344,
+      "lon": 10.158,
+      "min_val": 10.0,
+      "max_val": 350.0
+    },
+    "z5-ec1": {
+      "device_id": "z5-ec1",
+      "zone_id": "zone-5",
+      "device_type": "emergency_call",
+      "unit": "call/min",
+      "lat": 36.8356,
+      "lon": 10.1595,
+      "min_val": 0.0,
+      "max_val": 30.0
+    },
+    "z6-tc1": {
+      "device_id": "z6-tc1",
+      "zone_id": "zone-6",
+      "device_type": "traffic_camera",
+      "unit": "veh/min",
+      "lat": 36.7514,
+      "lon": 10.2155,
+      "min_val": 0.0,
+      "max_val": 200.0
+    },
+    "z6-tc2": {
+      "device_id": "z6-tc2",
+      "zone_id": "zone-6",
+      "device_type": "traffic_camera",
+      "unit": "veh/min",
+      "lat": 36.7526,
+      "lon": 10.217,
+      "min_val": 0.0,
+      "max_val": 200.0
+    },
+    "z6-wl1": {
+      "device_id": "z6-wl1",
+      "zone_id": "zone-6",
+      "device_type": "water_level",
+      "unit": "meters",
+      "lat": 36.7538,
+      "lon": 10.2185,
+      "min_val": 0.0,
+      "max_val": 12.0
+    },
+    "z6-wl2": {
+      "device_id": "z6-wl2",
+      "zone_id": "zone-6",
+      "device_type": "water_level",
+      "unit": "meters",
+      "lat": 36.755,
+      "lon": 10.22,
+      "min_val": 0.0,
+      "max_val": 12.0
+    },
+    "z6-pl1": {
+      "device_id": "z6-pl1",
+      "zone_id": "zone-6",
+      "device_type": "power_load",
+      "unit": "MW",
+      "lat": 36.7562,
+      "lon": 10.2215,
+      "min_val": 5.0,
+      "max_val": 120.0
+    },
+    "z6-aq1": {
+      "device_id": "z6-aq1",
+      "zone_id": "zone-6",
+      "device_type": "air_quality",
+      "unit": "AQI",
+      "lat": 36.7574,
+      "lon": 10.223,
+      "min_val": 10.0,
+      "max_val": 350.0
+    },
+    "z6-ec1": {
+      "device_id": "z6-ec1",
+      "zone_id": "zone-6",
+      "device_type": "emergency_call",
+      "unit": "call/min",
+      "lat": 36.7586,
+      "lon": 10.2245,
+      "min_val": 0.0,
+      "max_val": 30.0
+    }
+  }
+}

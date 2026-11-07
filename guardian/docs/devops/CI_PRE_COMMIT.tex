@@ -1,0 +1,118 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage[margin=2cm,top=2.2cm,bottom=2.2cm]{geometry}
+\usepackage{booktabs}
+\usepackage{enumitem}
+\usepackage{fancyhdr}
+\usepackage{titlesec}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{microtype}
+\usepackage[colorlinks=true,linkcolor=blue!70!black,citecolor=blue!70!black,urlcolor=blue!70!black]{hyperref}
+
+% Header and Footer styling
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\small\textsf{\textbf{CI \& Pre-commit Guide} \textbar\ Guardian Layer}}
+\fancyhead[R]{\small\textsf{Page \thepage}}
+\fancyfoot[L]{\small\textsf{DevOps \& Quality Assurance Documentation}}
+\fancyfoot[R]{\small\textsf{Version 1.0}}
+\renewcommand{\headrulewidth}{0.5pt}
+\renewcommand{\footrulewidth}{0.5pt}
+
+% Section formatting
+\titleformat{\section}
+  {\normalfont\sffamily\Large\bfseries\color{blue!80!black}}
+  {\thesection}{0.8em}{}
+\titleformat{\subsection}
+  {\normalfont\sffamily\large\bfseries\color{blue!70!black}}
+  {\thesubsection}{0.6em}{}
+
+\titlespacing*{\section}{0pt}{10pt}{5pt}
+\titlespacing*{\subsection}{0pt}{8pt}{4pt}
+\setlength{\parskip}{3pt}
+\setlength{\parindent}{0pt}
+
+% Code listing styling
+\definecolor{codegray}{rgb}{0.96,0.96,0.96}
+\definecolor{codeframe}{rgb}{0.85,0.85,0.85}
+\lstset{
+  backgroundcolor=\color{codegray},
+  basicstyle=\ttfamily\footnotesize,
+  breaklines=true,
+  frame=single,
+  rulecolor=\color{codeframe},
+  keepspaces=true
+}
+
+\title{\sffamily\bfseries\huge CI and Pre-Commit Guide\\[0.3em]
+\Large Quality Gates, Code Standards, and Automated CI Pipeline}
+\author{\textsf{The Guardian Layer Engineering Team}}
+\date{\textsf{Version 1.0 \textbar\ November 2026}}
+
+\begin{document}
+
+\maketitle
+\thispagestyle{fancy}
+
+\section{Purpose}
+The Guardian Layer codebase enforces automated quality gates at both local developer environments (via git pre-commit hooks) and pull-request integration perimeters (via GitHub Actions workflows). These verification layers ensure zero regressions in formatting, static analysis, type checking, unit/integration testing, and commit conventions before any code merges into the mainline branch.
+
+\section{Pre-Commit Hooks}
+Local commit validation is orchestrated via \texttt{.pre-commit-config.yaml}. The hook suite executes automatically during \texttt{git commit}:
+
+\begin{itemize}[leftmargin=*,itemsep=2pt]
+  \item \textbf{Ruff format:} Enforces PEP 8 code formatting standards across all Python sources.
+  \item \textbf{Ruff lint:} Evaluates Python code quality rules, catching dead code, unused imports, and anti-patterns.
+  \item \textbf{Tests:} Executes the fast pytest test suite, preventing regression commits.
+  \item \textbf{Commitizen:} Validates commit message adherence to Conventional Commits conventions (e.g., \texttt{feat:}, \texttt{fix:}, \texttt{chore:}).
+  \item \textbf{Branch check:} Verifies feature and bugfix branch naming standards.
+\end{itemize}
+
+\subsection{Installation and Execution}
+To install hooks locally into the git repository:
+\begin{lstlisting}
+uv run pre-commit install
+uv run pre-commit install --hook-type commit-msg
+\end{lstlisting}
+
+To manually trigger the full pre-commit evaluation against all files:
+\begin{lstlisting}
+uv run pre-commit run --all-files
+\end{lstlisting}
+
+\section{CI Pipeline Architecture}
+The central continuous integration pipeline is defined in \texttt{.github/workflows/ci.yml}. Triggered on every Pull Request targeting the primary branch, the workflow executes the following sequential stages:
+
+\begin{enumerate}[leftmargin=*,itemsep=2pt]
+  \item \textbf{Repository Checkout:} Clones repository source with full commit history.
+  \item \textbf{Runtime Provisioning:} Sets up Python 3.12 and resolves frozen lockfile dependencies via \texttt{uv sync}.
+  \item \textbf{Linter Validation:} Runs \texttt{ruff check} against all codebase modules.
+  \item \textbf{Type Safety Evaluation:} Runs \texttt{basedpyright} type analysis, enforcing strict typing contracts.
+  \item \textbf{Test Suite Execution:} Runs all unit and integration tests via \texttt{pytest}.
+  \item \textbf{Container Build Check:} Discovers Dockerfiles within repository roots and verifies successful image builds.
+\end{enumerate}
+
+\noindent\textit{Failure policy:} If any linter rule, type check, pytest assertion, or container build fails, the CI job fails immediately and blocks branch merging.
+
+\section{Docker Compose Environment}
+The \texttt{docker-compose.yml} configuration provides multi-service local infrastructure:
+\begin{itemize}[leftmargin=*,itemsep=2pt]
+  \item \textbf{Kafka Brokers:} 3-node Apache Kafka cluster using image \texttt{apache/kafka:3.8.0} with KRaft consensus.
+  \item \textbf{Relational Database:} PostgreSQL 16 container for persistent telemetry state and anomaly verdict tables.
+  \item \textbf{Audit Logging:} Elasticsearch 8.15 container storing operational telemetry and forensic logs.
+\end{itemize}
+
+\section{Pre-PR Submission Checklist}
+Before opening a Pull Request, engineers must execute the following local verification sequence:
+\begin{lstlisting}
+uv run pre-commit run --all-files
+git diff --check
+git status
+\end{lstlisting}
+Ensure all local hooks pass and all changes are cleanly staged before requesting team review.
+
+\end{document}
+
