@@ -102,6 +102,20 @@ curl -X POST http://localhost:8100/api/secrets/reload -H "X-Red-Team-Token: $RED
 
 Or send `kill -HUP <twin_pid>`, or configure `TWIN_SECRET_RELOAD_SECONDS`. Device signing keys never rotate at runtime.
 
+### HashiCorp Vault Key Synchronization
+
+The Twin can optionally synchronize inter-layer communication keys from HashiCorp Vault KV v2 using AppRole authentication:
+
+```bash
+export VAULT_ADDR="https://<cluster>.hashicorp.cloud:8200"
+export VAULT_NAMESPACE="admin"
+export VAULT_ROLE_ID_FILE="./secrets/vault_twin_role_id"     # in container: /app/secrets/vault_twin_role_id
+export VAULT_SECRET_ID_FILE="./secrets/vault_twin_secret_id" # in container: /app/secrets/vault_twin_secret_id
+export VAULT_REFRESH_SECONDS=300
+```
+
+Paths synchronized: `comm/twin/guardian/private`, `comm/twin/brain/private`, `comm/guardian/twin/public`, `comm/brain/twin/public`. Supports both PEM and kid formats with automatic key algorithm detection (X25519, Ed25519, RSA). Keys are fetched and kept fresh in memory but not yet used for any traffic encryption. Check metadata status via `GET /api/status` under the `vault` key.
+
 ---
 
 ## Documentation index

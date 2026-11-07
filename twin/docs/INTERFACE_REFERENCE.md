@@ -349,12 +349,28 @@ All runtime networking, authentication, and port bindings are configurable via e
 | `TWIN_MCP_HOST_PORT` | `8000` | Host port mapped to container port 8000 (MCP command server) |
 | `TWIN_RED_TEAM_HOST_PORT` | `8100` | Host port mapped to container port 8100 (Red Team REST API) |
 | `TWIN_CONSOLE_HOST_PORT` | `8501` | Host port mapped to container port 8501 (Streamlit operations console) |
+| `VAULT_ADDR` | *(unset)* | Vault cluster URL (e.g. `https://<cluster>.hashicorp.cloud:8200`; unset = disabled) |
+| `VAULT_NAMESPACE` | `admin` | Vault namespace header (default `admin`; empty string = no header) |
+| `VAULT_ROLE_ID_FILE` | *(unset)* | Path to AppRole Role ID file (e.g. `./secrets/vault_twin_role_id`; container `/app/secrets/vault_twin_role_id`) |
+| `VAULT_SECRET_ID_FILE` | *(unset)* | Path to AppRole Secret ID file (e.g. `./secrets/vault_twin_secret_id`; container `/app/secrets/vault_twin_secret_id`) |
+| `VAULT_CACERT` | *(unset)* | Path to custom CA bundle (unset = certifi or system default; verification never disabled) |
+| `VAULT_REFRESH_SECONDS` | `300` | Background key refresh interval in seconds (0 = disabled) |
 
 ### Path resolution: host vs container
 
-When configuring `KAFKA_PASSWORD_FILE` or `MCP_AUTH_TOKENS_FILE`:
-- **Running on host (`python -m twin.main`):** Use the host relative or absolute path (e.g. `KAFKA_PASSWORD_FILE=./secrets/kafka_password`).
-- **Running in Docker Compose:** The host directory `${TWIN_SECRETS_DIR:-./secrets}` is mounted to `/app/secrets:ro`. Configure the container-internal path (e.g. `KAFKA_PASSWORD_FILE=/app/secrets/kafka_password`).
+When configuring `KAFKA_PASSWORD_FILE`, `MCP_AUTH_TOKENS_FILE`, `VAULT_ROLE_ID_FILE`, or `VAULT_SECRET_ID_FILE`:
+- **Running on host (`python -m twin.main`):** Use the host relative or absolute path (e.g. `KAFKA_PASSWORD_FILE=./secrets/kafka_password`, `VAULT_ROLE_ID_FILE=./secrets/vault_twin_role_id`, `VAULT_SECRET_ID_FILE=./secrets/vault_twin_secret_id`).
+- **Running in Docker Compose:** The host directory `${TWIN_SECRETS_DIR:-./secrets}` is mounted to `/app/secrets:ro`. Configure the container-internal path (e.g. `KAFKA_PASSWORD_FILE=/app/secrets/kafka_password`, `VAULT_ROLE_ID_FILE=/app/secrets/vault_twin_role_id`, `VAULT_SECRET_ID_FILE=/app/secrets/vault_twin_secret_id`).
+
+### HashiCorp Vault Key Synchronization
+
+The Twin optionally fetches and maintains dynamic communication keys from HashiCorp Vault KV v2:
+- **Paths synchronized:** `comm/twin/guardian/private`, `comm/twin/brain/private`, `comm/guardian/twin/public`, `comm/brain/twin/public`.
+- **Formats supported:** PEM (`{"key": "<PEM>"}`) and kid (`{"kid", "private_key"|"public_key", "fingerprint", "active_after"}`).
+- **Key algorithms:** Automatically detects X25519, Ed25519, and RSA keys.
+- **Rotation:** Private keys with future `active_after` pick version-1; public keys preserve latest and previous versions.
+- **Status inspection:** Query `GET /api/status` for the `vault` metadata block.
+- **Traffic usage note:** Communication keys are fetched and kept fresh in memory but not yet used for any traffic encryption.
 
 
 
