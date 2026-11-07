@@ -143,6 +143,13 @@ def reload_secrets(sim: Optional[Any] = None, streamer: Optional[Any] = None) ->
         else:
             results["KAFKA_PASSWORD"] = "unchanged"
 
+    # 4. Vault Keys reload
+    try:
+        from twin.vault_keys import reload_vault_keys
+        results["VAULT_KEYS"] = reload_vault_keys()
+    except Exception as e:
+        results["VAULT_KEYS"] = f"error: {e}"
+
     now_wall = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
     now_sim = sim.get_sim_time() if sim is not None else now_wall
 

@@ -99,6 +99,12 @@ Error response shape:
 | `TRIPLET_NETWORK` | `city_network` | Docker bridge network name (e.g. `shared-backend` for Guardian) |
 | `TRIPLET_NETWORK_EXTERNAL` | `false` | Set `true` to connect to an existing external Docker network without compose edits |
 | `TWIN_SECRETS_DIR` | `./secrets` | Host secrets directory mounted read-only to `/app/secrets:ro` (`../secrets` in `twin/`) |
+| `VAULT_ADDR` | *(unset)* | Vault cluster URL (e.g. `https://<cluster>.hashicorp.cloud:8200`; unset = disabled) |
+| `VAULT_NAMESPACE` | `admin` | Vault namespace header (default `admin`; empty string = no header) |
+| `VAULT_ROLE_ID_FILE` | *(unset)* | Path to AppRole Role ID file (e.g. `./secrets/vault_twin_role_id`; container `/app/secrets/vault_twin_role_id`) |
+| `VAULT_SECRET_ID_FILE` | *(unset)* | Path to AppRole Secret ID file (e.g. `./secrets/vault_twin_secret_id`; container `/app/secrets/vault_twin_secret_id`) |
+| `VAULT_CACERT` | *(unset)* | Path to custom CA bundle (unset = certifi or system default; verification never disabled) |
+| `VAULT_REFRESH_SECONDS` | `300` | Background key refresh interval in seconds (0 = disabled) |
 | `SIM_SPEED` | `1.0` | Simulation speed multiplier (pass `20.0` for scenarios) |
 
 ---
@@ -115,6 +121,9 @@ Error response shape:
 
 Secrets (`KAFKA_PASSWORD`, `MCP_AUTH_TOKENS`, `RED_TEAM_TOKEN`) resolve via: (1) `TWIN_SECRET_HOOK="pkg.mod:func"` (Vault or custom secret store), (2) file `<NAME>_FILE` (Vault Agent, Docker secret, k8s), (3) env `<NAME>`. Device signing keys (`KEYSTORE_PATH`) never rotate at runtime.
 Reload secrets without restarting via `POST http://localhost:8100/api/secrets/reload` (header `X-Red-Team-Token` checked against old token), sending `kill -HUP <twin_pid>`, or setting `TWIN_SECRET_RELOAD_SECONDS`.
+
+### Vault Communication Key Synchronization
+The Twin can optionally synchronize inter-layer communication keys from HashiCorp Vault KV v2 (paths: `comm/twin/guardian/private`, `comm/twin/brain/private`, `comm/guardian/twin/public`, `comm/brain/twin/public`). Configure via `VAULT_ADDR="https://<cluster>.hashicorp.cloud:8200"`, `VAULT_ROLE_ID_FILE=/app/secrets/vault_twin_role_id`, and `VAULT_SECRET_ID_FILE=/app/secrets/vault_twin_secret_id` (host: `secrets/...`). Keys are fetched and kept fresh in memory but not yet used for any traffic encryption. Inspect status via `GET /api/status` under the `vault` key.
 
 ---
 

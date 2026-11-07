@@ -514,6 +514,19 @@ def build_red_team_app(sim: CitySimulator, token: str, streamer: Optional[Any] =
                 "rejected_invalid": 0,
                 "msgs_per_sec": 0.0,
             }
+
+        try:
+            from twin.vault_keys import status as vault_status
+            data["vault"] = vault_status()
+        except Exception as e:
+            data["vault"] = {
+                "enabled": False,
+                "status": "disabled",
+                "last_refresh_wall": None,
+                "last_error": f"error loading vault status: {e}",
+                "paths": {},
+            }
+
         return JSONResponse(data)
 
     async def api_inject_attack(request: Request) -> JSONResponse:

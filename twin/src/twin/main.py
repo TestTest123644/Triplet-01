@@ -198,6 +198,13 @@ async def main() -> None:
     )
     red_team_server = uvicorn.Server(red_team_config)
 
+    # 5.b Start optional Vault key synchronization (non-blocking)
+    try:
+        from twin.vault_keys import start_vault_sync
+        start_vault_sync()
+    except Exception as e:
+        logger.warning(f"Error starting Vault key synchronization: {e}")
+
     stop_event = asyncio.Event()
 
     def handle_signal(*_):
@@ -265,6 +272,11 @@ async def main() -> None:
                 for task in pending:
                     task.cancel()
     finally:
+        try:
+            from twin.vault_keys import stop_vault_sync
+            stop_vault_sync()
+        except Exception:
+            pass
         sim.close()
 
 
