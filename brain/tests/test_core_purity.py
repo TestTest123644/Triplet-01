@@ -13,7 +13,9 @@ BANNED_CALLS = {
     "datetime.datetime.today",
     "datetime.date.today",
 }
-LITERALS = re.compile(r"twin\.sensors|set_valve|set_signal_plan|switch_grid|\bz\d-|zone-\d|meters")
+
+# `meters` is bounded: the partner unit is banned, the word "parameters" is not.
+LITERALS = re.compile(r"twin\.sensors|set_valve|set_signal_plan|switch_grid|\bz\d-|zone-\d|\bmeters\b")
 
 
 def _banned_import(qualified: str, level: int) -> bool:
