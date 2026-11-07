@@ -1,0 +1,10 @@
+# T07: a replay storm. The same signed camera reading is repeated; the Brain must count the
+# duplicates and plan nothing from them.
+duration_s: 180
+guardian_policy: trust_all
+inject:
+  - {at_s: 10, capability: link, target: z1-tc1, params: {link_mode: replay}}
+expect:
+  device: z1-tc1
+  quiet_capabilities: [signal]
+  dedupe_above: 0

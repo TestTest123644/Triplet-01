@@ -1,0 +1,9 @@
+# T11: the Twin restarts mid-run. Its keys and sequence numbers change; the Brain must
+# notice, reload, start a new epoch and carry on controlling the water.
+duration_s: 360
+guardian_policy: trust_all
+inject: []
+restart_twin_at_s: [150]
+expect:
+  epoch_count: 2
+  reject_code: BAD_SIGNATURE

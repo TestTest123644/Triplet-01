@@ -1,0 +1,9 @@
+# T10: a Guardian outage. Verdicts stop for 25 s; the Brain must degrade, refuse R1 and R2
+# while it is blind, and come back without trusting anything from the outage window.
+duration_s: 120
+guardian_policy: {kind: silent_window, seconds: 15.0, until: 40.0}
+inject: []
+expect:
+  modes: [NORMAL, GUARDIAN_DEGRADED, NORMAL]
+  refusal_code: MODE_FORBIDS
+  outage: [15.0, 40.0]

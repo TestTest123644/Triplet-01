@@ -1,0 +1,127 @@
+asyncapi: 2.6.0
+info:
+  title: City Brain — triplet channels
+  version: "1"
+  description: >
+    What the Brain reads off the bus and what it writes back. The Brain subscribes to the
+    Twin's readings and the Guardian's verdicts and events, and publishes one hash-chained,
+    signed record per decision, command, verification, alert, incident and status change.
+    Every message is Ed25519-signed by its author; the Brain refuses anything it cannot
+    verify and says why (spec 5.1-5.5, 7.3).
+defaultContentType: application/json
+servers:
+  triplet:
+    url: kafka:9092
+    protocol: kafka
+    description: The triplet network's broker. `BRAIN__KAFKA__BOOTSTRAP` overrides it.
+channels:
+  twin.sensors:
+    description: Sensor readings from the Twin, one per device per 100 ms tick.
+    subscribe:
+      operationId: readReading
+      message:
+        $ref: "#/components/messages/TwinReading"
+  guardian.verdicts:
+    description: The Guardian's trust verdict on a reading, bound to its signature hash.
+    subscribe:
+      operationId: readVerdict
+      message:
+        $ref: "#/components/messages/GuardianVerdict"
+  guardian.events:
+    description: Heartbeats, containment notices and verdict revocations from the Guardian.
+    subscribe:
+      operationId: readGuardianEvent
+      message:
+        $ref: "#/components/messages/GuardianEvent"
+  brain.events:
+    description: >
+      Everything the Brain decided, commanded, checked or warned about, keyed by subject.
+      Each record carries `prev_hash`, `hash` and `sig`: the chain proves nothing was
+      dropped or reordered, and the signature proves the Brain wrote it.
+    publish:
+      operationId: publishBrainEvent
+      message:
+        $ref: "#/components/messages/BrainEvent"
+components:
+  messages:
+    TwinReading:
+      name: TwinReading
+      title: A signed sensor reading
+      contentType: application/json
+      payload:
+        $ref: "../schemas/partners/twin-triplet07.reading.schema.json"
+      examples:
+        - payload:
+            reading_id: r-z1-wl1-1914
+            device_id: z1-wl1
+            device_type: water_level
+            ts: "2026-10-17T12:03:11Z"
+            seq: 1914
+            value: 6.02
+            unit: meters
+            location: zone-1
+            status: ok
+            sig: MEUCIQ...
+    GuardianVerdict:
+      name: GuardianVerdict
+      title: A trust verdict on one reading
+      contentType: application/json
+      payload:
+        $ref: "../schemas/guardian-verdict.v1.schema.json"
+      examples:
+        - payload:
+            verdict_id: v-000412
+            reading_id: r-z1-wl1-1914
+            sig_hash: 0f3a1c9b2d4e5f60
+            device_id: z1-wl1
+            state: TRUSTED
+            trust: 1.0
+            reasons: []
+            issued_at: "2026-10-17T12:03:11Z"
+            expires_at: "2026-10-17T12:03:41Z"
+            sig: MEUCIQ...
+    GuardianEvent:
+      name: GuardianEvent
+      title: A heartbeat, a containment notice or a revocation
+      contentType: application/json
+      payload:
+        $ref: "../schemas/guardian-event.v1.schema.json"
+      examples:
+        - payload:
+            kind: containment
+            device_id: z2-wl1
+            action: quarantined
+            effective_at: "2026-10-17T12:00:05Z"
+            reasons: [CROSS_SENSOR_CONFLICT]
+            issued_at: "2026-10-17T12:00:05Z"
+            sig: MEUCIQ...
+        - payload:
+            kind: heartbeat
+            evaluated_through: "2026-10-17T12:03:09Z"
+            issued_at: "2026-10-17T12:03:10Z"
+            sig: MEUCIQ...
+    BrainEvent:
+      name: BrainEvent
+      title: One CloudEvents record from the Brain
+      contentType: application/json
+      payload:
+        $ref: "../schemas/brain-event.v1.schema.json"
+      examples:
+        - payload:
+            specversion: "1.0"
+            id: 0-412
+            source: urn:tsyp14:triplet-07:brain
+            type: tn.tsyp.brain.command.v1
+            subject: z1-wl1
+            simtime: "2026-10-17T12:03:11.400000Z"
+            epoch: 0
+            correlationid: flood-risk:z1-wl1:1
+            actionid: act-4486d340efc2f235
+            schemaversion: "1"
+            datacontenttype: application/json
+            data:
+              status: DISPATCHED
+              capability: valve
+              target: z1-wl1
+              state: open
+              risk_class: R1

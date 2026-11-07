@@ -1,0 +1,40 @@
+profile: twin-alt-example
+observed: {commit: none, date: 2026-11-06, by: city-brain-team, method: assumed}
+fields:
+  reading_id: reading_id
+  device_id: device_id
+  device_category: kind
+  reading: value
+  unit: unit
+  location: zone_id
+  ts: sim_time
+  seq: seq
+  status: device_status
+kinds: {flood_sensor: WATER_LEVEL, traffic_camera: TRAFFIC_FLOW, power_load: POWER_LOAD, air_quality: AIR_QUALITY, emergency_call: CALL_RATE}
+units: {cm: m, "veh/min": veh_per_min, MW: MW, AQI: AQI, "call/min": calls_per_min}
+unit_scale: {cm: 0.01}       # partner value * scale = canonical value
+statuses: {ok: OK, isolated: ISOLATED, quarantined: QUARANTINED, rolled_back: ROLLED_BACK, modelled: MODELLED}
+actuators:
+  valve:
+    tool: set_valve
+    target: device
+    device_type: flood_sensor
+    state_field: valve_position
+    states: {open: "open", closed: "closed", ratio: "{pct}%"}
+  signal:
+    tool: set_signal_plan
+    target: device
+    device_type: traffic_camera
+    state_field: signal_plan
+    states: {boost: green_wave, normal: normal, restrict: red_restriction}
+  grid:
+    tool: switch_grid
+    target: device
+    device_type: power_load
+    state_field: grid_state
+    states: {primary: grid_a, secondary: grid_b, shed: shed, standby: standby}
+  dispatch:
+    tool: dispatch
+    target: zone
+    args: {incident_type: "{incident_type}"}
+    incident_types: [flood, traffic_accident, medical_surge, fire, police]

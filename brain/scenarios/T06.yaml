@@ -1,0 +1,10 @@
+# T06: a corrupted link. The bytes no longer verify, so the readings never reach the core
+# and the channel goes stale rather than being acted on.
+duration_s: 180
+guardian_policy: trust_all
+inject:
+  - {at_s: 10, capability: link, target: z2-wl1, params: {link_mode: corrupt_bytes}}
+expect:
+  device: z2-wl1
+  reject_code: BAD_SIGNATURE
+  hold_reasons: [STALE]

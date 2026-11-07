@@ -1,0 +1,170 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:tsyp14:triplet-07:brain:schema:brain-event.v1",
+  "title": "City Brain event v1 (CloudEvents 1.0, structured mode)",
+  "type": "object",
+  "required": ["specversion", "id", "source", "type", "subject", "simtime", "epoch", "correlationid", "actionid", "schemaversion", "data"],
+  "properties": {
+    "specversion": {"const": "1.0"},
+    "id": {"type": "string", "pattern": "^[0-9]+-[0-9]+$"},
+    "source": {"const": "urn:tsyp14:triplet-07:brain"},
+    "type": {"enum": [
+      "tn.tsyp.brain.decision.v1",
+      "tn.tsyp.brain.command.v1",
+      "tn.tsyp.brain.verification.v1",
+      "tn.tsyp.brain.alert.v1",
+      "tn.tsyp.brain.status.v1",
+      "tn.tsyp.brain.incident.v1"
+    ]},
+    "subject": {"type": "string", "minLength": 1},
+    "datacontenttype": {"const": "application/json"},
+    "time": {"type": "string", "format": "date-time"},
+    "hash": {"type": "string"},
+    "prev_hash": {"type": "string"},
+    "simtime": {"type": ["string", "null"], "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}[.][0-9]{6}Z$"},
+    "epoch": {"type": "integer", "minimum": 0},
+    "correlationid": {"type": ["string", "null"]},
+    "actionid": {"type": ["string", "null"]},
+    "schemaversion": {"const": "1"},
+    "data": {"type": "object"}
+  },
+  "oneOf": [
+    {"properties": {"type": {"const": "tn.tsyp.brain.decision.v1"}, "data": {"$ref": "#/$defs/decision"}}},
+    {"properties": {"type": {"const": "tn.tsyp.brain.command.v1"}, "data": {"$ref": "#/$defs/command"}}},
+    {"properties": {"type": {"const": "tn.tsyp.brain.verification.v1"}, "data": {"$ref": "#/$defs/verification"}}},
+    {"properties": {"type": {"const": "tn.tsyp.brain.alert.v1"}, "data": {"$ref": "#/$defs/alert"}}},
+    {"properties": {"type": {"const": "tn.tsyp.brain.status.v1"}, "data": {"$ref": "#/$defs/status"}}},
+    {"properties": {"type": {"const": "tn.tsyp.brain.incident.v1"}, "data": {"$ref": "#/$defs/incident"}}}
+  ],
+  "$defs": {
+    "timestamp": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}[.][0-9]{6}Z$"},
+    "expected": {
+      "type": "object",
+      "required": ["channel", "metric", "comparator", "threshold", "window_s"],
+      "properties": {
+        "channel": {"type": "string"},
+        "metric": {"enum": ["rate", "level"]},
+        "comparator": {"enum": ["<=", ">="]},
+        "threshold": {"type": "number"},
+        "window_s": {"type": "number"}
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "required": ["reading_id", "sig_hash", "state_kind", "verdict_id", "trust_state", "weight"],
+      "properties": {
+        "reading_id": {"type": "string"},
+        "sig_hash": {"type": "string"},
+        "device_id": {"type": "string"},
+        "value": {"type": "number"},
+        "sim_time": {"$ref": "#/$defs/timestamp"},
+        "state_kind": {"enum": ["OBSERVED", "VALIDATED", "ESTIMATED", "UNKNOWN"]},
+        "verdict_id": {"type": ["string", "null"]},
+        "trust_state": {"enum": ["TRUSTED", "DOUBTFUL", "UNTRUSTED", "UNKNOWN"]},
+        "weight": {"type": "number"}
+      }
+    },
+    "alternative": {
+      "type": "object",
+      "required": ["option", "rejected_because"],
+      "properties": {"option": {"type": "string"}, "rejected_because": {"type": "string"}}
+    },
+    "decision": {
+      "type": "object",
+      "required": ["outcome", "incident", "rule_or_plan", "evidence", "alternatives", "rationale", "would_change_if"],
+      "properties": {
+        "outcome": {"enum": ["act", "hold", "notify", "dismiss"]},
+        "incident": {"type": "object"},
+        "rule_or_plan": {"type": "string"},
+        "evidence": {"type": "array", "items": {"$ref": "#/$defs/evidence"}},
+        "alternatives": {"type": "array", "items": {"$ref": "#/$defs/alternative"}},
+        "rationale": {"type": "string"},
+        "would_change_if": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "command": {
+      "type": "object",
+      "required": ["status", "capability", "target", "state", "tool", "risk_class", "shield", "twin_reply", "reasons", "expected"],
+      "properties": {
+        "status": {"enum": ["PROPOSED", "REFUSED", "AWAITING_TRUST", "AWAITING_APPROVAL", "BLOCKED", "DISPATCHED", "REJECTED", "UNKNOWN", "VERIFYING", "VERIFIED", "UNVERIFIED", "SUPERSEDED"]},
+        "capability": {"type": "string"},
+        "target": {"type": "string"},
+        "state": {"type": "string"},
+        "tool": {"type": ["object", "null"]},
+        "risk_class": {"enum": ["R0", "R1", "R2", "R3"]},
+        "shield": {
+          "type": "object",
+          "required": ["passed", "refusals", "checks"],
+          "properties": {
+            "passed": {"type": "boolean"},
+            "refusals": {"type": "array", "items": {"type": "string"}},
+            "checks": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["name", "passed", "code"],
+                "properties": {"name": {"type": "string"}, "passed": {"type": "boolean"}, "code": {"type": ["string", "null"]}}
+              }
+            }
+          }
+        },
+        "twin_reply": {"type": ["object", "null"]},
+        "reasons": {"type": "array", "items": {"type": "string"}},
+        "expected": {"$ref": "#/$defs/expected"},
+        "evidence": {"type": "array", "items": {"$ref": "#/$defs/evidence"}}
+      }
+    },
+    "verification": {
+      "type": "object",
+      "required": ["expected", "observed", "verdict"],
+      "properties": {
+        "expected": {"$ref": "#/$defs/expected"},
+        "observed": {"type": "object"},
+        "verdict": {"enum": ["verified", "unverified", "inconclusive"]}
+      }
+    },
+    "alert": {
+      "type": "object",
+      "required": ["audience", "severity", "code", "message", "refs"],
+      "properties": {
+        "audience": {"enum": ["operator", "guardian"]},
+        "severity": {"type": "string"},
+        "code": {"type": "string"},
+        "message": {"type": "string"},
+        "refs": {"type": "object"}
+      }
+    },
+    "status": {
+      "type": "object",
+      "required": ["reason"],
+      "properties": {"reason": {"type": "string"}}
+    },
+    "correlation": {
+      "type": "object",
+      "required": ["source_id", "target_id", "label", "reason"],
+      "properties": {
+        "source_id": {"type": "string"},
+        "target_id": {"type": "string"},
+        "label": {"enum": ["CONFIRMED", "PROBABLE", "HYPOTHETICAL"]},
+        "reason": {"type": "string"}
+      }
+    },
+    "incident": {
+      "type": "object",
+      "required": ["incident_id", "zone_id", "kind", "belief", "severity", "status", "findings",
+                   "correlations", "opened_at", "updated_at"],
+      "properties": {
+        "incident_id": {"type": "string"},
+        "zone_id": {"type": "string"},
+        "kind": {"enum": ["FLOOD_RISK", "CONGESTION", "GRID_STRESS", "AIR_QUALITY", "CALL_SURGE"]},
+        "belief": {"type": "number", "minimum": 0, "maximum": 1},
+        "severity": {"enum": ["low", "medium", "high", "critical"]},
+        "status": {"enum": ["suspected", "confirmed", "mitigating", "resolved", "dismissed"]},
+        "findings": {"type": "array", "items": {"type": "string"}},
+        "correlations": {"type": "array", "items": {"$ref": "#/$defs/correlation"}},
+        "opened_at": {"$ref": "#/$defs/timestamp"},
+        "updated_at": {"$ref": "#/$defs/timestamp"}
+      }
+    }
+  }
+}

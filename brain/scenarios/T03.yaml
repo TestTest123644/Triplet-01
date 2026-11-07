@@ -1,0 +1,10 @@
+# T03: a fake flood. One tank's readings are multiplied, the Guardian calls them untrusted,
+# and the Brain must not open that valve while it keeps controlling the honest tank.
+duration_s: 180
+guardian_policy: {kind: untrusted, device: z2-wl2}
+inject:
+  - {at_s: 20, capability: device_physical, target: z2-wl2, params: {}}
+expect:
+  spoofed: z2-wl2
+  honest: z2-wl1
+  hold_reasons: [UNTRUSTED_READINGS, IMPLAUSIBLE_JUMP]

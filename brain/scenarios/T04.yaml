@@ -1,0 +1,10 @@
+# T04: a stolen device key on a feeder. The readings are signed but wrong; the Guardian
+# doubts them for RATE_OF_CHANGE, so the Brain must not switch the grid on that evidence.
+duration_s: 180
+guardian_policy: {kind: doubtful, device: z3-pl1, reasons: [RATE_OF_CHANGE]}
+inject:
+  - {at_s: 20, capability: device_key, target: z3-pl1, params: {}}
+expect:
+  device: z3-pl1
+  quiet_capabilities: [grid]
+  belief_below: 0.3

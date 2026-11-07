@@ -1,0 +1,11 @@
+# T08: a stuck sensor. The value never moves and sits outside the tank's range, so the
+# channel is flagged and held rather than acted on.
+duration_s: 180
+guardian_policy: trust_all
+inject:
+  - {at_s: 10, capability: sensor_fault, target: z5-wl1, params: {fault_mode: stuck, stuck_value: 42.0}}
+expect:
+  device: z5-wl1
+  reject_code: null
+  hold_reasons: [STALE, STUCK]
+  stuck_value: 42.0

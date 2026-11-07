@@ -1,0 +1,88 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "TwinSensorReading",
+  "type": "object",
+  "properties": {
+    "reading_id": {
+      "type": "string",
+      "description": "Unique identifier for the reading (e.g. 'r-z1-tc1-1')"
+    },
+    "device_id": {
+      "type": "string",
+      "description": "Unique device identifier (e.g. 'z1-tc1')"
+    },
+    "device_type": {
+      "type": "string",
+      "enum": [
+        "traffic_camera",
+        "water_level",
+        "power_load",
+        "air_quality",
+        "emergency_call"
+      ]
+    },
+    "ts": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Simulation time in RFC 3339 UTC format ending with 'Z'"
+    },
+    "seq": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Strictly monotonic sequence counter per device"
+    },
+    "value": {
+      "type": "number",
+      "description": "Physical sensor reading measurement"
+    },
+    "unit": {
+      "type": "string",
+      "description": "Measurement unit (veh/min, meters, MW, AQI, call/min)"
+    },
+    "location": {
+      "oneOf": [
+        {
+          "type": "string",
+          "description": "Zone identifier string (e.g. 'zone-1')"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "zone_id": { "type": "string" },
+            "lat": { "type": "number" },
+            "lon": { "type": "number" }
+          },
+          "required": ["zone_id"],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "ok",
+        "isolated",
+        "quarantined",
+        "rolled_back",
+        "modelled"
+      ]
+    },
+    "sig": {
+      "type": "string",
+      "description": "Base64-encoded Ed25519 digital signature"
+    }
+  },
+  "required": [
+    "reading_id",
+    "device_id",
+    "device_type",
+    "ts",
+    "seq",
+    "value",
+    "unit",
+    "location",
+    "status",
+    "sig"
+  ],
+  "additionalProperties": false
+}

@@ -1,0 +1,11 @@
+# T02: a channel rises past the high band with nothing attacking it, then drains back into band.
+# T02 and T05 drive the Tier T0 bang-bang planner, which is still the fallback the
+# spec requires (10.3); T01 is the model-based planner's run.
+planner: t0
+duration_s: 360
+guardian_policy: trust_all
+inject: []
+expect:
+  valve: z1-wl1
+  level_limit: 6.05
+  verdict: verified

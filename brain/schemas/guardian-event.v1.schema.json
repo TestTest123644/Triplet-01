@@ -1,0 +1,40 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "GuardianEventV1",
+  "type": "object",
+  "oneOf": [
+    {
+      "properties": {
+        "kind": { "const": "heartbeat" },
+        "evaluated_through": { "type": "string", "format": "date-time" },
+        "issued_at": { "type": "string", "format": "date-time" },
+        "sig": { "type": "string" }
+      },
+      "required": ["kind", "evaluated_through", "issued_at"],
+      "additionalProperties": false
+    },
+    {
+      "properties": {
+        "kind": { "const": "containment" },
+        "device_id": { "type": "string" },
+        "action": { "enum": ["isolated", "quarantined", "released", "rolled_back"] },
+        "effective_at": { "type": "string", "format": "date-time" },
+        "reasons": { "type": "array", "items": { "type": "string", "pattern": "^[A-Z_]+$" } },
+        "issued_at": { "type": "string", "format": "date-time" },
+        "sig": { "type": "string" }
+      },
+      "required": ["kind", "device_id", "action", "effective_at", "reasons", "issued_at"],
+      "additionalProperties": false
+    },
+    {
+      "properties": {
+        "kind": { "const": "verdict_revoked" },
+        "verdict_id": { "type": "string" },
+        "issued_at": { "type": "string", "format": "date-time" },
+        "sig": { "type": "string" }
+      },
+      "required": ["kind", "verdict_id", "issued_at"],
+      "additionalProperties": false
+    }
+  ]
+}

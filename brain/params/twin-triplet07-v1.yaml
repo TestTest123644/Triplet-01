@@ -1,0 +1,32 @@
+filter:
+  sample_period_s: 0.1
+  r0: 2.5e-5
+  q_level: 1.0e-8
+  q_inflow: 1.0e-8
+  b_prior: 0.045
+  jump_sigma: 6.0
+  stuck_ticks: 30
+  stale_s: 2.0
+  b_min: 0.015              # bounds on the learned valve gain (spec 8.4)
+  b_max: 0.090
+  inflow_tau_s: 30.0        # smoothing on the inflow the planner builds a plan from
+  rls_forgetting: 0.98
+  rls_p0: 2.0e-2            # the steady state for a fully open valve: adapts in tens of steps
+lag_filter:                 # non-water channels: first-order lag plus drift (spec 8.2)
+  defaults:
+    sample_period_s: 0.1
+    r0: 1.5
+    q_level: 1.0e-4
+    q_drift: 1.0e-8
+    jump_sigma: 6.0
+    slew_limit: 30.0
+    stuck_ticks: 30
+    stale_s: 2.0
+    baseline_window_s: 300.0
+    baseline_z_max: 4.0       # a measurement beyond this is an anomaly, not a new normal
+    baseline_shift_s: 300.0   # unless it lasts this long
+  by_kind:
+    TRAFFIC_FLOW: {r0: 1.5, slew_limit: 30.0}
+    POWER_LOAD: {r0: 0.3, slew_limit: 12.0}
+    AIR_QUALITY: {r0: 0.2, slew_limit: 40.0}
+    CALL_RATE: {r0: 0.05, slew_limit: 6.0}

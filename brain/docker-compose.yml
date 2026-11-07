@@ -1,0 +1,129 @@
+# Three ways to run the Brain:
+#
+#   docker compose --profile standalone up    one scenario against our own mocks, then exit
+#   docker compose --profile mocks-kafka up   a broker, our mock Twin and Guardian, the Brain
+#   docker compose --profile triplet up       the real partners on the shared twin_network
+#
+# Only the last one needs anything outside this repository.
+
+name: city-brain
+
+services:
+  brain:
+    profiles: [triplet]
+    build: .
+    image: city-brain:latest
+    environment:
+      BRAIN__MODE: triplet
+      BRAIN__KAFKA__BOOTSTRAP: ${BRAIN_KAFKA_BOOTSTRAP:-kafka:9092}
+      BRAIN__TWIN__MCP_URL: ${BRAIN_TWIN_MCP:-http://twin_layer:8000/sse}
+      BRAIN__LOGS_DIR: /app/logs
+      BRAIN_OPERATOR_TOKEN: ${BRAIN_OPERATOR_TOKEN:?set BRAIN_OPERATOR_TOKEN}
+    command: ["python", "-m", "city_brain", "--config", "config/triplet.yaml",
+              "--journal", "/app/logs/brain.db"]
+    ports:
+      - "8100:8100"   # REST query and operator API
+      - "8110:8110"   # read-only MCP
+    volumes:
+      - brain-logs:/app/logs
+    networks: [twin_network]
+    restart: unless-stopped
+
+  timeline:
+    profiles: [triplet, mocks-kafka]
+    build: .
+    image: city-brain:latest
+    command: ["python", "-m", "timeline", "--logs", "/app/logs", "--host", "0.0.0.0",
+              "--brain-api", "http://brain:8100"]
+    ports:
+      - "8120:8120"
+    volumes:
+      - brain-logs:/app/logs
+    networks: [twin_network]
+    restart: unless-stopped
+
+  # ----- one scenario, no network at all -----
+
+  scenario:
+    profiles: [standalone]
+    build: .
+    image: city-brain:latest
+    environment:
+      BRAIN__LOGS_DIR: /app/logs
+    command: ["python", "-m", "city_brain", "--config", "config/standalone.yaml",
+              "--scenario", "${SCENARIO:-T02}"]
+    volumes:
+      - brain-logs:/app/logs
+
+  # ----- our own partners, over a real broker -----
+
+  kafka:
+    profiles: [mocks-kafka]
+    image: apache/kafka:3.8.0
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    networks: [twin_network]
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --list"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  mock-twin:
+    profiles: [mocks-kafka]
+    build: .
+    image: city-brain:latest
+    command: ["python", "-m", "mocks.twin.publisher", "--bootstrap", "kafka:9092",
+              "--host", "0.0.0.0", "--port", "8000",
+              "--guardian-key-out", "/app/logs/guardian-triplet07.pub"]
+    depends_on:
+      kafka:
+        condition: service_healthy
+    volumes:
+      - brain-logs:/app/logs
+    networks: [twin_network]
+
+  brain-mocks:
+    profiles: [mocks-kafka]
+    build: .
+    image: city-brain:latest
+    environment:
+      BRAIN__MODE: triplet
+      BRAIN__KAFKA__BOOTSTRAP: kafka:9092
+      BRAIN__TWIN__MCP_URL: http://mock-twin:8000/sse
+      BRAIN__LOGS_DIR: /app/logs
+      # The mock Guardian writes its public key here; the Brain refuses verdicts it cannot verify.
+      BRAIN__GUARDIAN__PUBLIC_KEY_FILE: /app/logs/guardian-triplet07.pub
+      BRAIN_OPERATOR_TOKEN: ${BRAIN_OPERATOR_TOKEN:-change-me}
+    command: ["python", "-m", "city_brain", "--config", "config/triplet.yaml",
+              "--journal", "/app/logs/brain.db"]
+    depends_on:
+      kafka:
+        condition: service_healthy
+      mock-twin:
+        condition: service_started
+    ports:
+      - "8100:8100"
+      - "8110:8110"
+    volumes:
+      - brain-logs:/app/logs
+    networks: [twin_network]
+
+volumes:
+  brain-logs:
+
+networks:
+  # The triplet's shared network. `external: true` for the real run; the mock profile
+  # creates it if it is not already there.
+  twin_network:
+    name: ${TWIN_NETWORK:-twin_network}

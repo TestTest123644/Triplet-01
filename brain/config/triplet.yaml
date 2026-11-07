@@ -1,0 +1,18 @@
+mode: triplet
+logs_dir: ../../logs
+policy_file: ../policy/default.yaml
+params_file: ../params/twin-triplet07-v1.yaml
+kafka:
+  bootstrap: kafka:9092
+  group: city-brain
+  topics:
+    readings: twin.sensors
+    verdicts: guardian.verdicts
+    events: guardian.events
+twin:
+  profile: twin-triplet07
+  mcp_url: http://twin_layer:8000/sse
+  call_timeout_s: 2
+guardian:
+  profile: guardian-triplet07
+  public_key_file: keys/guardian-triplet07.pub
