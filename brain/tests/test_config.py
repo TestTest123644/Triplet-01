@@ -30,3 +30,26 @@ def test_triplet_yaml_parses_with_spec_values():
     assert cfg.twin.mcp_url == "http://twin_layer:8000/sse"
     assert cfg.twin.call_timeout_s == 2
     assert cfg.policy["trust"]["pending_weight"] == 0.5
+
+
+def test_kafka_sasl_config_from_standard_env(tmp_path):
+    pwd_file = tmp_path / "kafka_secret.txt"
+    pwd_file.write_text("hex16passwordval\n")
+    env = {
+        "KAFKA_SECURITY_PROTOCOL": "SASL_PLAINTEXT",
+        "KAFKA_SASL_MECHANISM": "PLAIN",
+        "KAFKA_USERNAME": "broadcast",
+        "KAFKA_PASSWORD_FILE": str(pwd_file),
+        "KAFKA_ACKS": "1",
+    }
+    cfg = load_config("config/triplet.yaml", env=env)
+    assert cfg.kafka.security_protocol == "SASL_PLAINTEXT"
+    assert cfg.kafka.sasl_mechanism == "PLAIN"
+    assert cfg.kafka.sasl_username == "broadcast"
+    assert cfg.kafka.acks == "1"
+
+    client_sec = cfg.kafka.client_security_config()
+    assert client_sec["security.protocol"] == "SASL_PLAINTEXT"
+    assert client_sec["sasl.mechanism"] == "PLAIN"
+    assert client_sec["sasl.username"] == "broadcast"
+    assert client_sec["sasl.password"] == "hex16passwordval"

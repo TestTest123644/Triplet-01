@@ -128,9 +128,11 @@ def build_triplet_runtime(
         config.twin.mcp_url, timeout_s=config.twin.call_timeout_s)
     topics = dict(config.kafka.topics) or {
         "readings": "twin.sensors", "verdicts": "guardian.verdicts", "events": "guardian.events"}
+    security_cfg = config.kafka.client_security_config()
     source = source if source is not None else KafkaSource(
-        config.kafka.bootstrap, config.kafka.group, topics)
-    sink = sink if sink is not None else KafkaSink(config.kafka.bootstrap)
+        config.kafka.bootstrap, config.kafka.group, topics, security_config=security_cfg)
+    sink = sink if sink is not None else KafkaSink(
+        config.kafka.bootstrap, security_config=security_cfg, acks=config.kafka.acks)
     timers: asyncio.Queue = asyncio.Queue()
     journal = SqliteJournal(journal_path) if journal_path is not None else None
     app = BrainApp(

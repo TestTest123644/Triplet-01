@@ -18,6 +18,42 @@ class KafkaConfig(_Strict):
     bootstrap: str = ""
     group: str = "city-brain"
     topics: dict[str, str] = Field(default_factory=dict)
+    security_protocol: str = "PLAINTEXT"
+    sasl_mechanism: str = "PLAIN"
+    sasl_username: str | None = None
+    sasl_password: str | None = None
+    sasl_password_file: str | None = None
+    ssl_ca_location: str | None = None
+    acks: int | str = "all"
+
+    def client_security_config(self) -> dict[str, Any]:
+        """Build confluent-kafka client security configuration dictionary."""
+        protocol = (self.security_protocol or "PLAINTEXT").upper()
+        if protocol == "PLAINTEXT":
+            return {"security.protocol": "PLAINTEXT"}
+
+        cfg: dict[str, Any] = {
+            "security.protocol": protocol,
+            "sasl.mechanism": (self.sasl_mechanism or "PLAIN").upper(),
+        }
+        if self.sasl_username:
+            cfg["sasl.username"] = self.sasl_username
+
+        password = self.sasl_password
+        if not password and self.sasl_password_file:
+            p = Path(self.sasl_password_file)
+            if p.is_file():
+                password = p.read_text(encoding="utf-8").strip()
+        elif password and Path(password).is_file():
+            password = Path(password).read_text(encoding="utf-8").strip()
+
+        if password:
+            cfg["sasl.password"] = password
+
+        if protocol == "SASL_SSL" and self.ssl_ca_location:
+            cfg["ssl.ca.location"] = self.ssl_ca_location
+
+        return cfg
 
 
 class TwinConfig(_Strict):
@@ -63,6 +99,24 @@ def _read_yaml(path: Path) -> dict:
     return data
 
 
+def _apply_standard_kafka_env(data: dict, env: Mapping[str, str]) -> None:
+    """Map standard KAFKA_* environment variables into data['kafka'] if not already set."""
+    kafka = data.setdefault("kafka", {})
+    mapping = {
+        "KAFKA_BOOTSTRAP_SERVERS": "bootstrap",
+        "KAFKA_SECURITY_PROTOCOL": "security_protocol",
+        "KAFKA_SASL_MECHANISM": "sasl_mechanism",
+        "KAFKA_USERNAME": "sasl_username",
+        "KAFKA_PASSWORD": "sasl_password",
+        "KAFKA_PASSWORD_FILE": "sasl_password_file",
+        "KAFKA_SSL_CA_LOCATION": "ssl_ca_location",
+        "KAFKA_ACKS": "acks",
+    }
+    for env_key, conf_key in mapping.items():
+        if conf_key not in kafka and env_key in env:
+            kafka[conf_key] = env[env_key]
+
+
 def _apply_env(data: dict, env: Mapping[str, str]) -> None:
     for key, value in env.items():
         if not key.startswith(ENV_PREFIX):
@@ -100,7 +154,11 @@ def load_config_from_dict(data: dict, base_dir: str | Path | None = None) -> Bra
 
 
 def load_config(path: str | Path, env: Mapping[str, str] | None = None) -> BrainConfig:
+    import os
+
     path = Path(path)
     data = _read_yaml(path)
-    _apply_env(data, env if env is not None else {})
+    env_map = dict(os.environ) if env is None else dict(env)
+    _apply_env(data, env_map)
+    _apply_standard_kafka_env(data, env_map)
     return load_config_from_dict(data, base_dir=path.resolve().parent)
