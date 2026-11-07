@@ -301,6 +301,7 @@ async def test_the_outbox_is_emptied_by_an_ordinary_dispatch(tmp_path):
     await rig.app.feed(ReadingReceived(make_observation(
         device_id="z1-wl1", seq=10_000, sim_time=T0, reading_id="r-x", sig_hash="s-x")))
     assert all(not isinstance(e, SendCommand) for _, e in rig.journal.pending_outbox())
+    assert rig.journal.pending_outbox() == []
 
 
 async def test_a_brain_without_a_journal_still_runs(tmp_path):

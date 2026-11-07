@@ -226,8 +226,10 @@ def _remember_evidence(state: BrainState, obs: Observation) -> None:
     """
     depth = int(state.policy["water"]["evidence_count"])
     trust = state.policy["trust"]
+    implicit = bool(trust.get("implicit_ok", False))
     verdict = state.ledger.lookup(obs.reading_id, obs.sig_hash, state.sim_now)
-    ref = evidence_ref(obs, verdict, trust_weight(verdict, obs.device_status, trust["caps"]))
+    weight = trust_weight(verdict, obs.device_status, trust["caps"], implicit_ok=implicit)
+    ref = evidence_ref(obs, verdict, weight, implicit_ok=implicit)
     state.recent.setdefault(obs.device_id, deque(maxlen=depth)).append(ref)
     if ref.weight > 0.0:  # the verdict was already here when the reading arrived
         _keep_trusted(state, obs.device_id, ref)

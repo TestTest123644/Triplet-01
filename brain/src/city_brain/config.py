@@ -60,12 +60,24 @@ class TwinConfig(_Strict):
     profile: str = "twin-triplet07-v1"
     mcp_url: str = ""
     call_timeout_s: float = 2.0
+    auth_token: str | None = None
+    auth_token_file: str | None = None
+
+    def resolve_auth_token(self) -> str | None:
+        if self.auth_token:
+            return self.auth_token
+        if self.auth_token_file:
+            p = Path(self.auth_token_file)
+            if p.is_file():
+                return p.read_text(encoding="utf-8").strip()
+        return None
 
 
 class GuardianConfig(_Strict):
     profile: str = "guardian-v1"
     public_key_file: str | None = None
     verdict_wait_s: float = 2.0
+    optional: bool = False
 
 
 class BrainConfig(_Strict):
@@ -100,7 +112,7 @@ def _read_yaml(path: Path) -> dict:
 
 
 def _apply_standard_kafka_env(data: dict, env: Mapping[str, str]) -> None:
-    """Map standard KAFKA_* environment variables into data['kafka'] if not already set."""
+    """Map standard KAFKA_* and MCP_* environment variables into config."""
     kafka = data.setdefault("kafka", {})
     mapping = {
         "KAFKA_BOOTSTRAP_SERVERS": "bootstrap",
@@ -113,8 +125,32 @@ def _apply_standard_kafka_env(data: dict, env: Mapping[str, str]) -> None:
         "KAFKA_ACKS": "acks",
     }
     for env_key, conf_key in mapping.items():
-        if conf_key not in kafka and env_key in env:
+        if env_key in env:
             kafka[conf_key] = env[env_key]
+
+    twin = data.setdefault("twin", {})
+    if "auth_token" not in twin:
+        if "MCP_AUTH_TOKEN" in env:
+            twin["auth_token"] = env["MCP_AUTH_TOKEN"]
+        elif "MCP_AUTH_TOKENS" in env:
+            # Parse 'brain:<tok>,guardian:<tok>'
+            for entry in env["MCP_AUTH_TOKENS"].split(","):
+                entry = entry.strip()
+                if ":" in entry:
+                    principal, token = entry.split(":", 1)
+                    if principal.strip().lower() == "brain":
+                        twin["auth_token"] = token.strip()
+                        break
+        elif "MCP_AUTH_TOKENS_FILE" in env:
+            p = Path(env["MCP_AUTH_TOKENS_FILE"])
+            if p.is_file():
+                for entry in p.read_text(encoding="utf-8").split(","):
+                    entry = entry.strip()
+                    if ":" in entry:
+                        principal, token = entry.split(":", 1)
+                        if principal.strip().lower() == "brain":
+                            twin["auth_token"] = token.strip()
+                            break
 
 
 def _apply_env(data: dict, env: Mapping[str, str]) -> None:
@@ -145,6 +181,13 @@ def load_config_from_dict(data: dict, base_dir: str | Path | None = None) -> Bra
         data["policy"] = _read_yaml(base / policy_file)
     if params_file is not None:
         data["params"] = _read_yaml(base / params_file)
+    guardian_opt = data.get("guardian", {}).get("optional", False)
+    if isinstance(guardian_opt, str):
+        guardian_opt = guardian_opt.lower() in ("true", "1", "yes")
+    if guardian_opt:
+        policy = data.setdefault("policy", {})
+        policy.setdefault("modes", {})["guardian_optional"] = True
+        policy.setdefault("trust", {})["implicit_ok"] = True
     if "logs_dir" in data:
         data["logs_dir"] = (base / str(data["logs_dir"])).resolve()
     try:

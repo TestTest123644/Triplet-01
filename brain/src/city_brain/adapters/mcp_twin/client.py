@@ -44,9 +44,10 @@ def _content_to_json(result: Any) -> Any:
 class McpTwinClient:
     """Holds one MCP session to the Twin, reconnecting when it has been lost."""
 
-    def __init__(self, sse_url: str, timeout_s: float = 2.0):
+    def __init__(self, sse_url: str, timeout_s: float = 2.0, auth_token: str | None = None):
         self._url = sse_url
         self._timeout = timeout_s
+        self._auth_token = auth_token
         self._lock = asyncio.Lock()
         self._stack: AsyncExitStack | None = None
         self._session: ClientSession | None = None
@@ -57,9 +58,10 @@ class McpTwinClient:
         if self._session is not None:
             return
         stack = AsyncExitStack()
+        headers = {"Authorization": f"Bearer {self._auth_token}"} if self._auth_token else None
         try:
             read, write = await asyncio.wait_for(
-                stack.enter_async_context(sse_client(self._url)), timeout=self._timeout)
+                stack.enter_async_context(sse_client(self._url, headers=headers)), timeout=self._timeout)
             session = await stack.enter_async_context(ClientSession(read, write))
             await asyncio.wait_for(session.initialize(), timeout=self._timeout)
         except BaseException:

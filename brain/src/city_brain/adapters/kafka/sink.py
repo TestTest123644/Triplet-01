@@ -6,9 +6,11 @@ record of what the Brain did, so a broker that is down must never stall the cont
 """
 
 import json
+import logging
 from collections.abc import Mapping
 from typing import Any
 
+logger = logging.getLogger("city_brain.kafka_sink")
 DEFAULT_TOPIC = "brain.events"
 
 
@@ -64,15 +66,23 @@ class KafkaSink:
 
             self._producer = Producer(self.config)
 
+    def _on_delivery(self, err: Any, msg: Any) -> None:
+        if err is not None:
+            logger.warning("Delivery failed for %s on topic %s: %s", msg.key(), msg.topic(), err)
+
     def publish(self, event: dict) -> bool:
         """Queue one record. A full or missing queue is counted, never raised at the core."""
         if self._producer is None:
             self.dropped += 1
             return False
+        key_bytes = str(event.get("subject", "city")).encode("utf-8")
+        val_bytes = canonical(event)
         try:
-            self._producer.produce(
-                self._topic, key=str(event.get("subject", "city")).encode("utf-8"),
-                value=canonical(event))
+            try:
+                self._producer.produce(
+                    self._topic, key=key_bytes, value=val_bytes, on_delivery=self._on_delivery)
+            except TypeError:
+                self._producer.produce(self._topic, key=key_bytes, value=val_bytes)
         except BufferError:  # the broker is behind: the run log still has it
             self.dropped += 1
             return False

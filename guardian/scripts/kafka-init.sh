@@ -90,6 +90,8 @@ create_topic telemetry-validated 6
 create_topic telemetry-dlq 3
 create_topic devices.metadata 3
 create_topic telemetry-anomaly 3
+create_topic brain.events 3
+create_topic twin.sensors 6
 
 echo "Applying topic configurations..."
 set_topic_config telemetry-ingest \
@@ -183,13 +185,25 @@ for topic in telemetry-ingest video-frames-ingest; do
 done
 
 echo "Granting brain read permissions..."
-for topic in telemetry-ingest video-frames-ingest; do
+for topic in telemetry-ingest video-frames-ingest twin.sensors telemetry-validated; do
   /opt/kafka/bin/kafka-acls.sh \
     --bootstrap-server "$BOOTSTRAP" \
     --command-config "$ADMIN_CONFIG" \
     --add \
     --allow-principal User:brain \
     --operation Read \
+    --operation Describe \
+    --topic "$topic"
+done
+
+echo "Granting brain write permissions..."
+for topic in brain.events; do
+  /opt/kafka/bin/kafka-acls.sh \
+    --bootstrap-server "$BOOTSTRAP" \
+    --command-config "$ADMIN_CONFIG" \
+    --add \
+    --allow-principal User:brain \
+    --operation Write \
     --operation Describe \
     --topic "$topic"
 done

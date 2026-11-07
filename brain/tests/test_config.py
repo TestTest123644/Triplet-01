@@ -23,13 +23,22 @@ def test_unknown_key_is_a_clear_error():
 def test_triplet_yaml_parses_with_spec_values():
     cfg = load_config("config/triplet.yaml")
     assert cfg.mode == "triplet"
-    assert cfg.kafka.group == "city-brain"
-    assert cfg.kafka.topics == {
-        "readings": "twin.sensors", "verdicts": "guardian.verdicts", "events": "guardian.events"}
+    assert cfg.kafka.group == "brain-processor"
+    assert cfg.kafka.topics["readings"] == "telemetry-ingest"
     assert cfg.twin.profile == "twin-triplet07" and cfg.guardian.profile == "guardian-triplet07"
     assert cfg.twin.mcp_url == "http://twin_layer:8000/sse"
     assert cfg.twin.call_timeout_s == 2
     assert cfg.policy["trust"]["pending_weight"] == 0.5
+    assert cfg.guardian.optional is True
+
+
+def test_mcp_auth_token_resolution():
+    env = {
+        "MCP_AUTH_TOKENS": "brain:secret-brain-tok,guardian:secret-guardian-tok",
+    }
+    cfg = load_config("config/triplet.yaml", env=env)
+    assert cfg.twin.auth_token == "secret-brain-tok"
+    assert cfg.twin.resolve_auth_token() == "secret-brain-tok"
 
 
 def test_kafka_sasl_config_from_standard_env(tmp_path):

@@ -99,10 +99,17 @@ def in_outage(sim_time: datetime, windows: Sequence[tuple[datetime, datetime | N
     return any(start <= sim_time and (end is None or sim_time <= end) for start, end in windows)
 
 
-def trust_weight(verdict: Verdict | None, device_status: DeviceStatus, caps: Mapping[str, float]) -> float:
+def trust_weight(
+    verdict: Verdict | None,
+    device_status: DeviceStatus,
+    caps: Mapping[str, float],
+    implicit_ok: bool = False,
+) -> float:
     """Weight recorded on evidence: zero without a verdict or for a contained device."""
-    if device_status is not DeviceStatus.OK or verdict is None:
+    if device_status is not DeviceStatus.OK:
         return 0.0
+    if verdict is None:
+        return 1.0 if implicit_ok else 0.0
     trust = verdict.trust if verdict.trust is not None else 1.0
     return min(trust, caps[verdict.state.value])
 
@@ -112,22 +119,43 @@ def estimate_weight(
     device_status: DeviceStatus,
     caps: Mapping[str, float],
     pending_weight: float,
+    implicit_ok: bool = False,
 ) -> float:
     """Weight the filter uses: a reading awaiting its verdict is OBSERVED, not UNKNOWN."""
     if device_status is not DeviceStatus.OK:
         return 0.0
     if verdict is None:
-        return pending_weight
-    return trust_weight(verdict, device_status, caps)
+        return 1.0 if implicit_ok else pending_weight
+    return trust_weight(verdict, device_status, caps, implicit_ok=implicit_ok)
 
 
-def evidence_ref(obs: Observation | EvidenceRef, verdict: Verdict | None, weight: float) -> EvidenceRef:
+def evidence_ref(
+    obs: Observation | EvidenceRef,
+    verdict: Verdict | None,
+    weight: float,
+    implicit_ok: bool = False,
+) -> EvidenceRef:
     if verdict is None:
-        kind = StateKind.OBSERVED
+        if implicit_ok and obs.device_status is DeviceStatus.OK:
+            kind = StateKind.VALIDATED
+            v_id = f"v-implicit-{obs.reading_id}"
+            t_state = TrustState.TRUSTED
+            w = 1.0 if weight == 0.0 else weight
+        else:
+            kind = StateKind.OBSERVED
+            v_id = None
+            t_state = TrustState.UNKNOWN
+            w = weight
     elif weight > 0 and verdict.state in (TrustState.TRUSTED, TrustState.DOUBTFUL):
         kind = StateKind.VALIDATED
+        v_id = verdict.verdict_id
+        t_state = verdict.state
+        w = weight
     else:
         kind = StateKind.UNKNOWN
+        v_id = verdict.verdict_id
+        t_state = verdict.state
+        w = weight
     return EvidenceRef(
         reading_id=obs.reading_id,
         sig_hash=obs.sig_hash,
@@ -135,9 +163,9 @@ def evidence_ref(obs: Observation | EvidenceRef, verdict: Verdict | None, weight
         value=obs.value,
         sim_time=obs.sim_time,
         state_kind=kind,
-        verdict_id=verdict.verdict_id if verdict is not None else None,
-        trust_state=verdict.state if verdict is not None else TrustState.UNKNOWN,
-        weight=weight,
+        verdict_id=v_id,
+        trust_state=t_state,
+        weight=w,
         device_status=obs.device_status,
     )
 
