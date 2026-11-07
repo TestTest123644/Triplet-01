@@ -7,7 +7,7 @@ Simulates the complete presentation walkthrough:
    - Preset 1: Physical Hardware Spoofing (z1-tc1)
    - Preset 2: Compromised Key Forgery (z3-pl1)
    - Preset 3: Link Layer Signature Corruption (z2-wl1)
-   - Preset 4: Rogue Unauthorized Transmitter (rogue-x9)
+   - Preset 4: Rogue Unauthorized Transmitter (rg-x9)
    - Preset 5: Continuous Sensor Drift Fault (z5-aq1)
    - Preset 6: Actuator Command Disobedience (z1-wl1)
 4. Mock Guardian zero-trust detection & containment.
@@ -56,8 +56,16 @@ def presentation_fixture():
         sim = CitySimulator(seed=2026, ledger=ledger)
         set_active_simulator(sim)
         streamer = KafkaStreamer(mock_mode=True)
-        guardian = MockGuardian()
-        brain = MockCityBrain()
+
+        def _call_tool(tool_name: str, args: dict):
+            import twin.mcp_server as srv
+            fn = getattr(srv, tool_name, None)
+            if fn:
+                return fn(**args)
+            raise ValueError(f"Unknown tool: {tool_name}")
+
+        guardian = MockGuardian(call_tool_fn=_call_tool)
+        brain = MockCityBrain(call_tool_fn=_call_tool)
         yield {
             "tmpdir": tmpdir,
             "db_path": db_path,
@@ -144,7 +152,7 @@ def test_full_presentation_walkthrough(presentation_fixture):
     p3_id = sim.inject_attack(
         capability="link",
         target_device_id="z2-wl1",
-        params={"link_mode": "corrupt_bytes"},
+        params={"link_mode": "corrupt_sig"},
         description="Demo: Link Layer Signature Corruption on Harbor Water Sensor",
     )
     p3_readings = sim.tick()
@@ -153,22 +161,23 @@ def test_full_presentation_walkthrough(presentation_fixture):
     p3_dev = sim.devices["z2-wl1"]
     _, p3_bytes = streamer.stream_reading(p3_raw, p3_dev.private_key)
 
-    # Guardian intercepts broken signature and quarantines
-    p3_res = guardian.process_reading(p3_bytes)
+    # Guardian intercepts broken signature and quarantines after 3 failures
+    for _ in range(3):
+        p3_res = guardian.process_reading(p3_bytes)
     assert p3_res["action"] == "signature_verification_failed"
     assert "z2-wl1" in guardian.quarantined_devices
     assert sim.devices["z2-wl1"].status == "quarantined"
 
     # -------------------------------------------------------------------------
-    # STEP 5: Execute Preset 4 - Rogue Unauthorized Transmitter (rogue-x9)
+    # STEP 5: Execute Preset 4 - Rogue Unauthorized Transmitter (rg-x9)
     # -------------------------------------------------------------------------
     p4_id = sim.inject_attack(
         capability="rogue",
-        params={"rogue_device_id": "rogue-x9", "value": 888.0, "zone_id": "zone-4"},
+        params={"rogue_device_id": "rg-x9", "value": 888.0, "zone_id": "zone-4"},
         description="Demo: Rogue transmitter in West Residential Hills",
     )
     p4_readings = sim.tick()
-    p4_raw = next(r for r in p4_readings if r["device_id"] == "rogue-x9")
+    p4_raw = next(r for r in p4_readings if r["device_id"] == "rg-x9")
     assert p4_raw["value"] == 888.0
 
     from twin.crypto_utils import generate_keypair
@@ -177,7 +186,7 @@ def test_full_presentation_walkthrough(presentation_fixture):
 
     p4_res = guardian.process_reading(p4_bytes)
     assert p4_res["action"] == "rogue_device_detected"
-    assert "rogue-x9" in guardian.quarantined_devices
+    assert "rg-x9" in guardian.quarantined_devices
 
     # -------------------------------------------------------------------------
     # STEP 6: Execute Preset 5 - Sensor Drift Fault (z5-aq1)
@@ -200,7 +209,6 @@ def test_full_presentation_walkthrough(presentation_fixture):
     p6_id = sim.inject_attack(
         capability="actuator",
         target_device_id="z1-wl1",
-        target_zone_id="zone-1",
         params={"suppress_actuation": True},
         description="Demo: Actuator silent command suppression on flood valve",
     )
@@ -212,6 +220,22 @@ def test_full_presentation_walkthrough(presentation_fixture):
     # -------------------------------------------------------------------------
     # STEP 8: Mock City Brain Autonomous Threshold Actuation
     # -------------------------------------------------------------------------
+    brain.evaluate_reading({
+        "reading_id": "r-z2-tc1-hist",
+        "device_id": "z2-tc1",
+        "device_type": "traffic_camera",
+        "value": 100.0,
+        "location": "zone-2",
+        "status": "ok",
+    })
+    brain.evaluate_reading({
+        "reading_id": "r-z2-tc1-drop",
+        "device_id": "z2-tc1",
+        "device_type": "traffic_camera",
+        "value": 10.0,
+        "location": "zone-2",
+        "status": "ok",
+    })
     surge_telemetry = {
         "reading_id": "r-surge-02",
         "device_id": "z2-ec1",

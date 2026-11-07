@@ -1,6 +1,6 @@
 services:
   kafka:
-    image: apache/kafka:latest
+    image: apache/kafka:4.3.1
     container_name: kafka
     ports:
       - "19092:19092"
@@ -19,7 +19,7 @@ services:
       KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
       KAFKA_NUM_PARTITIONS: 3
     networks:
-      - twin_network
+      - city_network
     healthcheck:
       test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 || exit 1"]
       interval: 10s
@@ -27,9 +27,10 @@ services:
       retries: 5
       start_period: 15s
 
+  # Layer 1: Digital Twin Simulation & MCP Command Server
   twin_layer:
     build:
-      context: .
+      context: ./twin
       dockerfile: Dockerfile
     container_name: twin_layer
     depends_on:
@@ -40,20 +41,30 @@ services:
       KAFKA_TOPIC: "twin.sensors"
       MCP_HOST: "0.0.0.0"
       MCP_PORT: "8000"
+      MCP_AUTH_TOKENS: "${MCP_AUTH_TOKENS:-}"
+      MCP_AUTH_TOKENS_FILE: "${MCP_AUTH_TOKENS_FILE:-}"
+      RED_TEAM_HOST: "0.0.0.0"
+      RED_TEAM_PORT: "8100"
       WAIT_FOR_KAFKA: "true"
       SIM_SEED: "42"
+      SIM_SPEED: "${SIM_SPEED:-1}"
       GROUND_TRUTH_DB_PATH: "/app/data/ground_truth.db"
+      RED_TEAM_TOKEN_FILE: "/app/data/red_team.token"
+      KEYSTORE_PATH: "/app/keys/device_keys.json"
     volumes:
       - shared_data:/app/data
+      - twin_keys:/app/keys
     ports:
-      - "8000:8000"
+      - "8000:8000"  # MCP command server (JSON-RPC over HTTP/SSE)
+      - "8100:8100"  # Red-team adversary REST API
     networks:
-      - twin_network
+      - city_network
     restart: unless-stopped
 
+  # Layer 1 Operations Console
   dashboard:
     build:
-      context: .
+      context: ./twin
       dockerfile: Dockerfile
     container_name: twin_dashboard
     command: streamlit run dashboard.py --server.port 8501 --server.address 0.0.0.0
@@ -61,19 +72,60 @@ services:
       - twin_layer
     environment:
       GROUND_TRUTH_DB_PATH: "/app/data/ground_truth.db"
-      TWIN_API_URL: "http://twin_layer:8000"
+      TWIN_API_URL: "http://twin_layer:8100"
+      MCP_URL: "http://twin_layer:8000"
+      RED_TEAM_TOKEN_FILE: "/app/data/red_team.token"
     ports:
-      - "8501:8501"
+      - "8501:8501"  # Streamlit operations console
     volumes:
       - shared_data:/app/data
     networks:
-      - twin_network
+      - city_network
     restart: unless-stopped
 
+  # ============================================================================
+  # Partner Layer Placeholders (Layer 2: City Brain & Layer 3: Guardian)
+  # Uncomment and configure when integrating with partner repositories.
+  # ============================================================================
+  # brain:
+  #   build:
+  #     context: ./brain
+  #     dockerfile: Dockerfile
+  #   container_name: city_brain
+  #   depends_on:
+  #     kafka:
+  #       condition: service_healthy
+  #     twin_layer:
+  #       condition: service_started
+  #   environment:
+  #     KAFKA_BOOTSTRAP_SERVERS: "kafka:9092"
+  #     TWIN_MCP_URL: "http://twin_layer:8000/sse"
+  #   networks:
+  #     - city_network
+  #   restart: unless-stopped
+  #
+  # guardian:
+  #   build:
+  #     context: ./guardian
+  #     dockerfile: Dockerfile
+  #   container_name: guardian_security
+  #   depends_on:
+  #     kafka:
+  #       condition: service_healthy
+  #     twin_layer:
+  #       condition: service_started
+  #   environment:
+  #     KAFKA_BOOTSTRAP_SERVERS: "kafka:9092"
+  #     TWIN_MCP_URL: "http://twin_layer:8000/sse"
+  #   networks:
+  #     - city_network
+  #   restart: unless-stopped
+
 networks:
-  twin_network:
-    name: twin_network
+  city_network:
+    name: city_network
     driver: bridge
 
 volumes:
   shared_data:
+  twin_keys:

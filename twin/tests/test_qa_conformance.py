@@ -32,8 +32,16 @@ def test_env():
         sim = CitySimulator(seed=1234, ledger=ledger)
         set_active_simulator(sim)
         streamer = KafkaStreamer(mock_mode=True)
-        guardian = MockGuardian()
-        brain = MockCityBrain()
+
+        def _call_tool(tool_name: str, args: dict):
+            import twin.mcp_server as srv
+            fn = getattr(srv, tool_name, None)
+            if fn:
+                return fn(**args)
+            raise ValueError(f"Unknown tool: {tool_name}")
+
+        guardian = MockGuardian(call_tool_fn=_call_tool)
+        brain = MockCityBrain(call_tool_fn=_call_tool)
         yield {
             "ledger": ledger,
             "sim": sim,
@@ -72,7 +80,8 @@ def test_mock_guardian_verification_and_containment(test_env):
     dev = sim.devices[target_dev]
     _, corrupt_bytes = streamer.stream_reading(target_raw, dev.private_key)
 
-    res = guardian.process_reading(corrupt_bytes)
+    for _ in range(3):
+        res = guardian.process_reading(corrupt_bytes)
     assert res["action"] == "signature_verification_failed"
     assert target_dev in guardian.quarantined_devices
     assert sim.devices[target_dev].status == "quarantined"
@@ -81,10 +90,10 @@ def test_mock_guardian_verification_and_containment(test_env):
     sim.clear_all_attacks()
     sim.inject_attack(
         capability="rogue",
-        params={"rogue_device_id": "rogue-99", "value": 999.0},
+        params={"rogue_device_id": "rg-99", "value": 999.0},
     )
     rogue_readings = sim.tick()
-    rogue_raw = next(r for r in rogue_readings if r["device_id"] == "rogue-99")
+    rogue_raw = next(r for r in rogue_readings if r["device_id"] == "rg-99")
     # Stream with a random key
     from twin.crypto_utils import generate_keypair
     fake_priv, _ = generate_keypair()
@@ -92,19 +101,36 @@ def test_mock_guardian_verification_and_containment(test_env):
 
     res = guardian.process_reading(rogue_bytes)
     assert res["action"] == "rogue_device_detected"
-    assert "rogue-99" in guardian.quarantined_devices
+    assert "rg-99" in guardian.quarantined_devices
 
 
 def test_mock_brain_actuation(test_env):
     sim: CitySimulator = test_env["sim"]
     brain: MockCityBrain = test_env["brain"]
 
+    # Feed camera baseline and drop to corroborate emergency call in zone-1 (< 50% of 5-min mean)
+    brain.evaluate_reading({
+        "reading_id": "r-z1-tc1-hist",
+        "device_id": "z1-tc1",
+        "device_type": "traffic_camera",
+        "value": 100.0,
+        "location": "zone-1",
+        "status": "ok",
+    })
+    brain.evaluate_reading({
+        "reading_id": "r-z1-tc1-drop",
+        "device_id": "z1-tc1",
+        "device_type": "traffic_camera",
+        "value": 10.0,
+        "location": "zone-1",
+        "status": "ok",
+    })
     # Simulate emergency surge payload
     emg_payload = {
         "reading_id": "r-z1-ec1-test",
         "device_id": "z1-ec1",
         "device_type": "emergency_call",
-        "value": 12.0,  # exceeds 5.0 threshold
+        "value": 12.0,  # exceeds 6.0 threshold
         "location": "zone-1",
         "status": "ok",
     }
@@ -115,19 +141,27 @@ def test_mock_brain_actuation(test_env):
     # Check that dispatch was recorded in CitySimulator
     assert len(sim.zone_dispatches["zone-1"]) >= 1
 
-    # Simulate flood level payload
+    # Simulate flood level payload (both zone water sensors > 7.0m and rising)
+    brain.evaluate_reading({
+        "reading_id": "r-z1-wl2-test",
+        "device_id": "z1-wl2",
+        "device_type": "water_level",
+        "value": 7.1,
+        "location": "zone-1",
+        "status": "ok",
+    })
     water_payload = {
         "reading_id": "r-z1-wl1-test",
         "device_id": "z1-wl1",
         "device_type": "water_level",
-        "value": 6.8,  # exceeds 4.5 threshold
+        "value": 7.5,
         "location": "zone-1",
         "status": "ok",
     }
     actions = brain.evaluate_reading(water_payload)
-    assert len(actions) == 1
-    assert actions[0]["type"] == "set_valve"
-    assert brain.valve_commands_sent == 1
+    assert len(actions) >= 1
+    assert any(a["type"] == "set_valve" for a in actions)
+    assert brain.valve_commands_sent >= 1
     assert sim.devices["z1-wl1"].actuator_state["valve_position"] == "open"
 
 

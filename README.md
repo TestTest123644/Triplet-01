@@ -1,120 +1,66 @@
-# City Brain Convergence — Layer 1: Digital Twin & Physical World
+# City Brain Convergence — Triplet-07
 
-> **Layer 1 (Twin Layer)** simulates the physical environment, generates high-frequency cryptographic telemetry for 42 IoT devices across Greater Tunis, and provides a synchronous MCP interface for city actuation and incident containment.
+A 3-layer cyber-physical architecture for smart city simulation, autonomic decision-making, and cryptographic security monitoring in Greater Tunis.
 
 ---
 
-## 1. Quickstart (One-Command Deployment)
+## 1. Triplet Architecture
 
-To start the complete Twin Layer ecosystem (Apache Kafka broker, Twin simulation engine, MCP Command Server, and 3D Operations Console):
+### Layer 1: Digital Twin & Physical World
+Simulates the physical city environment and generates live telemetry across 42 IoT sensors in 6 zones at 10 Hz (420 messages per second). Each message is signed with a per-device Ed25519 key and broadcast to Apache Kafka on topic `twin.sensors`. The Twin also runs an MCP server on port 8000 to execute physical actuation and containment commands while keeping true physical states isolated in a local SQLite ledger.
 
-```bash
-docker compose up -d
-```
+### Layer 2: City Brain
+Consumes live Kafka telemetry to assess municipal operational state across traffic, drainage, electrical grid, and public safety subsystems. When anomalies or capacity spikes occur, the Brain sends actuation commands through MCP to deploy emergency units, adjust traffic signal plans, open drainage valves, or reroute power feeders.
 
-### Endpoints at a Glance
+### Layer 3: Guardian
+Monitors Kafka telemetry in parallel with the City Brain to protect municipal infrastructure from cyber-physical attacks. The Guardian verifies Ed25519 payload signatures using public keys queried from the Twin via MCP. When spoofing, replay attacks, or data corruption are detected, it issues containment commands to isolate or quarantine compromised devices and roll back bad telemetry.
 
-| Service | Port (Host) | Internal Docker Address | Protocol / Purpose |
+---
+
+## 2. Team Members
+
+| Layer | Team | Members | Primary Contact |
 | :--- | :--- | :--- | :--- |
-| **Apache Kafka** | `19092` | `kafka:9092` | Kafka Wire Protocol (Topic: `twin.sensors`, 420 msgs/s) |
-| **MCP Server** | `8000` | `http://twin_layer:8000/sse` | Model Context Protocol JSON-RPC (Actuation & Queries) |
-| **Adversarial Console**| `8501` | `http://twin_dashboard:8501`| Streamlit 3D Tactical Ops Dashboard |
+| **Layer 1: Digital Twin** | Triplet-07 Twin Team | *[Placeholder - Twin Team]* | *[Contact]* |
+| **Layer 2: City Brain** | Triplet-07 Brain Team | *[Placeholder - Brain Team]* | *[Contact]* |
+| **Layer 3: Guardian** | Triplet-07 Guardian Team | *[Placeholder - Guardian Team]* | *[Contact]* |
 
 ---
 
-## 2. System Architecture
+## 3. Quickstart
 
-```text
-       ┌────────────────────────────────────────────────────────┐
-       │             LAYER 1: DIGITAL TWIN SIMULATION           │
-       │  ┌───────────────────────┐  ┌───────────────────────┐  │
-       │  │ Physics Engine (10Hz) │  │  Ground Truth SQLite  │  │
-       │  └──────────┬────────────┘  │     (Isolated)        │  │
-       │             │               └───────────────────────┘  │
-       └─────────────┼───────────────────────────▲──────────────┘
-                     │ Outbound Telemetry        │ Synchronous RPC
-                     │ (Ed25519 Signed)          │ (JSON-RPC)
-                     ▼                           │
-              ┌──────────────┐            ┌──────────────┐
-              │ Kafka Broker │            │  MCP Server  │
-              │(Apache Kafka)│            │  (Port 8000) │
-              └──────┬───────┘            └──────▲───────┘
-                     │                           │
-          ┌──────────┴──────────┐     ┌──────────┴──────────┐
-          ▼                     ▼     │                     │
-    ┌───────────┐         ┌───────────┴─┐             ┌─────┴───────┐
-    │City Brain │         │  Guardian   │             │ City Brain  │
-    │ (Layer 2) │         │  (Layer 3)  │             │  (Layer 2)  │
-    └───────────┘         └─────────────┘             └─────────────┘
-```
+All commands run from the repository root.
 
----
+If a container named "kafka" already exists, remove or rename it first (`docker rm -f kafka` or `docker rename kafka kafka-old`).
 
-## 3. Partner Integration Guide
+To launch the triplet infrastructure (Kafka broker, Twin Layer simulation, and Operations Console):
 
-For full technical specifications, JSON schemas, payload limits, and all 16 MCP tool signatures, see **[INTERFACE.md](INTERFACE.md)** or the **[Developer & Integration Guide (PDF)](docs/DEVELOPER_GUIDE.pdf)**.
-
-### For Layer 2: City Brain (Traffic, Grid & Emergency Response)
-1. **Consume Live Sensor Telemetry:**
-   Connect standard Kafka consumer to `localhost:19092` (or `kafka:9092` in Docker) and subscribe to `twin.sensors`.
-2. **Execute Actuation & Incident Control:**
-   Connect to MCP Server on `http://localhost:8000/sse` and call tools:
-   - `dispatch(incident_type, zone_id)`: Deploy medical/fire/police units.
-   - `set_signal_plan(device_id, target_state)`: Adjust traffic lights (`green_wave`, `all_red`, `adaptive`).
-   - `set_valve(device_id, target_state)`: Control drainage flood valves (`open`, `half`, `closed`).
-   - `switch_grid(device_id, target_state)`: Switch substations (`grid_a`, `grid_b`, `island`).
-   - `get_city_state()`: Inspect real-time status across all 6 zones.
-3. **Reference Implementation:** See [mocks/mock_brain.py](mocks/mock_brain.py).
-
-### For Layer 3: Guardian (Security, Verification & Containment)
-1. **Consume Live Telemetry:**
-   Subscribe to `twin.sensors` on `localhost:19092`.
-2. **Verify Cryptographic Signatures:**
-   Query MCP tool `get_device_key(device_id)` to fetch the device's Ed25519 public key. Verify `sig` against the canonical JSON message envelope.
-3. **Trigger Containment & Isolation:**
-   When an anomaly, falsified payload, or compromised device key is detected:
-   - `quarantine_device(device_id)`: Blacklist and sever device network authority.
-   - `isolate_device(device_id)`: Isolate physical zone segment.
-   - `rollback_reading(reading_id)`: Mark poisoned reading as `rolled_back`.
-   - `reinstate_device(device_id)` / `release_device(device_id)`: Restore authority after remediation.
-4. **Reference Implementation:** See [mocks/mock_guardian.py](mocks/mock_guardian.py).
-
----
-
-## 4. Local Development & Testing
-
-### Running Without Docker
 ```bash
-# 1. Install dependencies
-pip install -r requirements.txt
+# 1. Start infrastructure (pass SIM_SPEED=20 for scenario pace):
+# For demo runs with MCP auth enabled (routes test commands to Test harness lane):
+# MCP_AUTH_TOKENS="brain:tok-b,guardian:tok-g,scenario:tok-s" SIM_SPEED=20 docker compose up -d --build
+SIM_SPEED=20 docker compose up -d --build
 
-# 2. Run automated test suite
-pytest tests/ -v
+# 2. Export the red-team token generated inside the container:
+export RED_TEAM_TOKEN=$(docker exec twin_layer cat /app/data/red_team.token)
 
-# 3. Launch the Twin Engine locally
-python -m twin.main
-
-# 4. In another terminal, launch the Operations Console
-streamlit run dashboard.py
+# 3. Run an incident scenario with mock partners:
+python3 scenarios/t5_grid_overload.py --with-mocks
 ```
 
-### Automated Conformance Suite
-All 41 test suites cover physical kinetics, Ed25519 signature signing/verification, adversary injection, sub-300-byte schema compliance, and MCP tool execution:
-```bash
-pytest tests/
-```
+### Shared Service Endpoints
+- **Apache Kafka:** `localhost:19092` (Topic: `twin.sensors`, pre-existing, supports comma-separated brokers)
+- **Twin MCP Server:** `http://localhost:8000/sse` and `/mcp`
+- **Red-Team Adversary API:** `http://localhost:8100/api/status` (and `POST /api/secrets/reload`)
+- **Twin Operations Console:** `http://localhost:8501`
 
 ---
 
-## 5. Documentation Library
+## 4. Documentation & Repository Links
 
-### Presentation-Grade PDF Guides (For Human Developers & Evaluators)
-- **[Developer & Integration Guide (PDF)](docs/DEVELOPER_GUIDE.pdf)** *(7 pages)*: Full setup, MCP JSON-RPC protocol details, Kafka telemetry pipelines, Python clients, and troubleshooting.
-- **[Operations & User Guide (PDF)](docs/USER_GUIDE.pdf)** *(5 pages, Illustrated)*: Complete visual tour with embedded screenshots of the 3D map, 5-minute hands-on testing tutorial, and threat injection cheatsheet.
-- **[Physics & Adversary Specifications (PDF)](docs/PHYSICS_AND_ADVERSARY_SPEC.pdf)** *(3 pages)*: Mathematical diurnal models, drainage kinetics, electrical loads, and attack mechanics.
-
-### Technical Guides & Source Specifications
-- **[Interface Contract Specification (Markdown)](INTERFACE.md)**
-- **[Developer Guide (Markdown)](docs/DEVELOPER_GUIDE.md)**
-- **[Operations & User Guide (Markdown)](docs/USER_GUIDE.md)**
-- **[Physics & Adversary Specifications (Markdown)](docs/PHYSICS_AND_ADVERSARY_SPEC.md)**
+- **Layer 1 Implementation & Local Setup:** [twin/README.md](twin/README.md)
+- **Layer 2 Workspace:** [brain/](brain/)
+- **Layer 3 Workspace:** [guardian/](guardian/)
+- **Cross-Layer Integration Guide:** [INTEGRATION.md](INTEGRATION.md)
+- **Shared Test Scenarios & Verification:** [TESTBOOK.md](TESTBOOK.md)
+- **Twin Interface Specification:** [twin/INTERFACE.md](twin/INTERFACE.md)

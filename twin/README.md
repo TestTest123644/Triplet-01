@@ -1,51 +1,78 @@
-# Layer 1: Digital Twin & Physical World Simulation
+# Twin layer (Layer 1)
 
-The **Twin Layer** simulates the smart city physical environment, generates high-frequency telemetry, signs outgoing data cryptographically, and executes actuation/containment commands.
-
----
-
-## 1. Responsibilities
-- **Physical World Simulation (10 Hz):** Models 42 devices across 6 geographic zones in Greater Tunis spanning 5 sensor types (`traffic_camera`, `water_level`, `power_load`, `air_quality`, `emergency_call`).
-- **Telemetry Streaming (Kafka):** Broadcasts 420 msgs/s to Apache Kafka topic `twin.sensors`. Every payload conforms to the sub-300-byte schema and includes a unique Ed25519 digital signature.
-- **Synchronous Commands (MCP):** Exposes an official Model Context Protocol (MCP) server on port `8000` (`http://localhost:8000/sse`) for device discovery (`list_devices`), cryptographic key retrieval (`get_device_key`), actuation (`dispatch`, `set_valve`, `switch_grid`, `set_signal_plan`), and containment (`quarantine_device`, `isolate_device`, `rollback_reading`).
-- **Red Team Adversary Engine:** Injects 6 cyber-physical attack capabilities (`link`, `rogue`, `device_key`, `device_physical`, `actuator`, `sensor_fault`).
-- **Ground Truth Ledger:** Logs uncompromised ground truth and attack events into an isolated local SQLite database (`ground_truth.db`).
+The Twin layer simulates 42 devices across 6 zones in Greater Tunis. It streams Ed25519-signed telemetry to Kafka at 420 messages per second, exposes 16 command tools over Model Context Protocol (MCP) on port 8000, and runs an adversary engine backed by an isolated SQLite ground-truth ledger.
 
 ---
 
-## 2. Directory Layout
-```
-twin/
-├── __init__.py           # Package exports
-├── simulation.py         # 10 Hz physical world simulation and diurnal kinetics
-├── mcp_server.py         # MCP JSON-RPC Server (Port 8000)
-├── kafka_streamer.py     # High-throughput Kafka producer with Ed25519 signing
-├── crypto_utils.py       # Ed25519 signing, canonical JSON formatting, and verification
-├── db_ledger.py          # SQLite ground-truth storage (isolated)
-├── main.py               # Twin runtime orchestrator
-├── INTERFACE.md          # Complete API contract and Kafka schema
-└── README.md             # This document
-```
+## Quick start
 
----
+All commands run from the repository root.
 
-## 3. Running the Twin Layer
+If a container named "kafka" already exists, remove or rename it first (`docker rm -f kafka` or `docker rename kafka kafka-old`).
 
-### Using Docker Compose (Recommended)
-From the repository root:
 ```bash
-docker compose up -d
-```
-Starts Apache Kafka on `localhost:19092` and the Twin Layer engine on `http://localhost:8000/sse`.
+# 1. Start the Twin layer, Kafka broker, and console (SIM_SPEED=20 for scenario pace)
+# For demo runs with MCP auth enabled (routes test commands to Test harness lane):
+# MCP_AUTH_TOKENS="brain:tok-b,guardian:tok-g,scenario:tok-s" SIM_SPEED=20 docker compose up -d --build
+SIM_SPEED=20 docker compose up -d --build
 
-### Running Locally with Python
+# 2. Export the red-team token generated inside the container
+export RED_TEAM_TOKEN=$(docker exec twin_layer cat /app/data/red_team.token)
+
+# 3. Run an incident scenario with mock partners
+python3 scenarios/t5_grid_overload.py --with-mocks
+
+# 4. Open the operations console
+open http://localhost:8501
+```
+
+---
+
+## Local development run
+
+To run locally without containers:
+
 ```bash
 # 1. Install dependencies
 pip install -r requirements.txt
 
-# 2. Run test suite
-pytest tests/
+# 2. Run automated test suite
+python3 -m pytest -q
 
-# 3. Launch Twin simulation
-python -m twin.main
+# 3. Start the Twin engine (requires running Kafka or WAIT_FOR_KAFKA=false)
+PYTHONPATH=src python3 -m twin.main
+
+# 4. In a separate terminal, launch the console
+PYTHONPATH=src streamlit run dashboard.py
 ```
+
+---
+
+## Endpoints and services
+
+- **Kafka telemetry:** `localhost:19092` (internal `kafka:9092`, topic `twin.sensors`). Accepts comma-separated brokers (`host1:port,host2:port,host3:port`) via `KAFKA_BOOTSTRAP_SERVERS`. The topic `twin.sensors` must already exist on the broker (the Twin never creates topics or modifies broker settings). Messages are keyed by `device_id` to ensure strict per-device ordering within partitions. Producer uses durable delivery (`acks=all`, `enable.idempotence=True`), overridable via `KAFKA_ACKS` (`all`, `1`, `0`). Set `WAIT_FOR_KAFKA=false` if broker ACLs disallow cluster description. Optional TLS CA file via `KAFKA_SSL_CA_LOCATION`.
+- **MCP command server:** `http://localhost:8000/sse` and `/mcp` (JSON-RPC)
+- **Red-team adversary API:** `http://localhost:8100/api/status` (header `X-Red-Team-Token`). Includes `POST /api/secrets/reload` for zero-downtime secret rotation without restarting.
+- **Operations console:** `http://localhost:8501` (Streamlit)
+
+---
+
+## Secrets and dynamic rotation
+
+Secrets (`KAFKA_PASSWORD`, `MCP_AUTH_TOKENS`, `RED_TEAM_TOKEN`) resolve via pluggable hook (`TWIN_SECRET_HOOK`), files (`<NAME>_FILE`), or environment variables. Reload secrets at runtime without restarting via:
+
+```bash
+curl -X POST http://localhost:8100/api/secrets/reload -H "X-Red-Team-Token: $RED_TEAM_TOKEN"
+```
+
+Or send `kill -HUP <twin_pid>`, or configure `TWIN_SECRET_RELOAD_SECONDS`. Device signing keys never rotate at runtime.
+
+---
+
+## Documentation index
+
+- [Interface Card](INTERFACE.md): One-page contract specification, real wire messages, and authentication
+- [Interface Reference](docs/INTERFACE_REFERENCE.md): Full reference for all 16 MCP tool signatures and parameter rules
+- [Developer Guide](docs/DEVELOPER_GUIDE.md): Architecture, module layout, and mock boundary specifications
+- [User Guide](docs/USER_GUIDE.md): Operations console manual, timeline navigation, and manual attack injection
+- [Physics and Adversary Spec](docs/PHYSICS_AND_ADVERSARY_SPEC.md): Differential equations, diurnal curves, and adversary capabilities

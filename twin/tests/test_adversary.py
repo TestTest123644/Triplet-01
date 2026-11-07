@@ -79,22 +79,33 @@ def test_link_attack_corrupt_and_drop(temp_ledger):
     streamer = KafkaStreamer(mock_mode=True)
     dev_id = "z1-wl1"
 
-    # 1. Test link corrupt bytes
+    # 1. Test link corrupt signature (today's behavior under new name)
+    sim.inject_attack(
+        capability="link",
+        target_device_id=dev_id,
+        params={"link_mode": "corrupt_sig"},
+    )
+    readings = sim.tick()
+    target = next(r for r in readings if r["device_id"] == dev_id)
+    assert target.get("_corrupt_sig") is True
+    dev = sim.devices[dev_id]
+    reading_model, raw_bytes = streamer.stream_reading(target, dev.private_key)
+    payload_dict = json.loads(raw_bytes.decode("utf-8"))
+    assert verify_payload_signature(payload_dict, dev.public_key) is False
+
+    # 1b. Test link corrupt bytes (in-transit value digit tampering)
+    sim.clear_all_attacks()
     sim.inject_attack(
         capability="link",
         target_device_id=dev_id,
         params={"link_mode": "corrupt_bytes"},
     )
-    readings = sim.tick()
-    target = next(r for r in readings if r["device_id"] == dev_id)
-    assert target.get("_corrupt_sig") is True
-
-    # Streaming this payload should have a corrupted signature
-    dev = sim.devices[dev_id]
-    reading_model, raw_bytes = streamer.stream_reading(target, dev.private_key)
-    payload_dict = json.loads(raw_bytes.decode("utf-8"))
-    # Signature verification MUST fail
-    assert verify_payload_signature(payload_dict, dev.public_key) is False
+    readings_bytes = sim.tick()
+    target_b = next(r for r in readings_bytes if r["device_id"] == dev_id)
+    assert target_b.get("_corrupt_bytes") is True
+    model_b, tampered_bytes = streamer.stream_reading(target_b, dev.private_key)
+    dict_b = json.loads(tampered_bytes.decode("utf-8"))
+    assert verify_payload_signature(dict_b, dev.public_key) is False
 
     # 2. Test link drop
     sim.clear_all_attacks()
@@ -116,16 +127,16 @@ def test_rogue_attack(temp_ledger):
     sim = CitySimulator(seed=444, ledger=temp_ledger)
     sim.inject_attack(
         capability="rogue",
-        params={"rogue_device_id": "rogue-x99", "value": 777.7},
+        params={"rogue_device_id": "rg-x99", "value": 777.7},
     )
 
     readings = sim.tick()
-    rogue_reading = next((r for r in readings if r["device_id"] == "rogue-x99"), None)
+    rogue_reading = next((r for r in readings if r["device_id"] == "rg-x99"), None)
     assert rogue_reading is not None
     assert rogue_reading["value"] == 777.7
 
     # Device does not exist in legitimate device inventory
-    assert "rogue-x99" not in sim.devices
+    assert "rg-x99" not in sim.devices
 
 
 def test_actuator_attack(temp_ledger):
