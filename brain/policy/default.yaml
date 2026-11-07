@@ -1,8 +1,25 @@
 water:
   high_band: 6.0
   low_band: 3.0
+  critical_band: 9.0
   close_sustain_s: 5.0
   evidence_count: 3
+detectors:
+  water:
+    rising_rate: 0.005        # m/s above which a channel counts as rising
+    forecast_s: 60.0          # how far ahead RISING looks
+  traffic:
+    anomaly_z: 4.0            # rolling z-score of the measured flow
+    anomaly_level: 140.0      # veh/min, both conditions must hold
+  power:
+    load_high: 90.0           # MW
+  air_quality:
+    aqi_high: 150.0
+    traffic_lag_s: 5.0        # the zone's AQI follows its cameras by this much
+    traffic_rise: 1.0         # veh/min per s that counts as traffic having risen
+  calls:
+    surge_factor: 3.0         # times the rolling baseline mean
+    surge_min: 4.0            # calls/min, both conditions must hold
 verification:
   open_rate_max: -0.01
   open_window_s: 3.0
