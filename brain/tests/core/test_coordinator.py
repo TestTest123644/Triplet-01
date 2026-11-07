@@ -114,7 +114,8 @@ def close_awaiting_newest_verdict():
 def test_awaiting_trust_starts_the_verdict_timer():
     s, record = awaiting_open()
     action_id = record.intent.action_id
-    assert only(StartTimer, s.last_effects) == StartTimer(f"verdict:{action_id}", "verdict_wait", 2.0)
+    waits = [t for t in of_type(StartTimer, s.last_effects) if t.kind == "verdict_wait"]
+    assert waits == [StartTimer(f"verdict:{action_id}", "verdict_wait", 2.0)]
     [decision] = act_decisions(s.last_effects)
     assert decision["actionid"] == action_id
     assert decision["correlationid"] == record.intent.incident_id and decision["subject"] == "zone-1"

@@ -5,7 +5,8 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 
-from city_brain.domain.types import ActionIntent, DeviceProfile, DeviceStatus
+from city_brain.core.water import commanded_ratio
+from city_brain.domain.types import ActionIntent, BrainMode, DeviceProfile, DeviceStatus, RiskClass
 
 CHECK_NAMES = (
     "STATE_NOT_ALLOWED",
@@ -17,7 +18,16 @@ CHECK_NAMES = (
     "CONFLICT",
     "COOLDOWN",
     "RATE_LIMIT",
+    "MODE_FORBIDS",
 )
+# What each mode may actuate (spec 8.9). Everything outside NORMAL is baseline-only.
+RISK_BY_MODE = {
+    BrainMode.NORMAL: frozenset(RiskClass),
+    BrainMode.WARMUP: frozenset({RiskClass.R0}),
+    BrainMode.GUARDIAN_DEGRADED: frozenset({RiskClass.R0}),
+    BrainMode.TWIN_DEGRADED: frozenset({RiskClass.R0}),
+    BrainMode.PAUSED: frozenset({RiskClass.R0}),
+}
 
 # Canonical ratio form: no leading zeros, 0..100.
 _RATIO = re.compile(r"ratio:(0|[1-9][0-9]?|100)")
@@ -61,6 +71,7 @@ class ShieldContext:
     bucket: TokenBucket
     suspect: set[str]
     now: datetime
+    mode: BrainMode = BrainMode.NORMAL
 
 
 @dataclass(frozen=True)
@@ -97,6 +108,30 @@ def _cooldown_ok(intent: ActionIntent, ctx: ShieldContext, policy: Mapping) -> b
     return (ctx.now - last).total_seconds() >= cooldown
 
 
+def _drains(intent: ActionIntent, ctx: ShieldContext) -> bool:
+    """Whether the intent opens its actuator further than it is open now."""
+    device = ctx.registry.get(intent.target)
+    if device is None or device.actuator is None:
+        return False
+    wanted = commanded_ratio(intent.state)
+    current = commanded_ratio(device.actuator.current_state or "")
+    return wanted is not None and current is not None and wanted > current
+
+
+def _mode_forbids(intent: ActionIntent, ctx: ShieldContext, policy: Mapping) -> bool:
+    """Check 9: the mode decides how much risk the Brain may take (spec 8.9).
+
+    While the Guardian is down, the one exception is the safe baseline: a drain-direction R1
+    the planner only proposes when the level is predicted to cross the critical band.
+    """
+    if intent.risk_class in RISK_BY_MODE.get(ctx.mode, frozenset({RiskClass.R0})):
+        return False
+    if ctx.mode is BrainMode.GUARDIAN_DEGRADED and intent.risk_class is RiskClass.R1:
+        baseline = bool(policy.get("modes", {}).get("safe_baseline_r1", False))
+        return not (baseline and _drains(intent, ctx))
+    return True
+
+
 def evaluate(
     intent: ActionIntent,
     ctx: ShieldContext,
@@ -126,6 +161,7 @@ def evaluate(
         "CONFLICT": conflict,
         "COOLDOWN": not _cooldown_ok(intent, ctx, policy),
         "RATE_LIMIT": not ctx.bucket.peek(ctx.now),
+        "MODE_FORBIDS": _mode_forbids(intent, ctx, policy),
     }
     checks = tuple(CheckOutcome(n, not failed[n], n if failed[n] else None) for n in CHECK_NAMES)
     refusals = tuple(c.code for c in checks if c.code is not None)

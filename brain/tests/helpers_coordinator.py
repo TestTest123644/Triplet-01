@@ -12,6 +12,7 @@ from city_brain.core.state import BrainState
 from city_brain.core.step import step
 from city_brain.domain.types import (
     ActuatorCapability,
+    BrainMode,
     CanonicalUnit,
     DeviceProfile,
     DeviceStatus,
@@ -36,10 +37,19 @@ def water_device(device_id, valve="closed"):
     )
 
 
-def state_with_registry(*device_ids, valve="closed", allowlist=ALLOWLIST):
+def state_with_registry(*device_ids, valve="closed", allowlist=ALLOWLIST, mode=BrainMode.NORMAL):
+    """A registry, and by default a Brain already past WARMUP.
+
+    The mode is a precondition for these tests, not their subject: the Shield's MODE_FORBIDS
+    check (spec 8.9) would otherwise refuse every R1 before the gate under test is reached.
+    `core.modes` is driven by real heartbeats, timers and operator commands in test_modes.py.
+    No heartbeat is sent here, so the ledger has no watermark and no verdict lag accrues.
+    """
     state = BrainState.new(CFG.policy, CFG.params)
     devices = tuple(water_device(d, valve) for d in (device_ids or ("z1-wl1",)))
     state, effects = step(state, RegistryLoaded(devices, allowlist))
+    state.mode = mode
+    state.guardian_heard = mode is not BrainMode.WARMUP
     state.last_effects = list(effects)
     state.levels = {}
     return state

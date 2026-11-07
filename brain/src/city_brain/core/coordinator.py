@@ -60,6 +60,7 @@ def propose(state: BrainState, intent: ActionIntent) -> list[Effect]:
         bucket=state.bucket,
         suspect=state.suspect,
         now=state.sim_now,
+        mode=state.mode,
     )
     shield = evaluate(intent, context, state.allowlist, state.policy)
     refusal_key = (intent.target, intent.state)

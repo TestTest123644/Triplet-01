@@ -3,7 +3,7 @@
 from collections import deque
 from collections.abc import Sequence
 
-from city_brain.core import coordinator
+from city_brain.core import coordinator, modes
 from city_brain.core.estimator import WaterFilter
 from city_brain.core.epochs import confirm_candidate, is_new_epoch, start_new_epoch
 from city_brain.core.events import (
@@ -11,6 +11,7 @@ from city_brain.core.events import (
     Effect,
     Event,
     GuardianEventReceived,
+    OperatorCommand,
     Publish,
     ReadingReceived,
     ReadingRejected,
@@ -69,6 +70,7 @@ def step(state: BrainState, event: Event) -> tuple[BrainState, list[Effect]]:
         state.registry = {d.device_id: d for d in event.devices}
         state.allowlist = event.allowlist
         effects.append(_status(state, reason))
+        effects.extend(modes.on_registry(state))
         if event.keys_changed:
             _start_epoch(state, effects)
     elif isinstance(event, ReadingRejected):
@@ -82,12 +84,16 @@ def step(state: BrainState, event: Event) -> tuple[BrainState, list[Effect]]:
         # sim_now is undefined before the first accepted reading; park without pruning.
         if state.epoch_origin is not None:
             state.ledger.prune(state.sim_now)
+        effects.extend(modes.on_guardian_heard(state))
         effects.extend(coordinator.on_verdict(state, (event.verdict.reading_id, event.verdict.sig_hash)))
     elif isinstance(event, GuardianEventReceived):
         effects.extend(_guardian_notice(state, event.notice))
+    elif isinstance(event, OperatorCommand):
+        effects.extend(modes.on_operator(state, event))
     elif isinstance(event, CommandResult):
         effects.extend(coordinator.on_result(state, event))
     elif isinstance(event, TimerFired):
+        effects.extend(modes.on_timer(state, event))
         effects.extend(coordinator.on_timer(state, event))
     return state, effects
 
@@ -95,9 +101,10 @@ def step(state: BrainState, event: Event) -> tuple[BrainState, list[Effect]]:
 def _guardian_notice(state: BrainState, notice) -> list[Effect]:
     """A `guardian.events` notice: the Guardian is alive, and may contain or withdraw (spec 8.9)."""
     state.guardian_heard = True
-    effects: list[Effect] = []
     if isinstance(notice, GuardianHeartbeat):
         state.ledger.note_heartbeat(notice.evaluated_through)
+    effects: list[Effect] = list(modes.on_guardian_heard(state))
+    if isinstance(notice, GuardianHeartbeat):
         return effects
     if isinstance(notice, GuardianContainment):
         _apply_containment(state, notice)
@@ -166,6 +173,7 @@ def _ingest(state: BrainState, event: ReadingReceived, effects: list[Effect]) ->
     advanced = obs.seq > state.global_tick
     state.global_tick = max(state.global_tick, obs.seq)
     _note_device_status(state, obs)
+    effects.extend(modes.on_reading(state))
     if obs.kind is SensorKind.WATER_LEVEL:
         state.last_heard[obs.device_id] = obs.seq
         state.silent.discard(obs.device_id)

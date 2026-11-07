@@ -15,14 +15,14 @@ from city_brain.core.events import (
     TimerFired,
     VerdictReceived,
 )
-from city_brain.domain.types import ActionStatus
-from city_brain.edge.guard import ReadingGuard, VerdictGuard
+from city_brain.domain.types import ActionStatus, DeviceStatus
+from city_brain.edge.guard import GuardianEventGuard, ReadingGuard, VerdictGuard
 from city_brain.edge.profiles import GuardianProfile, ProfileError
-from city_brain.edge.signatures import KeyRing
+from city_brain.edge.signatures import KeyRing, sign
 from city_brain.runtime import app as app_module
 from city_brain.runtime.app import BrainApp
 from city_brain.runtime.clocks import SimClock
-from mocks.guardian.mock_guardian import MockGuardian
+from mocks.guardian.mock_guardian import MockGuardian, quarantine_at
 from mocks.keys import derive_keypair
 from mocks.twin import MockTwin
 from tests.helpers_coordinator import feed_rising_channel, seq_of, state_with_registry, verdict_for
@@ -276,3 +276,63 @@ async def test_failed_reload_does_not_lose_the_key_change(rig, monkeypatch):
     monkeypatch.setattr(rig.twin.profile, "map_device", good)
     await rig.app.reload_registry()
     assert rig.app.state.epoch == 1
+
+
+# ----- guardian.events (spec 5.3, 8.9) -----
+
+
+class EventRig(Rig):
+    """A BrainApp that also accepts `guardian.events`."""
+
+    def __init__(self, tmp_path):
+        super().__init__(tmp_path)
+        self.path = tmp_path / "events.jsonl"  # the base rig already holds run.jsonl
+        priv, pub = derive_keypair("test:guardian:events")
+        self.guardian = MockGuardian(priv, quarantine_at("z2-wl1", 1.0))
+        profile = GuardianProfile.load(BRAIN / "profiles" / "guardian-triplet07.yaml", public_key_b64=pub)
+        self.app = BrainApp(
+            load_config(BRAIN / "config" / "standalone.yaml"), InProcTwin(self.twin), self.clock,
+            JsonlLog(self.path), ReadingGuard(self.twin.profile, self.keyring, self.registry),
+            VerdictGuard(profile), event_guard=GuardianEventGuard(profile),
+            profile=self.twin.profile, keyring=self.keyring, registry=self.registry,
+            wall_now=lambda: self.now)
+
+
+@pytest.fixture
+async def event_rig(tmp_path):
+    rig = EventRig(tmp_path)
+    await rig.app.start()
+    return rig
+
+
+async def test_a_containment_event_contains_the_device(event_rig):
+    for _ in range(20):  # the mock Twin stamps whole seconds: 20 ticks pass the 1 s mark
+        for reading in event_rig.twin.tick():
+            event_rig.guardian.on_reading(reading)
+    events = event_rig.guardian.drain_events()
+    assert events
+    for raw in events:
+        await event_rig.app.submit_raw("events", raw)
+    assert event_rig.app.state.registry["z2-wl1"].status is DeviceStatus.QUARANTINED
+
+
+async def test_a_heartbeat_moves_the_watermark(event_rig):
+    payload = {"kind": "heartbeat", "evaluated_through": "2026-10-17T12:00:03Z",
+               "issued_at": "2026-10-17T12:00:03Z"}
+    priv, _ = derive_keypair("test:guardian:events")
+    payload["sig"] = sign(payload, priv)
+    await event_rig.app.submit_raw("events", json.dumps(payload).encode())
+    assert event_rig.app.state.ledger.watermark is not None
+
+
+async def test_a_forged_event_is_counted_as_a_reject(event_rig):
+    payload = {"kind": "heartbeat", "evaluated_through": "2026-10-17T12:00:03Z",
+               "issued_at": "2026-10-17T12:00:03Z", "sig": "bm90YXNpZw=="}
+    await event_rig.app.submit_raw("events", json.dumps(payload).encode())
+    assert event_rig.app.state.counters["BAD_SIGNATURE"] == 1
+    assert event_rig.app.state.ledger.watermark is None
+
+
+async def test_the_events_stream_is_unknown_without_a_guard(rig):
+    with pytest.raises(ValueError):
+        await rig.app.submit_raw("events", b"{}")

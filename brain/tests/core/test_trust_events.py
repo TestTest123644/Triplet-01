@@ -8,6 +8,7 @@ from city_brain.core.events import GuardianEventReceived, Publish, VerdictReceiv
 from city_brain.core.trust import in_outage
 from city_brain.domain.types import (
     ActionStatus,
+    BrainMode,
     DeviceStatus,
     GuardianContainment,
     GuardianHeartbeat,
@@ -199,7 +200,7 @@ def test_revoking_an_uncited_verdict_leaves_the_action_waiting():
 
 
 def test_heartbeat_is_heard_and_moves_the_watermark():
-    state = state_with_registry("z1-wl1")
+    state = state_with_registry("z1-wl1", mode=BrainMode.WARMUP)
     assert state.guardian_heard is False
     through = T0 + timedelta(seconds=3)
     state = notice(state, GuardianHeartbeat(evaluated_through=through, issued_at=through))
@@ -207,7 +208,7 @@ def test_heartbeat_is_heard_and_moves_the_watermark():
 
 
 def test_a_verdict_also_counts_as_hearing_from_the_guardian():
-    state = state_with_registry("z1-wl1")
+    state = state_with_registry("z1-wl1", mode=BrainMode.WARMUP)
     state = feed_tick(state, {"z1-wl1": 4.0})
     assert state.guardian_heard is True
 

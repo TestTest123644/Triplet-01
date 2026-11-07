@@ -86,6 +86,8 @@ class BrainState:
     outage_windows: list[tuple[datetime, datetime | None]] = field(default_factory=list)
     # Devices the Guardian has contained: its word outranks what a reading reports.
     contained: dict[str, DeviceStatus] = field(default_factory=dict)
+    # Sim time each watchdog timer was last armed, so a rearm costs one effect per second.
+    timers_armed: dict[str, datetime | None] = field(default_factory=dict)
 
     @classmethod
     def new(cls, policy: dict, params: dict) -> "BrainState":

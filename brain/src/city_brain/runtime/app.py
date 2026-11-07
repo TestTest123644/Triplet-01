@@ -12,6 +12,7 @@ from city_brain.core.events import (
     CommandResult,
     Effect,
     Event,
+    GuardianEventReceived,
     Publish,
     ReadingReceived,
     ReadingRejected,
@@ -23,7 +24,15 @@ from city_brain.core.events import (
 from city_brain.core.state import BrainState
 from city_brain.core.step import step
 from city_brain.domain.types import DeviceProfile
-from city_brain.edge.guard import Accepted, AcceptedVerdict, ReadingGuard, Rejected, VerdictGuard
+from city_brain.edge.guard import (
+    Accepted,
+    AcceptedGuardianEvent,
+    AcceptedVerdict,
+    GuardianEventGuard,
+    ReadingGuard,
+    Rejected,
+    VerdictGuard,
+)
 from city_brain.edge.profiles import ProfileError, ToolCall, TwinProfile
 from city_brain.edge.signatures import KeyRing
 from city_brain.ports import TwinPort
@@ -49,6 +58,7 @@ class BrainApp:
         reading_guard: ReadingGuard,
         verdict_guard: VerdictGuard,
         *,
+        event_guard: GuardianEventGuard | None = None,
         profile: TwinProfile,
         keyring: KeyRing,
         registry: MutableMapping[str, DeviceProfile],
@@ -59,6 +69,8 @@ class BrainApp:
         self._clock = clock
         self._log = log
         self._guards = {"readings": reading_guard, "verdicts": verdict_guard}
+        if event_guard is not None:  # `guardian.events` is optional: a partner may send none
+            self._guards["events"] = event_guard
         self._profile = profile
         self._keyring = keyring
         self._registry = registry
@@ -75,7 +87,7 @@ class BrainApp:
         self._bad_signatures.clear()
         await self._load_registry()
 
-    async def submit_raw(self, stream: Literal["readings", "verdicts"], raw: bytes) -> list[Effect]:
+    async def submit_raw(self, stream: Literal["readings", "verdicts", "events"], raw: bytes) -> list[Effect]:
         guard = self._guards.get(stream)
         if guard is None:
             raise ValueError(f"unknown stream '{stream}'")
@@ -84,6 +96,8 @@ class BrainApp:
             return await self.feed(ReadingReceived(result.observation))
         if isinstance(result, AcceptedVerdict):
             return await self.feed(VerdictReceived(result.verdict))
+        if isinstance(result, AcceptedGuardianEvent):
+            return await self.feed(GuardianEventReceived(result.notice))
         effects = await self.feed(ReadingRejected(result.code, result.device_id))
         if stream == "readings" and self._burst_of_bad_signatures(result):
             await self.reload_registry()

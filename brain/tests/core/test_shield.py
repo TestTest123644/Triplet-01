@@ -53,7 +53,7 @@ def run(i=None, **kw):
 
 def test_clean_intent_passes():
     r = run()
-    assert r.passed and r.refusals == () and len(r.checks) == 9
+    assert r.passed and r.refusals == () and len(r.checks) == 10
     assert all(c.passed and c.code is None for c in r.checks)
 
 
@@ -76,7 +76,7 @@ def test_unknown_capability_not_allowed():
 def test_unknown_target():
     r = run(intent(target="nope"))
     assert not r.passed and "UNKNOWN_TARGET" in r.refusals
-    assert len(r.checks) == 9
+    assert len(r.checks) == 10
 
 
 def test_suspect_target():
@@ -134,7 +134,7 @@ def test_rate_limit_peeks_without_taking():
 
 def test_all_checks_reported_even_after_failure():
     r = evaluate(intent(state="half"), ctx(in_flight={"z1-wl1"}), ALLOW, POLICY)
-    assert {"STATE_NOT_ALLOWED", "IN_FLIGHT"} <= set(r.refusals) and len(r.checks) == 9
+    assert {"STATE_NOT_ALLOWED", "IN_FLIGHT"} <= set(r.refusals) and len(r.checks) == 10
 
 
 def test_refusals_follow_check_order():

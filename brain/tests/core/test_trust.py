@@ -4,7 +4,7 @@ from hypothesis import given, strategies as st
 
 from city_brain.config import load_config
 from city_brain.core.epochs import start_new_epoch
-from city_brain.core.events import ReadingReceived, VerdictReceived
+from city_brain.core.events import ReadingReceived, StartTimer, VerdictReceived
 from city_brain.core.state import BrainState
 from city_brain.core.step import step
 from city_brain.core.trust import (
@@ -206,7 +206,9 @@ def test_verdict_before_any_reading_is_parked_without_sim_now():
     s = BrainState.new(POLICY, {"filter": {"sample_period_s": 0.1}})
     v = make_verdict()
     s, fx = step(s, VerdictReceived(v))
-    assert fx == [] and s.ledger.lookup(v.reading_id, v.sig_hash, T0) == v
+    # Nothing is published and nothing is planned: only the Guardian watchdog is armed (spec 8.9).
+    assert [e for e in fx if not isinstance(e, StartTimer)] == []
+    assert s.ledger.lookup(v.reading_id, v.sig_hash, T0) == v
 
 
 def test_verdict_after_reading_prunes_old_entries():

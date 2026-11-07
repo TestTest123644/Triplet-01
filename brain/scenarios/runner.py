@@ -14,7 +14,7 @@ from city_brain.adapters.files.jsonl_log import JsonlLog
 from city_brain.adapters.inproc_twin import InProcTwin
 from city_brain.adapters.memory.bus import MemoryBus
 from city_brain.config import BrainConfig, load_config
-from city_brain.edge.guard import ReadingGuard, VerdictGuard
+from city_brain.edge.guard import GuardianEventGuard, ReadingGuard, VerdictGuard
 from city_brain.edge.profiles import GuardianProfile
 from city_brain.edge.signatures import KeyRing
 from city_brain.runtime.app import BrainApp
@@ -83,7 +83,7 @@ async def _run_standalone(
     app = BrainApp(
         config, InProcTwin(twin), clock, JsonlLog(log_path),
         ReadingGuard(twin.profile, keyring, registry), VerdictGuard(guardian_profile),
-        profile=twin.profile, keyring=keyring, registry=registry, wall_now=lambda: tick * dt)
+        event_guard=GuardianEventGuard(guardian_profile), profile=twin.profile, keyring=keyring, registry=registry, wall_now=lambda: tick * dt)
     await app.start()
 
     restart_tick = None if restart_at_s is None else round(restart_at_s / dt)
@@ -99,6 +99,8 @@ async def _run_standalone(
             bus.publish("readings", json.dumps(reading, separators=(",", ":")).encode("utf-8"))
             for verdict in guardian.on_reading(reading):
                 bus.publish("verdicts", verdict)
+        for event in guardian.drain_events():
+            bus.publish("events", event)
         for stream, raw in bus.drain():
             await app.submit_raw(stream, raw)
         for fired in clock.advance(dt):
