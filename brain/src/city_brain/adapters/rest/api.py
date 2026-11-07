@@ -10,7 +10,7 @@ import json
 from collections.abc import Iterable, Mapping
 from typing import Any, Literal
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Response
+from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
 from pydantic import BaseModel
 
 from city_brain.core.events import OperatorCommand
@@ -269,6 +269,32 @@ def build_rest_app(brain_app, operator_token: str, decisions: Iterable[Mapping] 
     async def resume(who: str = Depends(operator)) -> dict:
         await app.state.brain.feed(OperatorCommand(action="resume", operator_id=who))
         return {"mode": str(state().mode)}
+
+    @app.post("/v1/ingest/{stream}")
+    async def ingest(stream: str, request: Request, who: str = Depends(operator)) -> dict:
+        """A partner stream over HTTP, for a run with no broker between us (spec 10.4).
+
+        The bytes go through the same edge guard as anything off Kafka: nothing reaches the
+        core unvalidated because it arrived by a different road.
+        """
+        if stream not in ("readings", "verdicts", "events"):
+            raise HTTPException(status_code=404, detail=f"no stream '{stream}'")
+        body = await request.body()
+        lines = [line for line in body.splitlines() if line.strip()]
+        if not lines:
+            raise HTTPException(status_code=400, detail="a body with at least one message is needed")
+        before = dict(app.state.brain.state.counters)
+        for raw in lines:
+            try:
+                await app.state.brain.submit_raw(stream, raw)
+            except ValueError as exc:
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
+        counters = app.state.brain.state.counters
+        rejected = {
+            code: counters[code] - before.get(code, 0)
+            for code in counters if counters[code] != before.get(code, 0)
+        }
+        return {"stream": stream, "accepted": len(lines), "counters_changed": rejected}
 
     @app.get("/metrics")
     def metrics() -> Response:

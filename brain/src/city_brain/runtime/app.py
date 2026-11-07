@@ -64,6 +64,7 @@ class BrainApp:
         keyring: KeyRing,
         registry: MutableMapping[str, DeviceProfile],
         journal: SqliteJournal | None = None,
+        event_sink: Callable[[dict], None] | None = None,
         wall_now: Callable[[], float] = time.monotonic,
     ):
         self.state = BrainState.new(config.policy, config.params)
@@ -77,6 +78,7 @@ class BrainApp:
         self._keyring = keyring
         self._registry = registry
         self._journal = journal
+        self._event_sink = event_sink
         self._replaying = False
         self._wall_now = wall_now
         self._bad_signatures: dict[str, float] = {}  # device id -> wall time of its latest reject
@@ -193,7 +195,9 @@ class BrainApp:
         if self._replaying:
             return None  # the log and the Twin already have everything this step produced
         if isinstance(effect, Publish):
-            self._log.append(self._with_tool(effect.event))
+            record = self._log.append(self._with_tool(effect.event))
+            if self._event_sink is not None:
+                self._event_sink(record)  # the same bytes the log holds, for the bus
         elif isinstance(effect, SendCommand):
             return await self._send(effect)
         elif isinstance(effect, StartTimer):

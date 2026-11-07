@@ -24,7 +24,9 @@ def test_triplet_yaml_parses_with_spec_values():
     cfg = load_config("config/triplet.yaml")
     assert cfg.mode == "triplet"
     assert cfg.kafka.group == "city-brain"
-    assert cfg.kafka.topics == {"readings": "twin.sensors", "verdicts": "guardian.verdicts"}
+    assert cfg.kafka.topics == {
+        "readings": "twin.sensors", "verdicts": "guardian.verdicts", "events": "guardian.events"}
+    assert cfg.twin.profile == "twin-triplet07" and cfg.guardian.profile == "guardian-triplet07"
     assert cfg.twin.mcp_url == "http://twin_layer:8000/sse"
     assert cfg.twin.call_timeout_s == 2
     assert cfg.policy["trust"]["pending_weight"] == 0.5

@@ -117,14 +117,17 @@ def test_triplet_logs_go_to_the_repo_root():
     assert load_config(BRAIN / "config" / "triplet.yaml").logs_dir == BRAIN.parent / "logs"
 
 
-def test_triplet_profile_is_a_clear_stub():
-    with pytest.raises(NotImplementedError, match="P4"):
+def test_the_scenario_runner_is_standalone_only():
+    """Scenarios drive the mocks; the triplet network is the runtime's job, not theirs."""
+    with pytest.raises(NotImplementedError, match="triplet"):
         run("T02", "triplet")
 
 
-def test_triplet_config_exits_2(capsys):
-    assert main(["--config", str(BRAIN / "config" / "triplet.yaml"), "--scenario", "T02"]) == 2
-    assert "triplet mode lands in P4" in capsys.readouterr().err
+def test_triplet_mode_needs_an_operator_token():
+    """The approval and control endpoints exist in triplet mode, so a token is required."""
+    with pytest.raises(SystemExit) as exit_info:
+        main(["--config", str(BRAIN / "config" / "triplet.yaml")])
+    assert exit_info.value.code == 2
 
 
 def test_scenario_rejects_unknown_keys(tmp_path, monkeypatch):
