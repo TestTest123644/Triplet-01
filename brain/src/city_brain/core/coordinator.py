@@ -18,6 +18,7 @@ from city_brain.core.events import (
 from city_brain.core import catalog
 from city_brain.core.records import alert_event, command_event, decision_event, verification_event
 from city_brain.core.shield import ShieldContext, evaluate
+from city_brain.core.water import commanded_ratio
 from city_brain.core.state import ActionRecord, BrainState
 from city_brain.core.trust import evidence_ref, meets_requirement, trust_weight
 from city_brain.domain.ids import idempotency_key
@@ -388,6 +389,15 @@ def untrusted_ticks(state: BrainState, readings: Iterable[tuple[int, str, str]])
     return ticks
 
 
+def _learn_gain(state: BrainState, intent: ActionIntent, slope: float) -> None:
+    """A settled valve position and the slope it produced teach the channel its gain (spec 8.4)."""
+    channel = state.filters.get(intent.expected_effect.channel)
+    ratio = commanded_ratio(intent.state)
+    if channel is None or ratio is None or not hasattr(channel, "identify_gain"):
+        return
+    channel.identify_gain(u=ratio, slope=slope)
+
+
 def _has_untrusted_verdict(state: BrainState, record: ActionRecord) -> bool:
     for _, reading_id, sig_hash in record.window_readings:
         verdict = state.ledger.lookup(reading_id, sig_hash, state.sim_now)
@@ -410,6 +420,8 @@ def _verify(state: BrainState, record: ActionRecord) -> list[Effect]:
         verdict = "verified" if slope <= expected.threshold else "unverified"
     else:
         verdict = "verified" if slope >= expected.threshold else "unverified"
+    if slope is not None and intent.capability == "valve":
+        _learn_gain(state, intent, slope)
     record.status = ActionStatus.VERIFIED if verdict == "verified" else ActionStatus.UNVERIFIED
     state.in_flight.discard(intent.target)
     effects: list[Effect] = [Publish(verification_event(

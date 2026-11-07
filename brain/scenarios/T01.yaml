@@ -1,0 +1,11 @@
+# T01: a calm city. Nothing attacks it, so the Brain should hold the water and leave the
+# rest of the city alone: no signal, grid or dispatch command at all.
+duration_s: 300
+planner: mpc
+guardian_policy: trust_all
+inject: []
+expect:
+  water_band: [3.0, 6.0]
+  quiet_capabilities: [signal, grid, dispatch]
+  max_valve_changes_per_channel: 2
+  settle_s: 120

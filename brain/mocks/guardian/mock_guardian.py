@@ -11,7 +11,8 @@ from city_brain.edge.signatures import sign
 _TS = "%Y-%m-%dT%H:%M:%SZ"
 
 
-_KINDS = ("trust_all", "delay", "silent", "flip_after", "untrusted", "quarantine_at", "expired", "unsigned")
+_KINDS = ("trust_all", "delay", "silent", "silent_window", "flip_after", "untrusted", "doubtful",
+          "quarantine_at", "expired", "unsigned")
 
 
 @dataclass(frozen=True)
@@ -20,6 +21,8 @@ class GuardianPolicy:
     device: str | None = None
     seconds: float = 0.0
     count: int = 0
+    until: float = 0.0              # silent_window: when the silence ends
+    reasons: tuple[str, ...] = ()   # the reasons a non-TRUSTED verdict carries
 
     def __post_init__(self) -> None:
         if self.kind not in _KINDS:
@@ -48,6 +51,16 @@ def untrusted(device: str) -> GuardianPolicy:
 
 def quarantine_at(device: str, t: float) -> GuardianPolicy:
     return GuardianPolicy("quarantine_at", device=device, seconds=t)
+
+
+def doubtful(device: str, *reasons: str) -> GuardianPolicy:
+    """The Guardian doubts one device, and says why (e.g. RATE_OF_CHANGE)."""
+    return GuardianPolicy("doubtful", device=device, reasons=tuple(reasons))
+
+
+def silent_window(start_s: float, until_s: float) -> GuardianPolicy:
+    """The Guardian says nothing between two simulation times, then resumes."""
+    return GuardianPolicy("silent_window", seconds=start_s, until=until_s)
 
 
 def expired() -> GuardianPolicy:
@@ -83,6 +96,8 @@ class MockGuardian:
             return "TRUSTED" if self._counter <= p.count else "UNTRUSTED"
         if p.kind == "untrusted":
             return "UNTRUSTED" if device_id == p.device else "TRUSTED"
+        if p.kind == "doubtful":
+            return "DOUBTFUL" if device_id == p.device else "TRUSTED"
         if p.kind == "quarantine_at" and device_id == p.device and self._first is not None:
             return "UNTRUSTED" if now - self._first >= timedelta(seconds=p.seconds) else "TRUSTED"
         return "TRUSTED"
@@ -96,7 +111,7 @@ class MockGuardian:
             "verdict_id": f"v-{self._counter:06d}", "reading_id": raw["reading_id"],
             "sig_hash": sig_hash(raw["sig"]), "device_id": raw["device_id"], "state": state,
             "trust": 1.0 if state == "TRUSTED" else 0.0,
-            "reasons": [] if state == "TRUSTED" else ["SCRIPTED"],
+            "reasons": [] if state == "TRUSTED" else list(self._policy.reasons or ("SCRIPTED",)),
             "issued_at": _fmt(issued), "expires_at": _fmt(expires)}
         if self._policy.kind != "unsigned":
             verdict["sig"] = sign(verdict, self._key)
@@ -121,6 +136,10 @@ class MockGuardian:
         kind = self._policy.kind
         if kind == "silent":
             return []
+        if kind == "silent_window":
+            since = (now - self._first).total_seconds()
+            if self._policy.seconds <= since < self._policy.until:
+                return []
         verdict = self._verdict(raw, now)
         if kind != "delay":
             return [verdict]

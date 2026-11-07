@@ -1,4 +1,6 @@
 # T05: a valve replies ok and does nothing. The Brain must flag it once and never resend.
+# T05 drives the Tier T0 bang-bang planner: one open command, and a valve that ignores it.
+planner: t0
 duration_s: 300
 guardian_policy: trust_all
 inject:

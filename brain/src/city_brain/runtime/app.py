@@ -35,6 +35,7 @@ from city_brain.edge.guard import (
 )
 from city_brain.edge.profiles import ProfileError, ToolCall, TwinProfile
 from city_brain.edge.signatures import KeyRing
+from city_brain.persistence.journal import SqliteJournal
 from city_brain.ports import TwinPort
 from city_brain.runtime.clocks import Clock
 
@@ -62,6 +63,7 @@ class BrainApp:
         profile: TwinProfile,
         keyring: KeyRing,
         registry: MutableMapping[str, DeviceProfile],
+        journal: SqliteJournal | None = None,
         wall_now: Callable[[], float] = time.monotonic,
     ):
         self.state = BrainState.new(config.policy, config.params)
@@ -74,6 +76,8 @@ class BrainApp:
         self._profile = profile
         self._keyring = keyring
         self._registry = registry
+        self._journal = journal
+        self._replaying = False
         self._wall_now = wall_now
         self._bad_signatures: dict[str, float] = {}  # device id -> wall time of its latest reject
         self._last_reload: float | None = None
@@ -81,6 +85,39 @@ class BrainApp:
 
     async def start(self) -> None:
         await self._load_registry()
+
+    async def recover(self) -> int:
+        """Rebuild the state from the journal, then settle what the outbox still owes.
+
+        Replaying must not publish the old records again or resend the old commands: the
+        log and the Twin already have them. Only the commands the outbox never confirmed
+        are in question, and the Twin is asked about each before anything is sent (spec 8.8).
+        """
+        if self._journal is None:
+            return 0
+        events = self._journal.replay_events()
+        self._replaying = True
+        try:
+            for event in events:
+                self.state, _ = step(self.state, event)
+        finally:
+            self._replaying = False
+        await self._settle_outbox()
+        return len(events)
+
+    async def _settle_outbox(self) -> None:
+        for effect_id, effect in self._journal.pending_outbox():
+            if not isinstance(effect, SendCommand):
+                self._journal.mark_dispatched(effect_id)  # the log already holds it
+                continue
+            cached = await self._twin.get_result(effect.idempotency_key)
+            if cached is not None:
+                self._journal.mark_dispatched(effect_id)
+                await self.feed(CommandResult(effect.action_id, _outcome_of(cached), cached))
+                continue
+            result = await self._send(effect)
+            self._journal.mark_dispatched(effect_id)
+            await self.feed(result)
 
     async def reload_registry(self) -> None:
         self._last_reload = self._wall_now()
@@ -108,7 +145,9 @@ class BrainApp:
         handled: list[Effect] = []
         pending: deque[Event] = deque([event])
         while pending:
-            self.state, effects = step(self.state, pending.popleft())
+            current = pending.popleft()
+            self.state, effects = step(self.state, current)
+            self._journal_step(current, effects)
             for effect in effects:
                 result = await self._handle(effect)
                 if result is not None:
@@ -117,6 +156,10 @@ class BrainApp:
         if self._needs_reload(handled):
             await self.reload_registry()  # the restarted Twin's actuators and keys, not the old ones
         return handled
+
+    def _journal_step(self, event: Event, effects: list[Effect]) -> None:
+        if self._journal is not None and not self._replaying:
+            self._journal.append_step(self.state.epoch, event, effects)
 
     async def _load_registry(self) -> None:
         raw_devices, keys, _ = await self._twin.load_registry()
@@ -147,6 +190,8 @@ class BrainApp:
         return changed and self._reload_allowed()
 
     async def _handle(self, effect: Effect) -> CommandResult | None:
+        if self._replaying:
+            return None  # the log and the Twin already have everything this step produced
         if isinstance(effect, Publish):
             self._log.append(self._with_tool(effect.event))
         elif isinstance(effect, SendCommand):
@@ -179,4 +224,23 @@ class BrainApp:
         if isinstance(call, ProfileError):
             return CommandResult(command.action_id, "REJECTED", {"error": type(call).__name__})
         outcome = await self._twin.call(call, command.idempotency_key)
+        self._confirm_sent(command)
         return CommandResult(command.action_id, outcome.outcome, outcome.reply)
+
+    def _confirm_sent(self, command: SendCommand) -> None:
+        """The Twin has the command: the outbox no longer owes it (spec 9.4)."""
+        if self._journal is None:
+            return
+        for effect_id, effect in self._journal.pending_outbox():
+            if isinstance(effect, SendCommand) and effect.idempotency_key == command.idempotency_key:
+                self._journal.mark_dispatched(effect_id)
+
+
+def _outcome_of(reply: dict) -> Literal["ACCEPTED", "REJECTED", "UNKNOWN"]:
+    """What a cached Twin reply says happened to a command that may have been sent."""
+    status = reply.get("status") if isinstance(reply, dict) else None
+    if status == "ok":
+        return "ACCEPTED"
+    if status == "error":
+        return "REJECTED"
+    return "UNKNOWN"

@@ -1,0 +1,10 @@
+# T12: a real flood during a stolen-key power attack. The Brain must hold on the feeder it
+# cannot trust and still drain the tank it can.
+duration_s: 240
+guardian_policy: {kind: doubtful, device: z3-pl1, reasons: [RATE_OF_CHANGE]}
+inject:
+  - {at_s: 20, capability: device_key, target: z3-pl1, params: {}}
+expect:
+  held: z3-pl1
+  controlled: z3-wl1
+  quiet_capabilities: [grid]

@@ -62,6 +62,8 @@ def _device_id(obj: Any, field: str = "device_id") -> str | None:
 
 
 def _first_schema_error(validator: Draft7Validator, obj: Any) -> str | None:
+    if validator.is_valid(obj):  # the happy path must not build an error report to throw away
+        return None
     errors = sorted(validator.iter_errors(obj), key=lambda e: [str(p) for p in e.absolute_path])
     if not errors:
         return None

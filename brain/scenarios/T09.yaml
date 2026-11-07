@@ -1,0 +1,12 @@
+# T09: the containment dilemma. The Guardian quarantines a drain valve while its tank is
+# filling; the Brain must refuse to act on its own, ask the operator, and act on the answer.
+duration_s: 240
+planner: t0
+guardian_policy: {kind: quarantine_at, device: z2-wl1, seconds: 5.0}
+inject: []
+operator_actions:
+  - {at_s: 195, action: approve, target_device: z2-wl1}
+expect:
+  device: z2-wl1
+  approval_code: APPROVAL_REQUIRED
+  dispatched_after_s: 190

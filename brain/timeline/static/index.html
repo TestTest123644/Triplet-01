@@ -1,0 +1,308 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>City Brain Timeline</title>
+<style>
+  :root {
+    --bg: #0f1216; --panel: #171b21; --line: #242a33; --text: #e6e9ee; --dim: #9aa4b2;
+    --twin: #4aa3df; --guardian: #c9a227; --brain: #51b07a;
+    --warn: #e0813c; --bad: #d8584f; --good: #51b07a; --link: #7aa2f7;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 14px/1.5 ui-sans-serif, system-ui, "Segoe UI", sans-serif; }
+  header { display: flex; gap: 12px; align-items: center; flex-wrap: wrap;
+           padding: 10px 16px; border-bottom: 1px solid var(--line); background: var(--panel); }
+  h1 { font-size: 15px; margin: 0 12px 0 0; font-weight: 600; letter-spacing: .02em; }
+  select, input, button { background: #10141a; color: var(--text); border: 1px solid var(--line);
+            border-radius: 6px; padding: 5px 9px; font: inherit; }
+  button { cursor: pointer; }
+  button:hover { border-color: var(--link); }
+  main { display: grid; grid-template-columns: 1fr 340px; gap: 0; height: calc(100vh - 53px); }
+  #lanes { overflow: auto; padding: 12px 16px; }
+  aside { border-left: 1px solid var(--line); overflow: auto; padding: 12px 14px;
+          background: var(--panel); }
+  .lane-head { display: grid; grid-template-columns: 90px 1fr 1fr 1fr; gap: 8px;
+               position: sticky; top: 0; background: var(--bg); padding: 6px 0; z-index: 2;
+               border-bottom: 1px solid var(--line); font-size: 12px; color: var(--dim); }
+  .row { display: grid; grid-template-columns: 90px 1fr 1fr 1fr; gap: 8px; padding: 2px 0;
+         border-bottom: 1px solid #1b2027; }
+  .t { color: var(--dim); font-variant-numeric: tabular-nums; font-size: 12px; }
+  .ev { border-left: 3px solid var(--line); padding: 3px 8px; border-radius: 4px;
+        background: #141920; cursor: pointer; font-size: 12.5px; }
+  .ev:hover { background: #1a2029; }
+  .lane-twin .ev { border-left-color: var(--twin); }
+  .lane-guardian .ev { border-left-color: var(--guardian); }
+  .lane-brain .ev { border-left-color: var(--brain); }
+  .tag { font-size: 11px; color: var(--dim); text-transform: uppercase; letter-spacing: .04em; }
+  .bad { color: var(--bad); } .warn { color: var(--warn); } .good { color: var(--good); }
+  .chain { font-size: 11px; color: var(--dim); }
+  .card { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; margin-bottom: 10px;
+          background: #141920; }
+  .card h3 { margin: 0 0 6px; font-size: 13px; }
+  .kv { display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; font-size: 12.5px; }
+  .kv dt { color: var(--dim); } .kv dd { margin: 0; }
+  .band { position: relative; height: 10px; background: #1d232b; border-radius: 5px; margin: 4px 0 2px; }
+  .band i { position: absolute; top: 0; bottom: 0; background: #223 ; }
+  .band .ok { background: #1f3d2d; } .band .mark { width: 2px; background: var(--text); }
+  dialog { background: var(--panel); color: var(--text); border: 1px solid var(--line);
+           border-radius: 10px; max-width: 760px; width: 92%; }
+  dialog h2 { margin: 0 0 10px; font-size: 15px; }
+  dialog pre { background: #10141a; padding: 8px; border-radius: 6px; overflow: auto; font-size: 12px; }
+  .q { margin: 6px 0; } .q b { color: var(--dim); font-weight: 600; }
+  .muted { color: var(--dim); }
+  .pill { display: inline-block; border: 1px solid var(--line); border-radius: 999px;
+          padding: 0 7px; font-size: 11px; margin-right: 4px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>City Brain — Timeline</h1>
+  <select id="run"></select>
+  <button id="reload">Reload</button>
+  <label class="muted"><input type="checkbox" id="only-acts"> decisions and commands only</label>
+  <span style="flex:1"></span>
+  <input id="token" type="password" placeholder="operator token" size="18">
+  <button id="pause">Pause</button>
+  <button id="resume">Resume</button>
+  <span id="msg" class="muted"></span>
+</header>
+<main>
+  <section id="lanes">
+    <div class="lane-head"><div>sim time</div><div>Twin</div><div>Guardian</div><div>Brain</div></div>
+    <div id="rows"></div>
+  </section>
+  <aside>
+    <div class="card" id="summary"><h3>Run</h3><div class="muted">Pick a run.</div></div>
+    <div class="card" id="zones"><h3>Water</h3><div class="muted">—</div></div>
+    <div class="card" id="incidents"><h3>Incidents</h3><div class="muted">—</div></div>
+    <div class="card" id="approvals"><h3>Approvals</h3><div class="muted">—</div></div>
+  </aside>
+</main>
+
+<dialog id="inspector">
+  <h2 id="ins-title">Decision</h2>
+  <div id="ins-body"></div>
+  <p><button id="ins-close">Close</button></p>
+</dialog>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const state = { events: [], run: null, bands: { low: 3, high: 6, critical: 9 } };
+
+const KIND = (e) => (e.type || "").replace("tn.tsyp.brain.", "").replace(".v1", "");
+const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) =>
+  ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const clock = (iso) => (iso ? iso.slice(11, 19) : "—");
+
+// Which lane an event belongs in. The Brain only ever writes its own lane, but every record
+// names what it rests on, so the Twin and Guardian lanes are reconstructed from the evidence.
+function lanes(e) {
+  const kind = KIND(e);
+  const cited = (e.data.evidence || []);
+  const out = { twin: "", guardian: "", brain: "" };
+  if (cited.length) {
+    const ids = [...new Set(cited.map((r) => r.device_id))].join(", ");
+    const values = cited.map((r) => Number(r.value).toFixed(2)).join(" ");
+    out.twin = `<div class="ev"><span class="tag">readings</span> ${esc(ids)} <span class="muted">${esc(values)}</span></div>`;
+    const states = [...new Set(cited.map((r) => r.trust_state))].join(", ");
+    const weights = cited.map((r) => r.weight).join(" ");
+    const cls = states.includes("UNTRUSTED") ? "bad" : states.includes("DOUBTFUL") ? "warn" : "";
+    out.guardian = `<div class="ev ${cls}"><span class="tag">verdicts</span> ${esc(states)} <span class="muted">w ${esc(weights)}</span></div>`;
+  }
+  out.brain = brainCell(e, kind);
+  return out;
+}
+
+function brainCell(e, kind) {
+  const d = e.data;
+  if (kind === "decision") {
+    const what = d.outcome === "hold"
+      ? `hold ${esc(d.incident.device_id || d.incident.zone || "")}: ${esc(d.incident.hold_reason)}`
+      : `act ${esc(d.incident.incident_id || "")}`;
+    return `<div class="ev" data-id="${esc(e.id)}"><span class="tag">decision</span> ${what}</div>`;
+  }
+  if (kind === "command") {
+    const cls = ["REFUSED", "BLOCKED", "REJECTED", "UNVERIFIED"].includes(d.status) ? "bad"
+      : d.status === "AWAITING_APPROVAL" ? "warn" : "";
+    const why = (d.reasons || []).concat(d.shield ? d.shield.refusals || [] : []).join(" ");
+    return `<div class="ev ${cls}" data-id="${esc(e.id)}"><span class="tag">${esc(d.status)}</span>
+      ${esc(d.capability)} ${esc(d.target)} → ${esc(d.state)} <span class="muted">${esc(why)}</span></div>`;
+  }
+  if (kind === "verification") {
+    const cls = d.verdict === "verified" ? "good" : d.verdict === "unverified" ? "bad" : "warn";
+    return `<div class="ev ${cls}" data-id="${esc(e.id)}"><span class="tag">verification</span>
+      ${esc(d.verdict)} <span class="muted">slope ${esc(d.observed.slope)}</span></div>`;
+  }
+  if (kind === "alert") {
+    return `<div class="ev ${d.severity === "critical" ? "bad" : "warn"}" data-id="${esc(e.id)}">
+      <span class="tag">alert ${esc(d.audience)}</span> ${esc(d.code)}: ${esc(d.message)}</div>`;
+  }
+  if (kind === "incident") {
+    return `<div class="ev" data-id="${esc(e.id)}"><span class="tag">incident</span>
+      ${esc(d.kind)} ${esc(d.status)} <span class="muted">belief ${Number(d.belief).toFixed(2)}</span></div>`;
+  }
+  const extra = d.mode ? `${esc(d.mode)} (${esc(d.cause || "")})` : "";
+  return `<div class="ev" data-id="${esc(e.id)}"><span class="tag">status</span> ${esc(d.reason)} ${extra}</div>`;
+}
+
+function render() {
+  const onlyActs = $("only-acts").checked;
+  const rows = [];
+  for (const e of state.events) {
+    const kind = KIND(e);
+    if (onlyActs && !["decision", "command", "verification", "alert"].includes(kind)) continue;
+    const cell = lanes(e);
+    rows.push(`<div class="row" data-id="${esc(e.id)}">
+      <div class="t">${clock(e.simtime)}</div>
+      <div class="lane-twin">${cell.twin}</div>
+      <div class="lane-guardian">${cell.guardian}</div>
+      <div class="lane-brain">${cell.brain}</div>
+    </div>`);
+  }
+  $("rows").innerHTML = rows.join("") || '<p class="muted">No events.</p>';
+  for (const row of $("rows").children) row.addEventListener("click", () => inspect(row.dataset.id));
+}
+
+// reading -> verdict -> decision -> command -> verification, for one action.
+function chainOf(id) {
+  const event = state.events.find((e) => e.id === id);
+  if (!event) return [];
+  const key = event.actionid || event.correlationid;
+  if (!key) return [event];
+  return state.events.filter((e) => e.actionid === key || e.correlationid === key);
+}
+
+function inspect(id) {
+  const event = state.events.find((e) => e.id === id);
+  if (!event) return;
+  const d = event.data;
+  const chain = chainOf(id);
+  const answers = [
+    ["What happened", JSON.stringify(d.incident ?? d.refs ?? {})],
+    ["How sure", (d.evidence || []).map((r) => `${r.device_id} ${r.state_kind}/${r.trust_state} w=${r.weight}`).join("<br>") || "—"],
+    ["Why this", d.rationale ?? d.message ?? "—"],
+    ["What was rejected", (d.alternatives || []).map((a) => `${a.option}: ${a.rejected_because}`).join("<br>") || "—"],
+    ["What it rests on", (d.evidence || []).map((r) => r.reading_id).join(", ") || "—"],
+    ["What would change it", (d.would_change_if || []).join("; ") || "—"],
+    ["What the effect was", chain.filter((e) => KIND(e) === "verification").map((e) => `${e.data.verdict} (slope ${e.data.observed.slope})`).join(", ") || "—"],
+    ["Who may undo it", "the operator, with the controls above"],
+    ["What the risk was", d.risk_class ?? d.rule_or_plan ?? "—"],
+  ];
+  $("ins-title").textContent = `${KIND(event)} ${event.id} — ${clock(event.simtime)}`;
+  $("ins-body").innerHTML =
+    answers.map(([q, a]) => `<p class="q"><b>${q}:</b> ${a}</p>`).join("") +
+    `<p class="chain">Chain: ${chain.map((e) => `${KIND(e)}@${clock(e.simtime)}`).join(" → ")}</p>` +
+    `<pre>${esc(JSON.stringify(event, null, 2))}</pre>`;
+  $("inspector").showModal();
+}
+
+function summarise(run) {
+  const s = run && run.summary;
+  if (!s) { $("summary").innerHTML = "<h3>Run</h3><div class='muted'>No summary file.</div>"; return; }
+  const chain = s.chain_valid ? '<span class="good">valid</span>' : '<span class="bad">BROKEN</span>';
+  $("summary").innerHTML = `<h3>${esc(s.scenario)}</h3><dl class="kv">
+    <dt>events</dt><dd>${s.event_count}</dd>
+    <dt>epochs</dt><dd>${s.epoch_count}</dd>
+    <dt>chain</dt><dd>${chain}</dd>
+    <dt>commands</dt><dd>${esc(JSON.stringify(s.commands_by_capability))}</dd>
+    <dt>refusals</dt><dd>${esc(JSON.stringify(s.refusals_by_code))}</dd>
+    <dt>verifications</dt><dd>${esc(JSON.stringify(s.verifications_by_verdict))}</dd>
+    <dt>modes</dt><dd>${esc((s.mode_changes || []).join(" → ")) || "—"}</dd>
+    <dt>duplicates</dt><dd>${s.dedupe_count}</dd>
+    <dt>rejected</dt><dd>${esc(JSON.stringify(s.rejected_by_code))}</dd></dl>`;
+  const levels = s.max_water_level_by_device || {};
+  $("zones").innerHTML = "<h3>Water (highest seen)</h3>" + (Object.keys(levels).length
+    ? Object.entries(levels).map(([id, v]) => {
+        const pct = Math.min(100, (v / state.bands.critical) * 100);
+        const cls = v >= state.bands.critical ? "bad" : v > state.bands.high ? "warn" : "good";
+        return `<div><span class="pill">${esc(id)}</span> <span class="${cls}">${v.toFixed(2)} m</span>
+          <div class="band"><i class="ok" style="left:${(state.bands.low / state.bands.critical) * 100}%;
+          width:${((state.bands.high - state.bands.low) / state.bands.critical) * 100}%"></i>
+          <i class="mark" style="left:${pct}%"></i></div></div>`;
+      }).join("")
+    : "<div class='muted'>—</div>");
+}
+
+function sidebarsFromEvents() {
+  const open = new Map();
+  for (const e of state.events) {
+    if (KIND(e) !== "incident") continue;
+    open.set(e.data.incident_id, e.data);
+  }
+  const live = [...open.values()].filter((i) => !["resolved", "dismissed"].includes(i.status));
+  $("incidents").innerHTML = "<h3>Incidents</h3>" + (live.length
+    ? live.map((i) => `<div><span class="pill">${esc(i.kind)}</span> ${esc(i.zone_id)}
+        <b>${esc(i.status)}</b> <span class="muted">belief ${Number(i.belief).toFixed(2)}</span><br>
+        <span class="chain">${esc((i.findings || []).join(", "))}</span>
+        ${(i.correlations || []).map((c) => `<span class="pill">${esc(c.label)} ${esc(c.source_id)}↔${esc(c.target_id)}</span>`).join("")}</div>`).join("")
+    : "<div class='muted'>none</div>");
+
+  const waiting = state.events.filter((e) => KIND(e) === "command" && e.data.status === "AWAITING_APPROVAL");
+  const answered = new Set(state.events.filter((e) => KIND(e) === "command" &&
+    ["DISPATCHED", "BLOCKED"].includes(e.data.status)).map((e) => e.actionid));
+  const live2 = waiting.filter((e) => !answered.has(e.actionid));
+  $("approvals").innerHTML = "<h3>Approvals</h3>" + (live2.length
+    ? live2.map((e) => `<div><span class="pill warn">R3</span> ${esc(e.data.capability)}
+        ${esc(e.data.target)} → ${esc(e.data.state)}
+        <button data-approve="${esc(e.actionid)}">Approve</button>
+        <button data-deny="${esc(e.actionid)}">Deny</button></div>`).join("")
+    : "<div class='muted'>none waiting</div>");
+  for (const b of $("approvals").querySelectorAll("[data-approve]"))
+    b.onclick = () => decide(b.dataset.approve, "approve");
+  for (const b of $("approvals").querySelectorAll("[data-deny]"))
+    b.onclick = () => decide(b.dataset.deny, "deny");
+}
+
+async function post(url, body) {
+  const token = $("token").value.trim();
+  if (!token) { say("an operator token is needed", true); return null; }
+  const reply = await fetch(url, {
+    method: "POST", headers: { "Authorization": `Bearer ${token}`, "Content-Type": "application/json" },
+    body: body ? JSON.stringify(body) : "{}",
+  });
+  const text = await reply.text();
+  say(reply.ok ? text : `${reply.status}: ${text}`, !reply.ok);
+  return reply.ok;
+}
+
+const say = (text, bad) => {
+  $("msg").textContent = text;
+  $("msg").className = bad ? "bad" : "good";
+  setTimeout(() => { $("msg").textContent = ""; }, 6000);
+};
+
+const decide = (id, decision) => post(`/api/approvals/${encodeURIComponent(id)}`, { decision });
+
+async function loadRuns() {
+  const reply = await fetch("/api/runs");
+  const body = await reply.json();
+  $("run").innerHTML = body.runs.map((r) =>
+    `<option value="${esc(r.name)}">${esc(r.name)}</option>`).join("")
+    || '<option value="">no runs yet</option>';
+  state.runs = body.runs;
+  if (body.runs.length) await loadRun(body.runs[0].name);
+}
+
+async function loadRun(name) {
+  state.run = name;
+  const reply = await fetch(`/api/events?run=${encodeURIComponent(name)}`);
+  const body = await reply.json();
+  state.events = body.events || [];
+  summarise((state.runs || []).find((r) => r.name === name));
+  sidebarsFromEvents();
+  render();
+}
+
+$("run").addEventListener("change", (e) => loadRun(e.target.value));
+$("reload").addEventListener("click", () => loadRuns());
+$("only-acts").addEventListener("change", render);
+$("ins-close").addEventListener("click", () => $("inspector").close());
+$("pause").addEventListener("click", () => post("/api/control/pause"));
+$("resume").addEventListener("click", () => post("/api/control/resume"));
+loadRuns();
+</script>
+</body>
+</html>

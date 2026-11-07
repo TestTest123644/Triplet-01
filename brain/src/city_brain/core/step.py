@@ -32,7 +32,9 @@ from city_brain.core.water import (
     plan_water_t0,
     water_hold_reason,
 )
+from city_brain.core.water_mpc import plan_water_mpc
 from city_brain.domain.types import (
+    ActionIntent,
     DeviceStatus,
     EvidenceRef,
     GuardianContainment,
@@ -327,6 +329,7 @@ def _water_reading(state: BrainState, obs: Observation, effects: list[Effect]) -
     u = commanded_ratio(valve_state) or 0.0
     water_filter = _update_water_filter(state, obs, u)
     _track_low_band(state, device_id, water_filter, u)
+    _track_trust_run(state, obs)
     device = state.registry.get(device_id)
     target = device.actuator.target if device is not None and device.actuator is not None else device_id
     verdict = state.device_verdicts.get(device_id)
@@ -343,6 +346,9 @@ def _water_reading(state: BrainState, obs: Observation, effects: list[Effect]) -
         target=target,
         untrusted=verdict is not None and verdict.state is TrustState.UNTRUSTED,
         contained=device is not None and device.status is not DeviceStatus.OK,
+        min_val=device.min_val if device is not None else 0.0,
+        max_val=device.max_val if device is not None else 0.0,
+        trusted_since=state.trusted_since.get(device_id),
     )
     coordinator.note_reading(state, obs)
     effects.extend(coordinator.on_estimate(state))
@@ -350,10 +356,17 @@ def _water_reading(state: BrainState, obs: Observation, effects: list[Effect]) -
     readings = state.window_readings.setdefault(device_id, deque(maxlen=window_ticks + 1))
     readings.append((obs.seq, obs.reading_id, obs.sig_hash))
     _check_recovery(state, target, water_filter, valve_state, readings, effects)
-    intent = plan_water_t0(context, state.policy)
+    intent = _plan_water(context, state.policy)
     if intent is not None and coordinator.may_propose(state, intent):
         effects.extend(coordinator.propose(state, intent))
     _note_hold(state, context, effects)
+
+
+def _plan_water(context: WaterContext, policy) -> "ActionIntent | None":
+    """The configured planner: model predictive control, or the T0 fallback (spec 10.3)."""
+    if policy["water"].get("planner", "mpc") == "mpc":
+        return plan_water_mpc(context, policy)
+    return plan_water_t0(context, policy)
 
 
 def _check_recovery(
@@ -420,6 +433,21 @@ def _track_low_band(state: BrainState, device_id: str, water_filter: WaterFilter
         state.below_low_since[device_id] = None
     elif u > 0.0 and state.below_low_since.get(device_id) is None:
         state.below_low_since[device_id] = state.sim_now
+
+
+def _track_trust_run(state: BrainState, obs: Observation) -> None:
+    """How long this channel has been reading trusted, for the moves that require it."""
+    verdict = state.ledger.latest(obs.reading_id, obs.sig_hash)
+    trusted = (
+        verdict is not None
+        and verdict.state is TrustState.TRUSTED
+        and obs.device_status is DeviceStatus.OK
+        and "OUT_OF_RANGE" not in obs.flags
+    )
+    if not trusted:
+        state.trusted_since[obs.device_id] = None
+    elif state.trusted_since.get(obs.device_id) is None:
+        state.trusted_since[obs.device_id] = state.sim_now
 
 
 def _note_hold(state: BrainState, context: WaterContext, effects: list[Effect]) -> None:

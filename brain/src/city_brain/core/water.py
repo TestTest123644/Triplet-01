@@ -32,6 +32,9 @@ class WaterContext:
     target: str
     untrusted: bool = False  # the device's latest Guardian verdict is UNTRUSTED
     contained: bool = False  # the Guardian has isolated or quarantined this channel
+    min_val: float = 0.0     # the channel's range, for the MPC's forward simulation
+    max_val: float = 0.0
+    trusted_since: datetime | None = None  # when this channel last started reading trusted
 
 
 def commanded_ratio(valve_state: str) -> float | None:

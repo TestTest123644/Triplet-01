@@ -22,6 +22,11 @@ from city_brain.domain.types import (
 from tests.factories import T0, make_observation, make_verdict
 
 CFG = load_config("config/standalone.yaml")
+# These helpers drive the T0 water loop: the bang-bang planner is what the action lifecycle,
+# the trust gate, the modes and the approvals were written against, and it is still the
+# Tier T0 fallback (spec 10.3). The model-based planner has its own tests.
+CFG = CFG.model_copy(update={
+    "policy": {**CFG.policy, "water": {**CFG.policy["water"], "planner": "t0"}}})
 ALLOWLIST = {"valve": frozenset({"open", "closed", "ratio"})}
 PERIOD_S = CFG.params["filter"]["sample_period_s"]
 RISE_RATE = 0.02  # m/s, valve closed

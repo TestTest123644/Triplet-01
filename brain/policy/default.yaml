@@ -1,10 +1,26 @@
 water:
+  planner: mpc              # mpc (capability tier T2) or t0 (bang-bang, tier T0)
   high_band: 6.0
   low_band: 3.0
   critical_band: 9.0
   horizon_s: 60.0           # how far ahead the containment exception looks (spec 8.7)
   close_sustain_s: 5.0
   evidence_count: 3
+  mpc:                      # enumerative model predictive control (spec 8.5, 10.3)
+    candidates: [0, 20, 33, 50, 75, 100]
+    target: 4.0
+    lambda_change: 8.0      # the cost of moving the valve at all
+    mu_high: 2000.0         # the cost of sitting above the high band: a flood is the hazard
+    mu_low: 50.0            # below the low band only wastes the drain
+    horizon_s: 60.0           # the fine horizon, in step_s steps
+    step_s: 1.0
+    tail_s: 600.0             # a coarse tail, so a position is judged by where it settles
+    tail_step_s: 10.0
+    replan_s: 1.0
+    tolerance: 0.012        # m/s of slack the expected effect allows
+    open_window_s: 3.0
+    close_window_s: 5.0
+    close_sustain_s: 5.0    # trusted data a closing move needs behind it
 detectors:
   water:
     rising_rate: 0.005        # m/s above which a channel counts as rising

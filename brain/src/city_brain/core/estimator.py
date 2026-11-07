@@ -22,6 +22,12 @@ class WaterFilter:
         self._r0 = float(params["r0"])
         self._q = np.diag([float(params["q_level"]), float(params["q_inflow"])])
         self._b = float(params["b_prior"])
+        self._b_min = float(params.get("b_min", self._b))
+        self._b_max = float(params.get("b_max", self._b))
+        self._rls_lambda = float(params.get("rls_forgetting", 1.0))
+        self._rls_p = float(params.get("rls_p0", 0.0))
+        self._inflow_tau = float(params.get("inflow_tau_s", 0.0))
+        self._inflow_mean = 0.0
         self._jump_sigma = float(params["jump_sigma"])
         self._stuck_ticks = int(params["stuck_ticks"])
         self._stale_ticks = float(params["stale_s"]) / self._period
@@ -59,12 +65,47 @@ class WaterFilter:
         return float(self._x[1] - self._b * self._u)
 
     @property
+    def inflow_mean(self) -> float:
+        """The inflow held still: what a plan should be built on, not one tick's estimate.
+
+        The Kalman inflow follows the measurement noise closely enough that a planner
+        choosing the nearest valve position would flip between two of them every second.
+        """
+        if self._inflow_tau <= 0.0:
+            return self.inflow
+        return self._inflow_mean
+
+    @property
+    def b_hat(self) -> float:
+        """The valve gain the channel has learned: drain per unit of opening (spec 8.4)."""
+        return self._b
+
+    def identify_gain(self, u: float, slope: float) -> None:
+        """One bounded RLS step from a settled valve position and the slope it produced.
+
+        The model is `rate = inflow - b * u`, so a measured slope says `b * u = inflow - slope`.
+        A closed valve says nothing about the gain, and the estimate never leaves its bounds:
+        a Twin that ignores the valve must not teach the Brain an absurd model.
+        """
+        if u <= 0.0 or self._rls_p <= 0.0:
+            return
+        y = float(self._x[1]) - slope
+        error = y - self._b * u
+        gain = self._rls_p * u / (self._rls_lambda + self._rls_p * u * u)
+        self._b = min(self._b_max, max(self._b_min, self._b + gain * error))
+        self._rls_p = (self._rls_p - gain * u * self._rls_p) / self._rls_lambda
+
+    @property
     def var_level(self) -> float:
         return float(self._p[0, 0])
 
     @property
     def var_rate(self) -> float:
         return float(self._p[1, 1])
+
+    @property
+    def period_s(self) -> float:
+        return self._period
 
     @property
     def last_tick(self) -> int:
@@ -137,10 +178,17 @@ class WaterFilter:
         self._p = (self._p + self._p.T) / 2.0
         self._flags.discard("IMPLAUSIBLE_JUMP")
         self._gated_run = 0
+        self._smooth_inflow()
         if "MODEL_MISMATCH" in self._flags:
             self._ungated_run += 1
             if self._ungated_run >= UNGATED_RUN_TO_CLEAR:
                 self._flags.discard("MODEL_MISMATCH")
+
+    def _smooth_inflow(self) -> None:
+        if self._inflow_tau <= 0.0:
+            return
+        alpha = min(1.0, self._period / self._inflow_tau)
+        self._inflow_mean += alpha * (float(self._x[1]) - self._inflow_mean)
 
     def _initialise(self, value: float, tick: int, u: float) -> None:
         self._x = np.array([value, 0.0])
@@ -149,6 +197,7 @@ class WaterFilter:
         self._initialised = True
         self._last_tick = tick
         self._last_weighted_tick = tick
+        self._inflow_mean = 0.0
 
     def _observe(self, value: float, tick: int, prior_rate: float, at_ceiling: bool) -> None:
         self._ring.append((tick, value))

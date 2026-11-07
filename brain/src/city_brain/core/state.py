@@ -76,6 +76,8 @@ class BrainState:
     last_blocked_at: dict[str, datetime] = field(default_factory=dict)
     last_refusal: dict[tuple[str, str], tuple[str, ...]] = field(default_factory=dict)
     below_low_since: dict[str, datetime | None] = field(default_factory=dict)
+    # When each channel last started reading trusted, for the moves that need it behind them.
+    trusted_since: dict[str, datetime | None] = field(default_factory=dict)
     last_hold: dict[str, str | None] = field(default_factory=dict)
     plan_version: dict[str, int] = field(default_factory=dict)
     recent: dict[str, deque[EvidenceRef]] = field(default_factory=dict)

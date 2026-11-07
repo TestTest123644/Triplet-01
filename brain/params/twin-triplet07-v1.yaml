@@ -7,6 +7,11 @@ filter:
   jump_sigma: 6.0
   stuck_ticks: 30
   stale_s: 2.0
+  b_min: 0.015              # bounds on the learned valve gain (spec 8.4)
+  b_max: 0.090
+  inflow_tau_s: 30.0        # smoothing on the inflow the planner builds a plan from
+  rls_forgetting: 0.98
+  rls_p0: 2.0e-2            # the steady state for a fully open valve: adapts in tens of steps
 lag_filter:                 # non-water channels: first-order lag plus drift (spec 8.2)
   defaults:
     sample_period_s: 0.1

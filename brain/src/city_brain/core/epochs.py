@@ -48,6 +48,7 @@ def start_new_epoch(state: BrainState) -> None:
     state.last_blocked_at.clear()
     state.last_refusal.clear()
     state.below_low_since.clear()
+    state.trusted_since.clear()
     state.last_hold.clear()
     state.recent.clear()
     state.epoch_candidates.clear()
