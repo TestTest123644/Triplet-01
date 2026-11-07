@@ -28,6 +28,7 @@ class KafkaSource:
         consumer: Any | None = None,
         pause_at: int = PAUSE_AT,
         resume_at: int = RESUME_AT,
+        security_config: Mapping[str, Any] | None = None,
     ):
         self._bootstrap = bootstrap
         self._group = group
@@ -37,6 +38,7 @@ class KafkaSource:
         self._offset_reset = offset_reset
         self._consumer = consumer
         self._pause_at, self._resume_at = int(pause_at), int(resume_at)
+        self._security_config = dict(security_config) if security_config else {}
         self._paused = False
         self._uncommitted = 0
 
@@ -44,13 +46,16 @@ class KafkaSource:
 
     @property
     def config(self) -> dict[str, Any]:
-        return {
+        cfg = {
             "bootstrap.servers": self._bootstrap,
             "group.id": self._group,
             "auto.offset.reset": self._offset_reset,
             "enable.auto.commit": False,  # the Brain commits what it has taken on
             "enable.partition.eof": False,
         }
+        if self._security_config:
+            cfg.update(self._security_config)
+        return cfg
 
     @property
     def topics(self) -> list[str]:

@@ -6,6 +6,7 @@ record of what the Brain did, so a broker that is down must never stall the cont
 """
 
 import json
+from collections.abc import Mapping
 from typing import Any
 
 DEFAULT_TOPIC = "brain.events"
@@ -24,21 +25,34 @@ class KafkaSink:
         topic: str = DEFAULT_TOPIC,
         producer: Any | None = None,
         queue_size: int = 100_000,
+        security_config: Mapping[str, Any] | None = None,
+        acks: int | str = "all",
     ):
         self._bootstrap = bootstrap
         self._topic = topic
         self._producer = producer
         self._queue_size = queue_size
+        self._security_config = dict(security_config) if security_config else {}
+        self._acks = acks
         self.dropped = 0
 
     @property
     def config(self) -> dict[str, Any]:
-        return {
+        cfg: dict[str, Any] = {
             "bootstrap.servers": self._bootstrap,
             "queue.buffering.max.messages": self._queue_size,
-            "enable.idempotence": True,  # a retried publish must not duplicate a record
+            "batch.num.messages": 1000,
             "linger.ms": 5,
         }
+        if str(self._acks).lower() == "all":
+            cfg["enable.idempotence"] = True
+            cfg["acks"] = "all"
+        else:
+            cfg["enable.idempotence"] = False
+            cfg["acks"] = self._acks
+        if self._security_config:
+            cfg.update(self._security_config)
+        return cfg
 
     @property
     def topic(self) -> str:
