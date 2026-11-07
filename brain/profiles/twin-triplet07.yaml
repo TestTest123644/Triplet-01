@@ -68,5 +68,6 @@ actuators:
     tool: dispatch
     target: zone
     args: {incident_type: "{incident_type}"}
+    incident_types: [flood, traffic_accident, medical_surge, fire, police]
 detectors:
   water: {high: 6.0, critical: 9.0, target: 4.0, band: [3.0, 6.0]}

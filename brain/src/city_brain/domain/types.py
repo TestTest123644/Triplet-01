@@ -85,6 +85,7 @@ class ActionStatus(StrEnum):
     PROPOSED = "PROPOSED"
     REFUSED = "REFUSED"
     AWAITING_TRUST = "AWAITING_TRUST"
+    AWAITING_APPROVAL = "AWAITING_APPROVAL"
     BLOCKED = "BLOCKED"
     DISPATCHED = "DISPATCHED"
     REJECTED = "REJECTED"
@@ -232,3 +233,5 @@ class ActionIntent(_Frozen):
     evidence: tuple[EvidenceRef, ...]
     rationale: str
     alternatives: tuple[Alternative, ...]
+    # Set only by the containment exception (spec 8.7): an R3 the operator must approve.
+    containment_override: bool = False

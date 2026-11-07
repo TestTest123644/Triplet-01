@@ -19,6 +19,7 @@ from city_brain.domain.types import (
     ActionStatus,
     CanonicalUnit,
     DeviceStatus,
+    RiskClass,
     SensorKind,
     StateKind,
     TrustState,
@@ -315,9 +316,10 @@ def test_identical_refusal_is_silent_and_a_different_one_is_not():
     s = feed_channel(s, DEVICE, seconds=1.0, rate=0.02)
     assert [c["data"]["reasons"] for c in commands(s.last_effects, "REFUSED")] == [["COOLDOWN"]]
     assert s.counters["REFUSED_REPEAT"] == 9
-    s = feed_channel(s, DEVICE, seconds=0.2, rate=0.02, device_status=DeviceStatus.ISOLATED)
+    s.allowlist = {}  # the partner withdrew the capability: a second, different refusal
+    s = feed_channel(s, DEVICE, seconds=0.2, rate=0.02)
     assert [c["data"]["reasons"] for c in commands(s.last_effects, "REFUSED")] == [
-        ["COOLDOWN"], ["TARGET_CONTAINED", "COOLDOWN"],
+        ["COOLDOWN"], ["STATE_NOT_ALLOWED", "COOLDOWN"],
     ]
 
 
@@ -656,12 +658,20 @@ def test_suspect_clears_on_a_new_epoch():
 # ----- registry status -----
 
 
-def test_shield_refuses_a_contained_target_after_a_status_sync():
+def test_a_reading_that_reports_containment_raises_the_r3_exception():
+    """Rising water on a contained channel is the containment dilemma, not a plain refusal.
+
+    The Shield still refuses every other action on a contained target; what makes this one
+    different is the R3 override the planner sets, and the operator who has to answer it
+    (spec 8.7, tests/core/test_containment_dilemma.py).
+    """
     s = state_with_registry()
     s = feed_rising_channel(s, DEVICE, until_level=5.995, verdict=None)
     s = feed_channel(s, DEVICE, seconds=1.0, rate=0.02, verdict=None, device_status=DeviceStatus.ISOLATED)
     [record] = s.actions.values()
-    assert record.status is ActionStatus.REFUSED and "TARGET_CONTAINED" in record.reasons
+    assert s.registry[DEVICE].status is DeviceStatus.ISOLATED
+    assert record.intent.risk_class is RiskClass.R3 and record.intent.containment_override
+    assert "TARGET_CONTAINED" not in record.shield.refusals
     assert not of_type(SendCommand, s.last_effects)
 
 

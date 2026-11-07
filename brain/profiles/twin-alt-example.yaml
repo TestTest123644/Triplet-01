@@ -37,3 +37,4 @@ actuators:
     tool: dispatch
     target: zone
     args: {incident_type: "{incident_type}"}
+    incident_types: [flood, traffic_accident, medical_surge, fire, police]

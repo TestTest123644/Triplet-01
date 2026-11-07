@@ -259,10 +259,11 @@ def test_allowlist_and_partner_acceptance():
     assert p.allowlist["valve"] == frozenset({"open", "closed", "ratio"})
     assert p.allowlist["signal"] == frozenset({"boost", "normal", "restrict"})
     assert p.allowlist["grid"] == frozenset({"primary", "secondary", "shed", "standby"})
-    assert "dispatch" not in p.allowlist
+    assert p.allowlist["dispatch"] == frozenset(
+        {"flood", "traffic_accident", "medical_surge", "fire", "police"})
     assert p.accepts_partner_state("valve", "open") and p.accepts_partner_state("valve", "40%")
     assert not p.accepts_partner_state("valve", "half")
     assert p.accepts_partner_state("signal", "green_wave")
     assert not p.accepts_partner_state("signal", "boost")
-    assert p.accepts_partner_state("dispatch", "anything")
+    assert p.accepts_partner_state("dispatch", "anything")  # the real Twin takes any string
     assert not p.accepts_partner_state("nope", "x")

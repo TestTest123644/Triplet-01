@@ -102,6 +102,12 @@ def test_both_cameras_high_confirms_congestion():
     assert changed == [incident]
 
 
+def test_a_doubtful_single_sensor_cannot_raise_an_incident_on_its_own():
+    book = IncidentBook()
+    run(book, [finding("p1", "LOAD_HIGH")], trust={"p1": 0.5})
+    assert book.incidents == {}
+
+
 def test_an_untrusted_sensor_moves_nothing():
     book = IncidentBook()
     run(book, [finding("t1", "FLOW_ANOMALY"), finding("t2", "FLOW_ANOMALY")], trust={"t1": 0.0, "t2": 0.0})
@@ -110,7 +116,7 @@ def test_an_untrusted_sensor_moves_nothing():
 
 def test_a_doubtful_sensor_moves_less_than_a_trusted_one():
     doubtful, trusted = IncidentBook(), IncidentBook()
-    run(doubtful, [finding("p1", "LOAD_HIGH")], trust={"p1": 0.5})
+    run(doubtful, [finding("p1", "LOAD_HIGH")], trust={"p1": 0.9})
     run(trusted, [finding("p1", "LOAD_HIGH")], trust={"p1": 1.0})
     assert tracked(doubtful, IncidentKind.GRID_STRESS).belief < tracked(
         trusted, IncidentKind.GRID_STRESS).belief
@@ -209,7 +215,7 @@ def test_coupled_siblings_on_validated_data_are_confirmed():
 def test_coupled_siblings_on_doubtful_data_are_only_probable():
     book = IncidentBook()
     run(book, [finding("t1", "FLOW_ANOMALY"), finding("t2", "FLOW_ANOMALY")],
-        trust={"t1": 0.5, "t2": 0.5})
+        trust={"t1": 0.8, "t2": 0.8})
     assert links(tracked(book, IncidentKind.CONGESTION)) == {
         ("t1", "t2"): CorrelationLabel.PROBABLE}
 
@@ -218,7 +224,7 @@ def test_only_a_confirmed_correlation_adds_evidence():
     confirmed, probable = IncidentBook(), IncidentBook()
     run(confirmed, [finding("t1", "FLOW_ANOMALY", score=0.7), finding("t2", "FLOW_ANOMALY", score=0.7)])
     run(probable, [finding("t1", "FLOW_ANOMALY", score=0.7), finding("t2", "FLOW_ANOMALY", score=0.7)],
-        trust={"t1": 0.9, "t2": 0.5})
+        trust={"t1": 0.9, "t2": 0.85})
     bonus = ASSESSOR["correlation_bonus"]
     assert tracked(confirmed, IncidentKind.CONGESTION).belief > tracked(
         probable, IncidentKind.CONGESTION).belief

@@ -5,7 +5,17 @@ Every function mutates `state` on behalf of `step` and returns the effects to em
 
 from collections.abc import Iterable
 
-from city_brain.core.events import CancelTimer, CommandResult, Effect, Publish, SendCommand, StartTimer, TimerFired
+from city_brain.core.events import (
+    CancelTimer,
+    CommandResult,
+    Effect,
+    OperatorCommand,
+    Publish,
+    SendCommand,
+    StartTimer,
+    TimerFired,
+)
+from city_brain.core import catalog
 from city_brain.core.records import alert_event, command_event, decision_event, verification_event
 from city_brain.core.shield import ShieldContext, evaluate
 from city_brain.core.state import ActionRecord, BrainState
@@ -17,6 +27,7 @@ from city_brain.domain.types import (
     DeviceStatus,
     EvidenceRef,
     Observation,
+    RiskClass,
     StateKind,
     TrustState,
 )
@@ -24,10 +35,16 @@ from city_brain.domain.types import (
 RULE = "water_t0"
 VERDICT_WAIT = "verdict_wait"
 VERDICT_TIMER_PREFIX = "verdict:"
+APPROVAL_WAIT = "approval_wait"
+APPROVAL_TIMER_PREFIX = "approval:"
 SETTLE_TICKS = 5  # skip the first 0.5 s after acceptance while the valve takes effect
-ACTIVE = frozenset(
-    {ActionStatus.PROPOSED, ActionStatus.AWAITING_TRUST, ActionStatus.DISPATCHED, ActionStatus.VERIFYING}
-)
+ACTIVE = frozenset({
+    ActionStatus.PROPOSED,
+    ActionStatus.AWAITING_TRUST,
+    ActionStatus.AWAITING_APPROVAL,
+    ActionStatus.DISPATCHED,
+    ActionStatus.VERIFYING,
+})
 # A lost reply freezes the target until reconciliation (P7): the Twin may have obeyed.
 GATES_PLANNING = ACTIVE | {ActionStatus.UNKNOWN}
 EPOCH_CHANGED = "EPOCH_CHANGED"  # the restart settled the question, so the target is free again
@@ -61,6 +78,7 @@ def propose(state: BrainState, intent: ActionIntent) -> list[Effect]:
         suspect=state.suspect,
         now=state.sim_now,
         mode=state.mode,
+        zones=state.zones,
     )
     shield = evaluate(intent, context, state.allowlist, state.policy)
     refusal_key = (intent.target, intent.state)
@@ -111,7 +129,28 @@ def on_verdict(state: BrainState, reading_key: tuple[str, str]) -> list[Effect]:
     return effects
 
 
+def on_operator(state: BrainState, command: OperatorCommand) -> list[Effect]:
+    """An operator's answer to an approval request (spec 8.7). Pause and resume are the modes'."""
+    if command.action not in ("approve", "deny") or command.action_id is None:
+        return []
+    record = state.actions.get(command.action_id)
+    if record is None or record.status is not ActionStatus.AWAITING_APPROVAL:
+        return []
+    state.pending_approvals.pop(command.action_id, None)
+    effects: list[Effect] = [CancelTimer(_approval_timer_id(command.action_id))]
+    if command.action == "deny":
+        return [*effects, _block(state, record, ("OPERATOR_DENIED",))]
+    return [*effects, *dispatch(state, record, approved=True)]
+
+
 def on_timer(state: BrainState, timer: TimerFired) -> list[Effect]:
+    if timer.kind == APPROVAL_WAIT:
+        action_id = timer.timer_id.removeprefix(APPROVAL_TIMER_PREFIX)
+        record = state.actions.get(action_id)
+        if record is None or record.status is not ActionStatus.AWAITING_APPROVAL:
+            return []
+        state.pending_approvals.pop(action_id, None)
+        return [_block(state, record, ("APPROVAL_TIMEOUT",))]
     if timer.kind != VERDICT_WAIT:
         return []
     record = state.actions.get(timer.timer_id.removeprefix(VERDICT_TIMER_PREFIX))
@@ -129,10 +168,12 @@ def on_timer(state: BrainState, timer: TimerFired) -> list[Effect]:
     return _conclude(state, record, passes, reasons)
 
 
-def dispatch(state: BrainState, record: ActionRecord) -> list[Effect]:
+def dispatch(state: BrainState, record: ActionRecord, approved: bool = False) -> list[Effect]:
     passes, reasons = _check_trust(state, record)
     if not passes:
         return [_block(state, record, reasons)]
+    if not approved and _needs_approval(state, record):
+        return _ask_operator(state, record)
     if not state.bucket.take(state.sim_now):
         return [_block(state, record, ("RATE_LIMIT",))]
     intent = record.intent
@@ -143,6 +184,32 @@ def dispatch(state: BrainState, record: ActionRecord) -> list[Effect]:
         _transition(state, record, ActionStatus.DISPATCHED, (), evidence=intent.evidence),
         SendCommand(intent.action_id, record.key, intent.capability, intent.target, intent.state),
     ]
+
+
+def _needs_approval(state: BrainState, record: ActionRecord) -> bool:
+    """An R3 acts only with an operator behind it, and is asked for only once (spec 8.7)."""
+    if record.intent.risk_class is not RiskClass.R3:
+        return False
+    return record.intent.action_id not in state.pending_approvals
+
+
+def _ask_operator(state: BrainState, record: ActionRecord) -> list[Effect]:
+    intent = record.intent
+    state.pending_approvals[intent.action_id] = state.sim_now
+    wait_s = float(state.policy["approvals"]["wait_s"])
+    return [
+        _transition(state, record, ActionStatus.AWAITING_APPROVAL, (), evidence=intent.evidence),
+        StartTimer(_approval_timer_id(intent.action_id), APPROVAL_WAIT, wait_s),
+        Publish(alert_event(
+            state, "operator", "critical", "APPROVAL_REQUIRED",
+            f"{intent.state} on {intent.target} needs an operator: {intent.rationale}",
+            _refs(intent),
+        )),
+    ]
+
+
+def _approval_timer_id(action_id: str) -> str:
+    return f"{APPROVAL_TIMER_PREFIX}{action_id}"
 
 
 def on_result(state: BrainState, result: CommandResult) -> list[Effect]:
@@ -230,16 +297,26 @@ def _refs(intent: ActionIntent) -> dict:
     return {"action_id": intent.action_id, "incident_id": intent.incident_id, "target": intent.target}
 
 
-def _resolve(state: BrainState, ref: EvidenceRef) -> tuple[EvidenceRef, bool]:
+def _resolve(
+    state: BrainState, ref: EvidenceRef, honour_history: bool = False
+) -> tuple[EvidenceRef, bool]:
     """The ref as the ledger and registry see it now, and whether its verdict has gone.
 
     Contained at arrival or contained now both mean zero weight: release does not launder a
     reading taken during containment. An unregistered device carries no weight either.
+
+    `honour_history` is the containment exception (spec 8.7): the reading is weighed as the
+    device reported itself when it arrived, so an R3 may cite the last trusted readings from
+    before the containment. A reading taken while the device itself reported containment
+    still carries nothing, and only an operator can let the action through.
     """
     verdict = state.ledger.lookup(ref.reading_id, ref.sig_hash, state.sim_now)
     device = state.registry.get(ref.device_id)
     current = device.status if device is not None else DeviceStatus.ISOLATED
-    status = current if ref.device_status is DeviceStatus.OK else ref.device_status
+    if honour_history:
+        status = ref.device_status
+    else:
+        status = current if ref.device_status is DeviceStatus.OK else ref.device_status
     weight = trust_weight(verdict, status, state.policy["trust"]["caps"])
     known = ref.verdict_id is not None or state.ledger.latest(ref.reading_id, ref.sig_hash) is not None
     return evidence_ref(ref, verdict, weight), verdict is None and known
@@ -247,7 +324,8 @@ def _resolve(state: BrainState, ref: EvidenceRef) -> tuple[EvidenceRef, bool]:
 
 def _check_trust(state: BrainState, record: ActionRecord) -> tuple[bool | None, tuple[str, ...]]:
     """Refresh the cited evidence. True: requirement met; False: failed; None: verdicts pending."""
-    resolved = [_resolve(state, ref) for ref in record.intent.evidence]
+    history = record.intent.containment_override
+    resolved = [_resolve(state, ref, honour_history=history) for ref in record.intent.evidence]
     evidence = tuple(ref for ref, _ in resolved)
     record.intent = record.intent.model_copy(update={"evidence": evidence})
     met, reasons = meets_requirement(evidence, record.intent.risk_class)
@@ -323,7 +401,9 @@ def _verify(state: BrainState, record: ActionRecord) -> list[Effect]:
     expected = intent.expected_effect
     since_tick = record.dispatch_tick + SETTLE_TICKS
     excluded = untrusted_ticks(state, record.window_readings)
-    slope = state.filters[expected.channel].observed_slope(since_tick, exclude_ticks=frozenset(excluded))
+    channel = state.channel_filter(expected.channel)
+    slope = None if channel is None else channel.observed_slope(
+        since_tick, exclude_ticks=frozenset(excluded))
     if slope is None:
         verdict = "inconclusive"
     elif expected.comparator == "<=":
@@ -339,6 +419,8 @@ def _verify(state: BrainState, record: ActionRecord) -> list[Effect]:
     ))]
     if verdict == "verified":
         return effects
+    if intent.incident_id in state.incidents.incidents:  # the next catalog step is next (spec 8.5)
+        catalog.note_step_failed(state, intent.incident_id)
     if slope is None and _has_untrusted_verdict(state, record):
         message = f"Measurements for {intent.state} on {intent.target} were excluded as untrusted."
     elif slope is None:

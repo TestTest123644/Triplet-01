@@ -72,6 +72,7 @@ class ShieldContext:
     suspect: set[str]
     now: datetime
     mode: BrainMode = BrainMode.NORMAL
+    zones: frozenset[str] = frozenset()  # zone ids a zone-wide capability may target
 
 
 @dataclass(frozen=True)
@@ -132,6 +133,11 @@ def _mode_forbids(intent: ActionIntent, ctx: ShieldContext, policy: Mapping) -> 
     return True
 
 
+def targets_a_zone(capability: str, policy: Mapping) -> bool:
+    """Whether this capability acts on a zone rather than on one device (spec 8.5)."""
+    return capability in (policy.get("shield", {}).get("zone_capabilities") or ())
+
+
 def evaluate(
     intent: ActionIntent,
     ctx: ShieldContext,
@@ -140,11 +146,21 @@ def evaluate(
 ) -> ShieldResult:
     """Run every static check in order. Peeks the rate limit; the coordinator takes the token."""
     device = ctx.registry.get(intent.target)
-    known = device is not None
+    zone_wide = targets_a_zone(intent.capability, policy)
+    # A zone-wide capability has no device to inspect: the zone itself must be a known one,
+    # and the device checks below cannot speak to it.
+    known = intent.target in ctx.zones if zone_wide else device is not None
     # Checks that need the device cannot be evaluated for an unknown target: they record a
     # pass with no code. UNKNOWN_TARGET already refuses the intent.
-    contained = known and device.status != DeviceStatus.OK
-    no_op = known and device.actuator is not None and device.actuator.current_state == intent.state
+    # The containment exception (spec 8.7): only an R3 the planner marked as the lesser evil
+    # may act on a contained target, and only the operator can let it through (coordinator).
+    override = intent.risk_class is RiskClass.R3 and intent.containment_override
+    contained = device is not None and device.status != DeviceStatus.OK and not override
+    no_op = (
+        device is not None
+        and device.actuator is not None
+        and device.actuator.current_state == intent.state
+    )
     conflict = any(
         other.action_id != intent.action_id
         and other.target == intent.target

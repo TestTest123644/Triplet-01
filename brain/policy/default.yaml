@@ -2,6 +2,7 @@ water:
   high_band: 6.0
   low_band: 3.0
   critical_band: 9.0
+  horizon_s: 60.0           # how far ahead the containment exception looks (spec 8.7)
   close_sustain_s: 5.0
   evidence_count: 3
 detectors:
@@ -33,11 +34,12 @@ assessor:                   # log-odds evidence model (spec 8.3.2)
     RISING: 1.2
     FLOW_ANOMALY: 2.6
     FLOW_NORMAL: 2.6
-    LOAD_HIGH: 5.0
+    LOAD_HIGH: 4.5
     LOAD_JUMP: 1.0
     AQI_HIGH: 5.0
     AQ_TRAFFIC_COUPLED: 1.4
     CALL_SURGE: 5.0
+  trust_exponent: 2.0       # a doubtful source carries doubtful information, not half of it
   correlation_bonus: 1.0    # a CONFIRMED correlation is itself evidence; the others are not
   validated_trust: 0.9      # trust at or above this counts as VALIDATED for a correlation
   open_belief: 0.4
@@ -58,9 +60,38 @@ verification:
   open_window_s: 3.0
   close_rate_min: 0.005
   close_window_s: 15.0
+catalog:                    # the declarative response table (spec 8.5)
+  CONGESTION:
+    steps:
+      - {capability: signal, state: boost, risk: R1, window_s: 20.0, comparator: ">=", per_s: 0.25}
+      - {capability: dispatch, state: traffic_accident, risk: R2, window_s: 30.0,
+         comparator: "<=", per_s: -0.02}
+    escalate_with: [CALL_SURGE]   # another live incident that skips straight to the next step
+  AIR_QUALITY:
+    steps:
+      - {capability: signal, state: restrict, risk: R1, window_s: 20.0, comparator: "<=", per_s: -0.25}
+  GRID_STRESS:
+    steps:
+      - {capability: grid, state: secondary, risk: R2, window_s: 15.0, comparator: "<=", per_s: -0.333}
+      - {capability: grid, state: shed, risk: R2, window_s: 15.0, comparator: "<=", per_s: -0.333}
+  CALL_SURGE:
+    steps:
+      - {capability: dispatch, state: medical_surge, risk: R2, window_s: 30.0,
+         comparator: "<=", per_s: -0.02}
+  FLOOD_RISK:
+    requires_finding: LEVEL_CRITICAL   # the valve is the water planner's job; this is the callout
+    requires_valve_open: true
+    steps:
+      - {capability: dispatch, state: flood, risk: R2, window_s: 30.0, comparator: "<=", per_s: -0.02}
+approvals:
+  wait_s: 60.0              # how long an R3 waits for an operator before it is blocked
 shield:
+  zone_capabilities: [dispatch]   # these act on a zone, not on one device
   cooldown_s:
     valve: 5.0
+    signal: 20.0
+    grid: 15.0
+    dispatch: 120.0
   rate_limit:
     burst: 8
     per_s: 2.0

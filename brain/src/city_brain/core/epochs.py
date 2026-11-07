@@ -1,5 +1,6 @@
 """Run-epoch detection and reset (spec 9.3)."""
 
+from city_brain.core.assessor import IncidentBook
 from city_brain.core.state import BrainState, DeviceCursor, new_token_bucket
 from city_brain.domain.types import Observation
 
@@ -39,6 +40,7 @@ def start_new_epoch(state: BrainState) -> None:
     state.global_tick = 0
     state.epoch_origin = None
     state.filters.clear()
+    state.lag_filters.clear()
     state.ledger.clear()
     state.in_flight.clear()
     state.suspect.clear()
@@ -54,4 +56,8 @@ def start_new_epoch(state: BrainState) -> None:
     state.last_heard.clear()
     state.window_readings.clear()
     state.silent.clear()
+    state.timers_armed.clear()
+    # The incidents were read off the old run's channels; the new run has to earn them again.
+    state.incidents = IncidentBook()
+    state.plan_step.clear()
     state.bucket = new_token_bucket(state.policy)

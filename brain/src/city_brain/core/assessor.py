@@ -155,7 +155,8 @@ def _strongest(
     """One contribution per device per direction: the strongest it has to offer."""
     best: dict[tuple[str, int], _Contribution] = {}
     for finding in sorted(findings, key=lambda f: f.sort_key):
-        weight = float(trust.get(finding.device_id, 0.0))
+        # Trust enters convexly: half-trusted evidence is worth much less than half.
+        weight = float(trust.get(finding.device_id, 0.0)) ** float(assessor["trust_exponent"])
         magnitude = weight * finding.score * float(assessor["log_lr"][finding.kind])
         if magnitude <= 0.0:
             continue

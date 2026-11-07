@@ -156,6 +156,12 @@ def verification_event(
     return _envelope(state, "verification", target, data, incident_id, action_id)
 
 
+def incident_event(state: BrainState, incident) -> dict:
+    """One incident as the Brain now reads it (spec 8.3.3)."""
+    return _envelope(
+        state, "incident", incident.zone_id, dict(incident), incident.incident_id, None)
+
+
 def alert_event(
     state: BrainState,
     audience: Literal["operator", "guardian"],

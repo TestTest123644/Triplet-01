@@ -3,7 +3,10 @@
 from collections import deque
 from collections.abc import Sequence
 
-from city_brain.core import coordinator, modes
+from city_brain.core import catalog, coordinator, modes
+from city_brain.core.assessor import assess
+from city_brain.core.channel_filter import LagFilter, lag_params
+from city_brain.core.detectors import detect_findings
 from city_brain.core.estimator import WaterFilter
 from city_brain.core.epochs import confirm_candidate, is_new_epoch, start_new_epoch
 from city_brain.core.events import (
@@ -19,7 +22,7 @@ from city_brain.core.events import (
     TimerFired,
     VerdictReceived,
 )
-from city_brain.core.records import alert_event, decision_event, status_event
+from city_brain.core.records import alert_event, decision_event, incident_event, status_event
 from city_brain.core.state import BrainState, DeviceCursor
 from city_brain.core.trust import estimate_weight, evidence_ref, in_outage, trust_weight
 from city_brain.core.water import (
@@ -50,6 +53,7 @@ WOULD_CHANGE_IF = {
     "IMPLAUSIBLE_JUMP": "readings agree with the estimate again",
     "MODEL_MISMATCH": "readings stay consistent with the model",
     "UNKNOWN_VALVE_STATE": "the registry reports a known valve state",
+    "TARGET_CONTAINED": "the Guardian releases the device, or the level turns critical",
 }
 CONTAINMENT_STATUS = {
     "isolated": DeviceStatus.ISOLATED,
@@ -90,6 +94,7 @@ def step(state: BrainState, event: Event) -> tuple[BrainState, list[Effect]]:
         effects.extend(_guardian_notice(state, event.notice))
     elif isinstance(event, OperatorCommand):
         effects.extend(modes.on_operator(state, event))
+        effects.extend(coordinator.on_operator(state, event))
     elif isinstance(event, CommandResult):
         effects.extend(coordinator.on_result(state, event))
     elif isinstance(event, TimerFired):
@@ -179,10 +184,92 @@ def _ingest(state: BrainState, event: ReadingReceived, effects: list[Effect]) ->
         state.silent.discard(obs.device_id)
     if advanced:
         _sweep_silent_channels(state, effects)
+        _sweep_zones(state, effects)
     if obs.kind is SensorKind.WATER_LEVEL:
         _water_reading(state, obs, effects)
     else:
+        _channel_reading(state, obs)
         effects.extend(coordinator.on_estimate(state))
+
+
+def _channel_reading(state: BrainState, obs: Observation) -> None:
+    """Track a non-water channel and remember its evidence, the way water channels are tracked."""
+    channel = state.lag_filters.get(obs.device_id)
+    if channel is None:
+        device = state.registry.get(obs.device_id)
+        low = device.min_val if device is not None else 0.0
+        high = device.max_val if device is not None else 0.0
+        channel = state.lag_filters[obs.device_id] = LagFilter(
+            lag_params(state.params, obs.kind), min_val=low, max_val=high)
+    trust = state.policy["trust"]
+    in_range = "OUT_OF_RANGE" not in obs.flags
+    weight = 0.0
+    if in_range:
+        latest = state.ledger.latest(obs.reading_id, obs.sig_hash)
+        weight = estimate_weight(latest, obs.device_status, trust["caps"], _pending_weight(state, obs))
+    channel.update(obs.value, obs.seq, weight, at_ceiling="AT_CEILING" in obs.flags)
+    # So that a verification window can exclude the ticks the Guardian later distrusts.
+    coordinator.note_reading(state, obs)
+    if in_range:
+        _remember_evidence(state, obs)
+
+
+def _remember_evidence(state: BrainState, obs: Observation) -> None:
+    recent = state.recent.setdefault(
+        obs.device_id, deque(maxlen=int(state.policy["water"]["evidence_count"])))
+    trust = state.policy["trust"]
+    verdict = state.ledger.lookup(obs.reading_id, obs.sig_hash, state.sim_now)
+    recent.append(evidence_ref(obs, verdict, trust_weight(verdict, obs.device_status, trust["caps"])))
+
+
+def _device_trust(state: BrainState, device_id: str) -> float:
+    """How far the Guardian's latest word on this device lets its findings count (spec 8.3.2)."""
+    device = state.registry.get(device_id)
+    status = device.status if device is not None else DeviceStatus.ISOLATED
+    verdict = state.device_verdicts.get(device_id)
+    if verdict is None:
+        if status is not DeviceStatus.OK:
+            return 0.0
+        return float(state.policy["trust"]["pending_weight"])
+    return trust_weight(verdict, status, state.policy["trust"]["caps"])
+
+
+def _sweep_zones(state: BrainState, effects: list[Effect]) -> None:
+    """Once per tick: what each zone's channels say, what it means, and what it asks for."""
+    trust = {device_id: _device_trust(state, device_id) for device_id in sorted(state.registry)}
+    reasons = {
+        device_id: verdict.reasons for device_id, verdict in sorted(state.device_verdicts.items())
+    }
+    for zone_id in sorted(state.zones):
+        findings = detect_findings(
+            zone_id, state.registry, state.filters, state.lag_filters, state.policy,
+            state.global_tick, now=state.sim_now,
+        )
+        changed = assess(
+            state.incidents, zone_id, findings, trust, reasons, state.registry,
+            state.policy, state.sim_now,
+        )
+        for incident in changed:
+            effects.append(Publish(incident_event(state, incident)))
+            if incident.status in ("resolved", "dismissed"):
+                state.plan_step.pop(incident.incident_id, None)
+        _respond(state, zone_id, effects)
+
+
+def _respond(state: BrainState, zone_id: str, effects: list[Effect]) -> None:
+    for incident_id in sorted(state.incidents.incidents):
+        incident = state.incidents.incidents[incident_id]
+        if incident.zone_id != zone_id:
+            continue
+        for intent in catalog.plan_catalog(incident, state, state.policy):
+            if not coordinator.may_propose(state, intent):
+                continue
+            effects.extend(coordinator.propose(state, intent))
+            record = state.actions.get(intent.action_id)
+            if record is not None and record.status in catalog.UNDERWAY:
+                updated = state.incidents.mitigating(incident.incident_id, state.sim_now)
+                if updated is not None:
+                    effects.append(Publish(incident_event(state, updated)))
 
 
 def _start_epoch(state: BrainState, effects: list[Effect]) -> None:
@@ -255,6 +342,7 @@ def _water_reading(state: BrainState, obs: Observation, effects: list[Effect]) -
         global_tick=state.global_tick,
         target=target,
         untrusted=verdict is not None and verdict.state is TrustState.UNTRUSTED,
+        contained=device is not None and device.status is not DeviceStatus.OK,
     )
     coordinator.note_reading(state, obs)
     effects.extend(coordinator.on_estimate(state))

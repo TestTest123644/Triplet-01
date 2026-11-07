@@ -165,6 +165,8 @@ class TwinProfile:
         for cap, spec in self.actuators.items():
             if "states" in spec:
                 out[cap] = frozenset(spec["states"])
+            elif "incident_types" in spec:  # dispatch: the canonical state is the incident type
+                out[cap] = frozenset(spec["incident_types"])
         return out
 
     def _states(self, capability: str) -> frozenset[str]:
@@ -293,6 +295,9 @@ class TwinProfile:
         if spec is None:
             raise ProfileError(f"unknown capability '{capability}'")
         if "states" not in spec:  # dispatch: the state is the incident type
+            types = spec.get("incident_types")
+            if types is not None and state not in types:
+                raise StateNotAllowed(f"incident type '{state}' is not allowed for '{capability}'")
             args = {"zone_id": target}
             args.update({k: v.format(incident_type=state) for k, v in spec.get("args", {}).items()})
             return ToolCall(spec["tool"], args)

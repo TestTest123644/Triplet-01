@@ -56,6 +56,10 @@ class LagFilter:
         self._flags: set[str] = set()
         self._ring: deque[tuple[int, float]] = deque(maxlen=RING_SIZE)
         self._baseline: deque[tuple[int, float]] = deque()
+        # Running sums: the detectors ask for the mean and spread on every tick, so neither
+        # may walk the window.
+        self._baseline_sum = 0.0
+        self._baseline_sumsq = 0.0
         self._pending: list[tuple[int, float]] = []
         self._value: float | None = None  # last weighted measurement
         self._same_run = 0
@@ -108,14 +112,15 @@ class LagFilter:
     def baseline_mean(self) -> float:
         if not self._baseline:
             return float("nan")
-        return sum(v for _, v in self._baseline) / len(self._baseline)
+        return self._baseline_sum / len(self._baseline)
 
     @property
     def baseline_std(self) -> float:
         if not self._baseline:
             return float("nan")
-        mean = self.baseline_mean
-        return math.sqrt(sum((v - mean) ** 2 for _, v in self._baseline) / len(self._baseline))
+        n = len(self._baseline)
+        variance = self._baseline_sumsq / n - (self._baseline_sum / n) ** 2
+        return math.sqrt(max(0.0, variance))
 
     def zscore(self, value: float | None = None) -> float | None:
         """How far a value sits from the rolling baseline, or None when there is no spread yet."""
@@ -214,9 +219,10 @@ class LagFilter:
 
     def _is_dropout(self, value: float, prior_level: float) -> bool:
         """A reading at the channel's floor while the estimate was well above it (spec 8.2)."""
-        sigma = self.baseline_std
-        if not (isinstance(sigma, float) and sigma > 0.0 and not math.isnan(sigma)):
-            sigma = math.sqrt(self._r0)
+        # The measurement noise is the floor on a plausible spread: a channel that has sat
+        # on one value has a baseline spread near zero, which would make any step a dropout.
+        spread = self.baseline_std
+        sigma = math.sqrt(self._r0) if math.isnan(spread) else max(spread, math.sqrt(self._r0))
         return value <= self._min_val and prior_level > self._min_val + DROPOUT_SIGMA * sigma
 
     def _initialise(self, value: float, tick: int) -> None:
@@ -250,18 +256,30 @@ class LagFilter:
             if self._outlier_run < self._baseline_shift_ticks:
                 return
             self._outlier_run = 0
-            self._baseline.clear()
-            self._baseline.extend(
-                (t, v) for t, v in self._ring if tick - t < self._baseline_ticks)
-            self._trim_baseline(tick)
+            self._reseed_baseline(tick)
             return
         self._outlier_run = 0
+        self._add_baseline(tick, value)
+        self._trim_baseline(tick)
+
+    def _add_baseline(self, tick: int, value: float) -> None:
         self._baseline.append((tick, value))
+        self._baseline_sum += value
+        self._baseline_sumsq += value * value
+
+    def _reseed_baseline(self, tick: int) -> None:
+        self._baseline.clear()
+        self._baseline_sum = self._baseline_sumsq = 0.0
+        for t, v in self._ring:
+            if tick - t < self._baseline_ticks:
+                self._add_baseline(t, v)
         self._trim_baseline(tick)
 
     def _trim_baseline(self, tick: int) -> None:
         while self._baseline and tick - self._baseline[0][0] >= self._baseline_ticks:
-            self._baseline.popleft()
+            _, value = self._baseline.popleft()
+            self._baseline_sum -= value
+            self._baseline_sumsq -= value * value
 
     def _track_stuck(self, value: float) -> None:
         if self._value is not None and value == self._value:

@@ -31,6 +31,7 @@ class WaterContext:
     global_tick: int
     target: str
     untrusted: bool = False  # the device's latest Guardian verdict is UNTRUSTED
+    contained: bool = False  # the Guardian has isolated or quarantined this channel
 
 
 def commanded_ratio(valve_state: str) -> float | None:
@@ -53,11 +54,27 @@ def _valve_class(valve_state: str) -> str:
     return OPEN if ratio > 0 else CLOSED
 
 
+def critical_ahead(ctx: WaterContext, policy: Mapping) -> bool:
+    """Whether this channel is heading for the critical band inside the horizon (spec 8.7)."""
+    water = policy["water"]
+    critical, high = float(water["critical_band"]), float(water["high_band"])
+    level, rate = ctx.filter.level, ctx.filter.rate
+    if level >= critical:
+        return True
+    if level + rate * float(water["horizon_s"]) >= critical:
+        return True
+    return level >= high and rate > 0.0
+
+
 def water_hold_reason(ctx: WaterContext, policy: Mapping) -> str | None:
     """Why this channel must not be planned on, or None.
 
-    Order: STALE, UNTRUSTED_READINGS, INSUFFICIENT_EVIDENCE, STUCK, IMPLAUSIBLE_JUMP, MODEL_MISMATCH,
-    UNKNOWN_VALVE_STATE.
+    Order: STALE, UNTRUSTED_READINGS, INSUFFICIENT_EVIDENCE, STUCK, IMPLAUSIBLE_JUMP,
+    MODEL_MISMATCH, TARGET_CONTAINED, UNKNOWN_VALVE_STATE.
+
+    A contained channel is held unless draining it is the lesser evil: the containment
+    exception (spec 8.7) lets a predicted crossing of the critical band through, as an R3
+    the operator has to approve.
     """
     if not ctx.filter.initialised or not ctx.recent or ctx.filter.is_stale(ctx.global_tick):
         return "STALE"
@@ -69,6 +86,8 @@ def water_hold_reason(ctx: WaterContext, policy: Mapping) -> str | None:
     for reason in ("STUCK", "IMPLAUSIBLE_JUMP", "MODEL_MISMATCH"):
         if reason in flags:
             return reason
+    if ctx.contained and not (_valve_class(ctx.valve_state) == CLOSED and critical_ahead(ctx, policy)):
+        return "TARGET_CONTAINED"
     if _valve_class(ctx.valve_state) == "unknown":
         return "UNKNOWN_VALVE_STATE"
     return None
@@ -93,8 +112,11 @@ def plan_water_t0(ctx: WaterContext, policy: Mapping) -> ActionIntent | None:
     level = ctx.filter.level
     if _valve_class(ctx.valve_state) == CLOSED:
         if level >= water["high_band"] or "CEILING" in ctx.filter.flags:
+            # Draining a contained channel is the containment exception: R3, and the
+            # operator decides (spec 8.7). Anything else on a contained channel was held.
+            risk = RiskClass.R3 if ctx.contained else RiskClass.R1
             return _intent(
-                ctx, water, OPEN, RiskClass.R1,
+                ctx, water, OPEN, risk,
                 ExpectedEffect(
                     channel=ctx.device_id, metric="rate", comparator="<=",
                     threshold=verification["open_rate_max"], window_s=verification["open_window_s"],
@@ -102,6 +124,7 @@ def plan_water_t0(ctx: WaterContext, policy: Mapping) -> ActionIntent | None:
                 f"Level {level:.2f} m is at or above the high band {water['high_band']} m "
                 "(or the sensor is at its ceiling) with the valve closed; open it to drain.",
                 Alternative(option="hold", rejected_because="level at or above high band and rising"),
+                containment_override=ctx.contained,
             )
         return None
     if ctx.below_low_since is None or level > water["low_band"]:
@@ -120,7 +143,8 @@ def plan_water_t0(ctx: WaterContext, policy: Mapping) -> ActionIntent | None:
     )
 
 
-def _intent(ctx, water, state, risk, effect, rationale, alternative) -> ActionIntent:
+def _intent(ctx, water, state, risk, effect, rationale, alternative,
+            containment_override: bool = False) -> ActionIntent:
     incident_id = f"flood-risk:{ctx.device_id}:{ctx.plan_version}"
     return ActionIntent(
         action_id=action_id(incident_id, "valve", ctx.target, state, ctx.plan_version),
@@ -134,4 +158,5 @@ def _intent(ctx, water, state, risk, effect, rationale, alternative) -> ActionIn
         evidence=tuple(ctx.recent[-int(water["evidence_count"]):]),
         rationale=rationale,
         alternatives=(alternative,),
+        containment_override=containment_override,
     )
