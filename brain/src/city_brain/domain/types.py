@@ -52,6 +52,20 @@ class RiskClass(StrEnum):
     R3 = "R3"
 
 
+class IncidentKind(StrEnum):
+    FLOOD_RISK = "FLOOD_RISK"
+    CONGESTION = "CONGESTION"
+    GRID_STRESS = "GRID_STRESS"
+    AIR_QUALITY = "AIR_QUALITY"
+    CALL_SURGE = "CALL_SURGE"
+
+
+class CorrelationLabel(StrEnum):
+    CONFIRMED = "CONFIRMED"
+    PROBABLE = "PROBABLE"
+    HYPOTHETICAL = "HYPOTHETICAL"
+
+
 class BrainMode(StrEnum):
     WARMUP = "WARMUP"
     NORMAL = "NORMAL"
@@ -136,6 +150,30 @@ class GuardianRevocation(_Frozen):
 
 
 GuardianNotice = GuardianHeartbeat | GuardianContainment | GuardianRevocation
+
+
+class CorrelationLink(_Frozen):
+    """Why two findings are being read together, and how firmly (spec 8.3.4)."""
+
+    source_id: str
+    target_id: str
+    label: CorrelationLabel
+    reason: str
+
+
+class Incident(_Frozen):
+    """One situation the Brain believes it is looking at, in one zone (spec 8.3.3)."""
+
+    incident_id: str
+    zone_id: str
+    kind: IncidentKind
+    belief: float
+    severity: Literal["low", "medium", "high", "critical"]
+    status: Literal["suspected", "confirmed", "mitigating", "resolved", "dismissed"]
+    findings: tuple[str, ...]
+    correlations: tuple[CorrelationLink, ...]
+    opened_at: datetime
+    updated_at: datetime
 
 
 class ActuatorCapability(_Frozen):

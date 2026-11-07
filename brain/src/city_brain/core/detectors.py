@@ -36,11 +36,14 @@ class Finding:
         return (self.device_id, self.kind)
 
 
+FLOOR = 0.7  # a threshold that has been crossed is already most of the story
+
+
 def _score(excess: float, span: float) -> float:
-    """0.5 just past a threshold, rising to 1.0 a full span beyond it."""
+    """`FLOOR` just past a threshold, rising to 1.0 a full span beyond it."""
     if span <= 0.0:
         return 1.0
-    return min(1.0, 0.5 + 0.5 * max(0.0, excess) / span)
+    return min(1.0, FLOOR + (1.0 - FLOOR) * max(0.0, excess) / span)
 
 
 def detect_findings(

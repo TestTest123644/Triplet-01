@@ -20,6 +20,39 @@ detectors:
   calls:
     surge_factor: 3.0         # times the rolling baseline mean
     surge_min: 4.0            # calls/min, both conditions must hold
+assessor:                   # log-odds evidence model (spec 8.3.2)
+  prior:                    # log-odds of an incident kind before any finding
+    FLOOD_RISK: -2.0
+    CONGESTION: -2.0
+    GRID_STRESS: -2.0
+    AIR_QUALITY: -2.0
+    CALL_SURGE: -2.0
+  log_lr:                   # one finding's weight in log-odds, before trust and score
+    LEVEL_HIGH: 3.2
+    LEVEL_CRITICAL: 6.0
+    RISING: 1.2
+    FLOW_ANOMALY: 2.6
+    FLOW_NORMAL: 2.6
+    LOAD_HIGH: 5.0
+    LOAD_JUMP: 1.0
+    AQI_HIGH: 5.0
+    AQ_TRAFFIC_COUPLED: 1.4
+    CALL_SURGE: 5.0
+  correlation_bonus: 1.0    # a CONFIRMED correlation is itself evidence; the others are not
+  validated_trust: 0.9      # trust at or above this counts as VALIDATED for a correlation
+  open_belief: 0.4
+  confirm_belief: 0.8
+  close_belief: 0.3
+  confirm_sustain_s: 5.0    # single-sensor domains must hold the belief this long to confirm
+  reopen_cooldown_s: 10.0
+  severity:                 # belief at or above each bound
+    medium: 0.5
+    high: 0.7
+    critical: 0.9
+  single_sensor_kinds: [GRID_STRESS, CALL_SURGE, AIR_QUALITY]
+  couplings:                # kind pairs the city's physics links (spec 8.3.4)
+    - [TRAFFIC_FLOW, TRAFFIC_FLOW]
+    - [AIR_QUALITY, TRAFFIC_FLOW]
 verification:
   open_rate_max: -0.01
   open_window_s: 3.0
