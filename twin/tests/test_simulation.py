@@ -110,3 +110,26 @@ def test_containment_status_updates(temp_ledger):
     target_reading = next(r for r in readings if r["device_id"] == dev_id)
     assert target_reading["status"] == "quarantined"
 
+
+def test_water_sensor_variety_and_determinism(temp_ledger):
+    """Water sensors have distinct levels after 100 ticks and are deterministic for a given seed."""
+    sim1 = CitySimulator(seed=42, ledger=temp_ledger)
+    for _ in range(100):
+        sim1.clock.advance_tick()
+        sim1.update_physics()
+    vals1 = {d_id: dev.current_value for d_id, dev in sim1.devices.items() if dev.device_type == "water_level"}
+
+    assert len(vals1) == 12
+    # Verify values are not all equal
+    assert len(set(vals1.values())) > 1
+
+    # Verify identical values with same seed
+    sim2 = CitySimulator(seed=42, ledger=temp_ledger)
+    for _ in range(100):
+        sim2.clock.advance_tick()
+        sim2.update_physics()
+    vals2 = {d_id: dev.current_value for d_id, dev in sim2.devices.items() if dev.device_type == "water_level"}
+
+    assert vals1 == vals2
+
+

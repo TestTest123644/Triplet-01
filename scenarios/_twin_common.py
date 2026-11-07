@@ -99,6 +99,8 @@ class TwinRestClient:
                 return {"status_code": e.code, "error": err_data}
             except Exception:
                 return {"status_code": e.code, "error": raw}
+        except urllib.error.URLError as e:
+            return {"status_code": 0, "error": str(e.reason)}
         except Exception as e:
             return {"status_code": 500, "error": str(e)}
 
@@ -625,8 +627,24 @@ class ScenarioContext:
 
     def __enter__(self) -> "ScenarioContext":
         print(f"=== Starting Scenario {self.scenario_id}: {self.name} ===", flush=True)
-        # Fetch initial status to get sim_speed
+        # Fetch initial status to get sim_speed and verify reachability
         st = self.rest.get_status()
+        status_code = st.get("status_code")
+        if status_code in (401, 403) or "sim_speed" not in st:
+            code = status_code or (401 if st.get("code") == "UNAUTHORIZED" else 500)
+            err = st.get("error") or st.get("message") or "Twin status response missing 'sim_speed'"
+            if isinstance(err, dict):
+                msg = err.get("message") or err.get("code") or json.dumps(err)
+            else:
+                msg = str(err)
+            self.log_event("", "scenario", "preflight_failed", {
+                "status_code": code,
+                "message": msg,
+            })
+            self.record_check("twin_reachable", False, f"HTTP {code}: {msg}")
+            self.finish()
+            sys.exit(1)
+
         self.sim_speed = float(st.get("sim_speed", 1.0))
 
         # Run settle step before mocks and scenario logic start
@@ -827,14 +845,16 @@ class ScenarioContext:
         if self._finished:
             return all(c["pass"] for c in self.checks) and len(self.checks) > 0
 
-        # Guarantee cleanup: clear all events and attacks before writing final line
-        try:
-            self.rest.clear_event("all")
-            self.log_event("", "scenario", "clear_event", {"event_id": "all"})
-        except Exception as e:
-            self.log_event("", "scenario", "clear_event_error", {"error": str(e)})
+        # Guarantee cleanup: clear all events and attacks before writing final line (only if twin reachable)
+        preflight_failed = any(c.get("name") == "twin_reachable" and not c.get("pass") for c in self.checks)
+        if not preflight_failed:
+            try:
+                self.rest.clear_event("all")
+                self.log_event("", "scenario", "clear_event", {"event_id": "all"})
+            except Exception as e:
+                self.log_event("", "scenario", "clear_event_error", {"error": str(e)})
 
-        # Reinstate and reset devices ONLY if not in --partners mode
+        # Reinstate and reset devices ONLY if not in --partners mode and preflight succeeded
         if self.partners:
             # Under --partners, scenario sends NO actuation or containment;
             # report what is still contained
@@ -848,7 +868,7 @@ class ScenarioContext:
                     self.log_event("", "scenario", "partners_contained_report", {"still_contained": still_contained})
             except Exception as e:
                 logger.debug(f"Partner containment report check: {e}")
-        else:
+        elif not preflight_failed:
             try:
                 # 1. Identify devices contained during THIS scenario from the journal
                 contained_during_scenario = set()
@@ -927,7 +947,7 @@ class ScenarioContext:
         all_lines.sort(key=lambda x: str(x.get("wall_ts", "")))
 
         overall_pass = all(c["pass"] for c in self.checks) and len(self.checks) > 0
-        final_sim_ts = self.get_sim_ts_now()
+        final_sim_ts = self.get_sim_ts_now() if not preflight_failed else ""
         res_entry = {
             "wall_ts": datetime.now(timezone.utc).isoformat(),
             "sim_ts": final_sim_ts,

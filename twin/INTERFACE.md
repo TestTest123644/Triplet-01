@@ -83,15 +83,22 @@ Error response shape:
 | `KAFKA_PASSWORD` | *(unset)* | SASL password literal |
 | `KAFKA_PASSWORD_FILE` | *(unset)* | Path to file containing SASL password (takes priority) |
 | `KAFKA_SSL_CA_LOCATION` | *(unset)* | Path to CA certificate file (optional, only used for `SASL_SSL`) |
+| `KAFKA_BROKER_ADDRESS_FAMILY` | `any` | Address family: `any`, `v4`, `v6` (use `v4` to suppress IPv6 connection refused logs) |
 | `WAIT_FOR_KAFKA` | `true` | Set `false` to skip describe cluster check if broker ACLs disallow it |
 | `MCP_HOST` / `MCP_PORT` | `0.0.0.0` / `8000` | MCP server binding address |
+| `TWIN_MCP_HOST_PORT` | `8000` | Host port mapped to container port 8000 (MCP command server) |
 | `MCP_AUTH_TOKENS` | *(unset)* | Bearer tokens `principal:token,...` (off by default; callers logged as "anonymous") |
 | `MCP_AUTH_TOKENS_FILE` | *(unset)* | Path to file containing bearer tokens (takes priority over `MCP_AUTH_TOKENS`) |
 | `RED_TEAM_PORT` | `8100` | Dedicated red-team attack injection REST port |
+| `TWIN_RED_TEAM_HOST_PORT` | `8100` | Host port mapped to container port 8100 (Red Team REST API) |
+| `TWIN_CONSOLE_HOST_PORT` | `8501` | Host port mapped to container port 8501 (Streamlit operations console) |
 | `RED_TEAM_TOKEN` | *(unset)* | Red-team API token literal |
 | `RED_TEAM_TOKEN_FILE` | *(unset)* | Path to red-team token file (compose writes to `/app/data/red_team.token`) |
 | `TWIN_SECRET_HOOK` | *(unset)* | Pluggable secret resolver `module:func` called as `func(name) -> str | None` |
 | `TWIN_SECRET_RELOAD_SECONDS` | *(unset)* | Periodic background reload interval in seconds (optional) |
+| `TRIPLET_NETWORK` | `city_network` | Docker bridge network name (e.g. `shared-backend` for Guardian) |
+| `TRIPLET_NETWORK_EXTERNAL` | `false` | Set `true` to connect to an existing external Docker network without compose edits |
+| `TWIN_SECRETS_DIR` | `./secrets` | Host secrets directory mounted read-only to `/app/secrets:ro` (`../secrets` in `twin/`) |
 | `SIM_SPEED` | `1.0` | Simulation speed multiplier (pass `20.0` for scenarios) |
 
 ---

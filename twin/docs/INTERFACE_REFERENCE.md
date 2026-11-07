@@ -322,4 +322,39 @@ During reload:
 - Kafka producer validates new credentials against the broker with a metadata probe before swapping; if authentication fails, the active producer is preserved and `"error: new credentials rejected by broker"` is reported. Message sequence continuity is maintained across successful swaps (`seq` numbers increment continuously).
 - Rotation events are written to the SQLite ledger `secret_rotations` table and visible via `GET /api/journal`.
 
+---
+
+## 6. Environment and Compose Configuration
+
+All runtime networking, authentication, and port bindings are configurable via environment variables without editing compose files.
+
+### Configuration reference
+
+| Variable | Default | Description |
+| :--- | :--- | :--- |
+| `KAFKA_BOOTSTRAP_SERVERS` | `kafka:9092` (`localhost:19092` host) | Comma-separated broker list (`h1:p,h2:p,h3:p`) |
+| `KAFKA_TOPIC` | `twin.sensors` | Telemetry topic name (must already exist; Twin does not create topics) |
+| `KAFKA_SECURITY_PROTOCOL` | `PLAINTEXT` | Broker protocol: `PLAINTEXT`, `SASL_PLAINTEXT`, `SASL_SSL` |
+| `KAFKA_SASL_MECHANISM` | `PLAIN` | SASL auth mechanism: `PLAIN`, `SCRAM-SHA-256`, `SCRAM-SHA-512` |
+| `KAFKA_USERNAME` | *(unset)* | SASL username (required when protocol is `SASL_*`) |
+| `KAFKA_PASSWORD_FILE` | *(unset)* | Path to file containing SASL password (48 hex chars from `openssl rand -hex 24`) |
+| `KAFKA_PASSWORD` | *(unset)* | SASL plaintext password (used if `KAFKA_PASSWORD_FILE` unset) |
+| `KAFKA_SSL_CA_LOCATION` | *(unset)* | Path to CA certificate file (optional for `SASL_SSL`) |
+| `KAFKA_ACKS` | `all` | Producer durability: `all` (with idempotence), `1`, or `0` |
+| `KAFKA_BROKER_ADDRESS_FAMILY` | `any` | Address family: `any`, `v4`, `v6` (use `v4` to suppress IPv6 connection refused logs) |
+| `WAIT_FOR_KAFKA` | `true` | Skip broker describe check on startup if `false` (useful under restrictive broker ACLs) |
+| `TRIPLET_NETWORK` | `city_network` | Docker bridge network name (e.g. `shared-backend` for Guardian) |
+| `TRIPLET_NETWORK_EXTERNAL` | `false` | Set `true` to connect to an existing external Docker network |
+| `TWIN_SECRETS_DIR` | `./secrets` | Host secrets directory mounted read-only to `/app/secrets:ro` (`../secrets` in `twin/`) |
+| `TWIN_MCP_HOST_PORT` | `8000` | Host port mapped to container port 8000 (MCP command server) |
+| `TWIN_RED_TEAM_HOST_PORT` | `8100` | Host port mapped to container port 8100 (Red Team REST API) |
+| `TWIN_CONSOLE_HOST_PORT` | `8501` | Host port mapped to container port 8501 (Streamlit operations console) |
+
+### Path resolution: host vs container
+
+When configuring `KAFKA_PASSWORD_FILE` or `MCP_AUTH_TOKENS_FILE`:
+- **Running on host (`python -m twin.main`):** Use the host relative or absolute path (e.g. `KAFKA_PASSWORD_FILE=./secrets/kafka_password`).
+- **Running in Docker Compose:** The host directory `${TWIN_SECRETS_DIR:-./secrets}` is mounted to `/app/secrets:ro`. Configure the container-internal path (e.g. `KAFKA_PASSWORD_FILE=/app/secrets/kafka_password`).
+
+
 

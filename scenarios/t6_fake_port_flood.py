@@ -24,6 +24,8 @@ def run(ctx: ScenarioContext) -> bool:
     attack_id = inj_res.get("attack_id") or inj_res.get("event_id")
     ctx.log_event("", "scenario", "inject_attack", {"attack_id": attack_id, "response": inj_res})
     ctx.record_check("physical_spoof_injected", bool(attack_id), f"attack_id: {attack_id}")
+    if not attack_id:
+        return ctx.finish()
 
     # Observe wire: z2-wl1 broadcasts 9.5m with valid signature, z2-wl2 stays nominal
     print(f"[{ctx.scenario_id}] Verifying wire telemetry and signatures...")

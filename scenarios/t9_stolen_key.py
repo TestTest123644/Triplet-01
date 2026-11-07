@@ -24,6 +24,8 @@ def run(ctx: ScenarioContext) -> bool:
     attack_id = inj_res.get("attack_id") or inj_res.get("event_id")
     ctx.log_event("", "scenario", "inject_attack", {"attack_id": attack_id, "response": inj_res})
     ctx.record_check("device_key_attack_injected", bool(attack_id), f"attack_id: {attack_id}")
+    if not attack_id:
+        return ctx.finish()
 
     # Observe wire: signatures mathematically VERIFY despite malicious spoofed reading
     print(f"[{ctx.scenario_id}] Verifying signatures on spoofed wire telemetry...")

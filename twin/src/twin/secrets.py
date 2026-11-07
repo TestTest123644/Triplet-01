@@ -97,8 +97,9 @@ def get_secret(name: str) -> Optional[str]:
     # Tier 3: Environment variable <NAME>
     if name in os.environ:
         val = os.environ[name]
-        logger.debug(f"Secret '{name}' resolved from environment variable '{name}'")
-        return val
+        if val != "":
+            logger.debug(f"Secret '{name}' resolved from environment variable '{name}'")
+            return val
 
     return None
 

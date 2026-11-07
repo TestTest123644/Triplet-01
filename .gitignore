@@ -72,3 +72,6 @@ logs/*.tmp.log
 # Keystores and private key material
 device_keys.json
 *keys*.json
+
+# Local partner credentials (Vault AppRole, Kafka SASL password); never commit
+secrets/
