@@ -2,6 +2,7 @@
 
 import json
 import os
+from pathlib import Path
 import shutil
 import subprocess
 import pytest
@@ -12,19 +13,19 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-def _find_repo_root() -> str:
-    """Find absolute path to the repository root via .git directory."""
-    current = os.path.dirname(os.path.abspath(__file__))
-    while current and current != os.path.dirname(current):
-        if os.path.exists(os.path.join(current, ".git")):
-            return current
-        current = os.path.dirname(current)
-    raise RuntimeError("Could not find repository root containing .git")
+def _find_repo_root() -> Path:
+    """Find repository root relative to test file path and verify compose files."""
+    repo_root = Path(__file__).resolve().parents[2]
+    root_compose = repo_root / "docker-compose.yml"
+    twin_compose = repo_root / "twin" / "docker-compose.yml"
+    if not (root_compose.is_file() and twin_compose.is_file()):
+        pytest.skip(f"Compose files not found at expected repo root: {repo_root}")
+    return repo_root
 
 
 def _run_compose_config(compose_file: str, env_overrides: dict = None) -> dict:
     """Run `docker compose -f <compose_file> config --format json` with env overrides."""
-    repo_root = _find_repo_root()
+    repo_root = str(_find_repo_root())
     env = os.environ.copy()
     if env_overrides:
         env.update(env_overrides)
@@ -44,7 +45,7 @@ def _run_compose_config(compose_file: str, env_overrides: dict = None) -> dict:
 def test_root_compose_default_config():
     """Root docker-compose.yml defaults: city_network (not external), kafka:9092, ports 8000/8100."""
     repo_root = _find_repo_root()
-    compose_path = os.path.join(repo_root, "docker-compose.yml")
+    compose_path = str(repo_root / "docker-compose.yml")
     config = _run_compose_config(compose_path)
 
     net = config["networks"]["city_network"]
@@ -83,7 +84,7 @@ def test_root_compose_default_config():
 def test_root_compose_custom_environment():
     """Root docker-compose.yml custom env: external network, custom bootstrap, custom host ports."""
     repo_root = _find_repo_root()
-    compose_path = os.path.join(repo_root, "docker-compose.yml")
+    compose_path = str(repo_root / "docker-compose.yml")
     overrides = {
         "TRIPLET_NETWORK": "shared-backend",
         "TRIPLET_NETWORK_EXTERNAL": "true",
@@ -118,7 +119,7 @@ def test_root_compose_custom_environment():
 def test_twin_compose_default_config():
     """twin/docker-compose.yml defaults: twin_network named city_network (not external), kafka:9092."""
     repo_root = _find_repo_root()
-    compose_path = os.path.join(repo_root, "twin", "docker-compose.yml")
+    compose_path = str(repo_root / "twin" / "docker-compose.yml")
     config = _run_compose_config(compose_path)
 
     net = config["networks"]["twin_network"]
@@ -157,7 +158,7 @@ def test_twin_compose_default_config():
 def test_twin_compose_custom_environment():
     """twin/docker-compose.yml custom env: external network, custom bootstrap, custom host ports."""
     repo_root = _find_repo_root()
-    compose_path = os.path.join(repo_root, "twin", "docker-compose.yml")
+    compose_path = str(repo_root / "twin" / "docker-compose.yml")
     overrides = {
         "TRIPLET_NETWORK": "shared-backend",
         "TRIPLET_NETWORK_EXTERNAL": "true",

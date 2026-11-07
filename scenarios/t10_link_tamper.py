@@ -67,6 +67,8 @@ def run_mode(ctx: ScenarioContext, mode: str) -> bool:
     attack_id = inj_res.get("attack_id") or inj_res.get("event_id")
     ctx.log_event("", "scenario", "inject_attack", {"attack_id": attack_id, "mode": mode, "response": inj_res})
     ctx.record_check(f"link_attack_injected_{mode}", bool(attack_id), f"attack_id: {attack_id}")
+    if not attack_id:
+        return ctx.finish()
 
     pub_key = ctx.mcp.get_device_key("z3-tc1")
 

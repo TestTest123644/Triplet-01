@@ -25,6 +25,8 @@ def run(ctx: ScenarioContext) -> bool:
     event_id = inj_res.get("event_id")
     ctx.log_event("", "scenario", "inject_event", {"event_id": event_id, "response": inj_res})
     ctx.record_check("grid_overload_injected", bool(event_id), f"event_id: {event_id}")
+    if not event_id:
+        return ctx.finish()
 
     if ctx.no_brain:
         print(f"[{ctx.scenario_id}] Running unmitigated overload (--no-brain); awaiting blackout cascade...")

@@ -30,7 +30,9 @@ def run(ctx: ScenarioContext) -> bool:
     })
     attack_id = act_res.get("attack_id") or act_res.get("event_id")
     ctx.log_event("", "scenario", "inject_actuator_attack", {"storm_id": storm_id, "attack_id": attack_id})
-    ctx.record_check("actuator_attack_injected", bool(attack_id), f"attack_id: {attack_id}")
+    ctx.record_check("actuator_attack_injected", bool(attack_id and storm_id), f"attack_id: {attack_id}, storm_id: {storm_id}")
+    if not attack_id or not storm_id:
+        return ctx.finish()
 
     # Invoke MCP set_valve open on z2-wl1
     print(f"[{ctx.scenario_id}] Invoking MCP set_valve target_state='open' on z2-wl1...")
