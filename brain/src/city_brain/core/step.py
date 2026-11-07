@@ -10,6 +10,7 @@ from city_brain.core.events import (
     CommandResult,
     Effect,
     Event,
+    GuardianEventReceived,
     Publish,
     ReadingReceived,
     ReadingRejected,
@@ -19,7 +20,7 @@ from city_brain.core.events import (
 )
 from city_brain.core.records import alert_event, decision_event, status_event
 from city_brain.core.state import BrainState, DeviceCursor
-from city_brain.core.trust import estimate_weight, evidence_ref, trust_weight
+from city_brain.core.trust import estimate_weight, evidence_ref, in_outage, trust_weight
 from city_brain.core.water import (
     WaterContext,
     commanded_ratio,
@@ -27,7 +28,17 @@ from city_brain.core.water import (
     plan_water_t0,
     water_hold_reason,
 )
-from city_brain.domain.types import EvidenceRef, Observation, SensorKind, TrustState, Verdict
+from city_brain.domain.types import (
+    DeviceStatus,
+    EvidenceRef,
+    GuardianContainment,
+    GuardianHeartbeat,
+    GuardianRevocation,
+    Observation,
+    SensorKind,
+    TrustState,
+    Verdict,
+)
 
 UNKNOWN_VALVE_STATE = ""  # no registry entry or no actuator: the planner holds on it
 WOULD_CHANGE_IF = {
@@ -38,6 +49,12 @@ WOULD_CHANGE_IF = {
     "IMPLAUSIBLE_JUMP": "readings agree with the estimate again",
     "MODEL_MISMATCH": "readings stay consistent with the model",
     "UNKNOWN_VALVE_STATE": "the registry reports a known valve state",
+}
+CONTAINMENT_STATUS = {
+    "isolated": DeviceStatus.ISOLATED,
+    "quarantined": DeviceStatus.QUARANTINED,
+    "rolled_back": DeviceStatus.ROLLED_BACK,
+    "released": DeviceStatus.OK,
 }
 
 
@@ -59,17 +76,66 @@ def step(state: BrainState, event: Event) -> tuple[BrainState, list[Effect]]:
     elif isinstance(event, ReadingReceived):
         _ingest(state, event, effects)
     elif isinstance(event, VerdictReceived):
+        state.guardian_heard = True
         state.ledger.add(event.verdict)
         _note_device_verdict(state, event.verdict)
         # sim_now is undefined before the first accepted reading; park without pruning.
         if state.epoch_origin is not None:
             state.ledger.prune(state.sim_now)
         effects.extend(coordinator.on_verdict(state, (event.verdict.reading_id, event.verdict.sig_hash)))
+    elif isinstance(event, GuardianEventReceived):
+        effects.extend(_guardian_notice(state, event.notice))
     elif isinstance(event, CommandResult):
         effects.extend(coordinator.on_result(state, event))
     elif isinstance(event, TimerFired):
         effects.extend(coordinator.on_timer(state, event))
     return state, effects
+
+
+def _guardian_notice(state: BrainState, notice) -> list[Effect]:
+    """A `guardian.events` notice: the Guardian is alive, and may contain or withdraw (spec 8.9)."""
+    state.guardian_heard = True
+    effects: list[Effect] = []
+    if isinstance(notice, GuardianHeartbeat):
+        state.ledger.note_heartbeat(notice.evaluated_through)
+        return effects
+    if isinstance(notice, GuardianContainment):
+        _apply_containment(state, notice)
+        effects.append(Publish(status_event(state, "containment", {
+            "device_id": notice.device_id, "action": notice.action, "reasons": notice.reasons,
+        })))
+        return effects
+    if isinstance(notice, GuardianRevocation):
+        affected = state.ledger.revoke(notice.verdict_id)
+        effects.append(Publish(status_event(state, "verdict_revoked", {
+            "verdict_id": notice.verdict_id, "readings": len(affected),
+        })))
+        _refresh_device_verdicts(state, notice.verdict_id)
+        for key in affected:
+            effects.extend(coordinator.on_verdict(state, key))
+    return effects
+
+
+def _apply_containment(state: BrainState, notice: GuardianContainment) -> None:
+    """The Guardian's word outranks what a reading reports, until it releases the device."""
+    status = CONTAINMENT_STATUS[notice.action]
+    if status is DeviceStatus.OK:
+        state.contained.pop(notice.device_id, None)
+    else:
+        state.contained[notice.device_id] = status
+    device = state.registry.get(notice.device_id)
+    if device is not None and device.status is not status:
+        state.registry[notice.device_id] = device.model_copy(update={"status": status})
+
+
+def _refresh_device_verdicts(state: BrainState, verdict_id: str) -> None:
+    for device_id in sorted(state.device_verdicts):
+        verdict = state.device_verdicts[device_id]
+        if verdict.verdict_id != verdict_id:
+            continue
+        current = state.ledger.latest(verdict.reading_id, verdict.sig_hash)
+        if current is not None:
+            state.device_verdicts[device_id] = current
 
 
 def _ingest(state: BrainState, event: ReadingReceived, effects: list[Effect]) -> None:
@@ -152,8 +218,11 @@ def _sweep_silent_channels(state: BrainState, effects: list[Effect]) -> None:
 
 def _note_device_status(state: BrainState, obs: Observation) -> None:
     device = state.registry.get(obs.device_id)
-    if device is not None and device.status is not obs.device_status:
-        state.registry[obs.device_id] = device.model_copy(update={"status": obs.device_status})
+    if device is None:
+        return
+    status = state.contained.get(obs.device_id, obs.device_status)
+    if device.status is not status:
+        state.registry[obs.device_id] = device.model_copy(update={"status": status})
 
 
 def _water_reading(state: BrainState, obs: Observation, effects: list[Effect]) -> None:
@@ -229,7 +298,7 @@ def _update_water_filter(state: BrainState, obs: Observation, u: float) -> Water
         # An expired verdict is still not "no verdict": expired UNTRUSTED must not count as pending.
         # A verdict landing after its reading does not undo that reading's update: rollback is P3.
         latest = state.ledger.latest(obs.reading_id, obs.sig_hash)
-        weight = estimate_weight(latest, obs.device_status, trust["caps"], float(trust["pending_weight"]))
+        weight = estimate_weight(latest, obs.device_status, trust["caps"], _pending_weight(state, obs))
     water_filter.update(obs.value, obs.seq, weight, u=u, at_ceiling="AT_CEILING" in obs.flags)
     if in_range:
         recent = state.recent.setdefault(
@@ -238,6 +307,13 @@ def _update_water_filter(state: BrainState, obs: Observation, u: float) -> Water
         verdict = state.ledger.lookup(obs.reading_id, obs.sig_hash, state.sim_now)
         recent.append(evidence_ref(obs, verdict, trust_weight(verdict, obs.device_status, trust["caps"])))
     return water_filter
+
+
+def _pending_weight(state: BrainState, obs: Observation) -> float:
+    """No retroactive trust: an unjudged reading from a Guardian outage never counts (spec 8.9)."""
+    if in_outage(obs.sim_time, state.outage_windows):
+        return 0.0
+    return float(state.policy["trust"]["pending_weight"])
 
 
 def _track_low_band(state: BrainState, device_id: str, water_filter: WaterFilter, u: float) -> None:

@@ -4,7 +4,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Literal
 
-from city_brain.domain.types import DeviceProfile, Observation, Verdict
+from city_brain.domain.types import DeviceProfile, GuardianNotice, Observation, Verdict
 
 
 @dataclass(frozen=True)
@@ -38,12 +38,33 @@ class CommandResult:
 
 
 @dataclass(frozen=True)
+class GuardianEventReceived:
+    notice: GuardianNotice
+
+
+@dataclass(frozen=True)
+class OperatorCommand:
+    action: Literal["pause", "resume", "approve", "deny"]
+    action_id: str | None = None
+    operator_id: str = "operator"
+
+
+@dataclass(frozen=True)
 class TimerFired:
     timer_id: str
     kind: str
 
 
-Event = RegistryLoaded | ReadingReceived | ReadingRejected | VerdictReceived | CommandResult | TimerFired
+Event = (
+    RegistryLoaded
+    | ReadingReceived
+    | ReadingRejected
+    | VerdictReceived
+    | GuardianEventReceived
+    | OperatorCommand
+    | CommandResult
+    | TimerFired
+)
 
 
 @dataclass(frozen=True)

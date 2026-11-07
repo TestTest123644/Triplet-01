@@ -24,6 +24,31 @@ class VerdictLedger:
         self._verdicts: dict[_Key, Verdict] = {}
         # Oldest first, so that pruning on every verdict does not rescan the ledger.
         self._by_issued_at: list[tuple[datetime, _Key]] = []
+        self._revoked: set[str] = set()
+        self._watermark: datetime | None = None
+
+    @property
+    def watermark(self) -> datetime | None:
+        """The sim time the Guardian says it has judged every reading through (spec 8.9)."""
+        return self._watermark
+
+    def note_heartbeat(self, evaluated_through: datetime) -> None:
+        """Move the watermark forward. It never goes back: a late heartbeat says nothing new."""
+        if self._watermark is None or evaluated_through > self._watermark:
+            self._watermark = evaluated_through
+
+    def revoke(self, verdict_id: str) -> list[_Key]:
+        """Downgrade every verdict with this id to UNKNOWN. Returns the affected keys, sorted."""
+        self._revoked.add(verdict_id)
+        affected = sorted(k for k, v in self._verdicts.items() if v.verdict_id == verdict_id)
+        for key in affected:
+            current = self._verdicts[key]
+            self._verdicts[key] = current.model_copy(update={
+                "state": TrustState.UNKNOWN,
+                "trust": 0.0,
+                "reasons": current.reasons | {"REVOKED"},
+            })
+        return affected
 
     def add(self, verdict: Verdict) -> list[_Key]:
         """Keep the latest verdict per key by `issued_at`.
@@ -32,6 +57,8 @@ class VerdictLedger:
         revocation-style downgrade replaces the verdict it revokes.
         Returns the keys whose trust (state or value) changed, in sorted order.
         """
+        if verdict.verdict_id in self._revoked:  # a replay must not undo a revocation
+            return []
         key = (verdict.reading_id, verdict.sig_hash)
         current = self._verdicts.get(key)
         if current is not None and verdict.issued_at < current.issued_at:
@@ -63,6 +90,13 @@ class VerdictLedger:
     def clear(self) -> None:
         self._verdicts.clear()
         self._by_issued_at.clear()
+        self._revoked.clear()
+        self._watermark = None
+
+
+def in_outage(sim_time: datetime, windows: Sequence[tuple[datetime, datetime | None]]) -> bool:
+    """Whether a sim time falls inside a Guardian outage window; an open window has no end."""
+    return any(start <= sim_time and (end is None or sim_time <= end) for start, end in windows)
 
 
 def trust_weight(verdict: Verdict | None, device_status: DeviceStatus, caps: Mapping[str, float]) -> float:

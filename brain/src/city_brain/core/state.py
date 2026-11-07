@@ -8,7 +8,15 @@ from datetime import datetime, timedelta
 from city_brain.core.estimator import WaterFilter
 from city_brain.core.shield import ShieldResult, TokenBucket
 from city_brain.core.trust import VerdictLedger
-from city_brain.domain.types import ActionIntent, ActionStatus, DeviceProfile, EvidenceRef, Verdict
+from city_brain.domain.types import (
+    ActionIntent,
+    ActionStatus,
+    BrainMode,
+    DeviceProfile,
+    DeviceStatus,
+    EvidenceRef,
+    Verdict,
+)
 
 
 @dataclass
@@ -72,6 +80,12 @@ class BrainState:
     # (tick, reading_id, sig_hash) per channel, one recovery window long.
     window_readings: dict[str, deque[tuple[int, str, str]]] = field(default_factory=dict)
     silent: set[str] = field(default_factory=set)  # channels already alerted as silent
+    mode: BrainMode = BrainMode.WARMUP
+    guardian_heard: bool = False
+    # Sim-time intervals the Brain spent in GUARDIAN_DEGRADED; the open one ends with None.
+    outage_windows: list[tuple[datetime, datetime | None]] = field(default_factory=list)
+    # Devices the Guardian has contained: its word outranks what a reading reports.
+    contained: dict[str, DeviceStatus] = field(default_factory=dict)
 
     @classmethod
     def new(cls, policy: dict, params: dict) -> "BrainState":
