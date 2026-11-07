@@ -15,7 +15,7 @@ def get_broker_address_family() -> str:
         One of 'any' (default), 'v4', 'v6'.
         Raises ValueError if invalid.
     """
-    raw = os.getenv("KAFKA_BROKER_ADDRESS_FAMILY", "any").strip().lower()
+    raw = (os.getenv("KAFKA_BROKER_ADDRESS_FAMILY", "any") or "any").strip().lower() or "any"
     allowed = ("any", "v4", "v6")
     if raw not in allowed:
         raise ValueError(
@@ -40,7 +40,7 @@ def kafka_client_config() -> Dict[str, str]:
         Dict[str, str] of configuration parameters to pass into confluent_kafka clients.
         When protocol is PLAINTEXT, returns {"security.protocol": "PLAINTEXT"} with NO sasl.* or ssl.* keys.
     """
-    protocol = os.getenv("KAFKA_SECURITY_PROTOCOL", "PLAINTEXT").strip()
+    protocol = (os.getenv("KAFKA_SECURITY_PROTOCOL", "PLAINTEXT") or "PLAINTEXT").strip() or "PLAINTEXT"
     allowed_protocols = ("PLAINTEXT", "SASL_PLAINTEXT", "SASL_SSL")
     if protocol not in allowed_protocols:
         raise ValueError(
@@ -51,7 +51,7 @@ def kafka_client_config() -> Dict[str, str]:
         # When protocol is PLAINTEXT, return only security.protocol with no sasl.* or ssl.* keys
         return {"security.protocol": "PLAINTEXT"}
 
-    mechanism = os.getenv("KAFKA_SASL_MECHANISM", "PLAIN").strip()
+    mechanism = (os.getenv("KAFKA_SASL_MECHANISM", "PLAIN") or "PLAIN").strip() or "PLAIN"
     allowed_mechanisms = ("PLAIN", "SCRAM-SHA-256", "SCRAM-SHA-512")
     if mechanism not in allowed_mechanisms:
         raise ValueError(

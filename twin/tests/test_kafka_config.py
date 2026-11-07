@@ -395,3 +395,72 @@ def test_twin_src_never_touches_broker():
                                 violations.append(f"{path}:{line_num}: {term} found in '{line.strip()}'")
     assert not violations, f"Forbidden broker manipulation detected:\n" + "\n".join(violations)
 
+
+def test_empty_string_env_vars_treated_as_unset_in_plaintext(monkeypatch):
+    """Empty strings from compose expansion behave identically to unset variables in PLAINTEXT."""
+    monkeypatch.setenv("KAFKA_SECURITY_PROTOCOL", "")
+    monkeypatch.setenv("KAFKA_PASSWORD_FILE", "")
+    monkeypatch.setenv("KAFKA_PASSWORD", "")
+    monkeypatch.setenv("KAFKA_USERNAME", "")
+    monkeypatch.setenv("KAFKA_SSL_CA_LOCATION", "")
+    monkeypatch.setenv("KAFKA_SASL_MECHANISM", "")
+
+    conf = kafka_client_config()
+    assert conf == {"security.protocol": "PLAINTEXT"}
+    sasl_keys = [k for k in conf if k.startswith("sasl.") or k.startswith("ssl.")]
+    assert len(sasl_keys) == 0
+
+
+def test_empty_broker_address_family_defaults_to_any(monkeypatch):
+    """KAFKA_BROKER_ADDRESS_FAMILY="" defaults to 'any'."""
+    monkeypatch.setenv("KAFKA_BROKER_ADDRESS_FAMILY", "")
+    assert get_broker_address_family() == "any"
+
+
+def test_empty_sasl_mechanism_defaults_to_plain(monkeypatch):
+    """KAFKA_SASL_MECHANISM="" defaults to 'PLAIN' under SASL protocol."""
+    monkeypatch.setenv("KAFKA_SECURITY_PROTOCOL", "SASL_PLAINTEXT")
+    monkeypatch.setenv("KAFKA_SASL_MECHANISM", "")
+    monkeypatch.setenv("KAFKA_USERNAME", "test_user")
+    monkeypatch.setenv("KAFKA_PASSWORD", "test_pass")
+
+    conf = kafka_client_config()
+    assert conf["sasl.mechanism"] == "PLAIN"
+    assert conf["sasl.username"] == "test_user"
+    assert conf["sasl.password"] == "test_pass"
+
+
+def test_empty_password_file_falls_through_to_env(monkeypatch):
+    """KAFKA_PASSWORD_FILE="" does not attempt to open empty path and falls through to env."""
+    monkeypatch.setenv("KAFKA_SECURITY_PROTOCOL", "SASL_PLAINTEXT")
+    monkeypatch.setenv("KAFKA_USERNAME", "test_user")
+    monkeypatch.setenv("KAFKA_PASSWORD_FILE", "")
+    monkeypatch.setenv("KAFKA_PASSWORD", "fallback_pass")
+
+    conf = kafka_client_config()
+    assert conf["sasl.password"] == "fallback_pass"
+
+
+def test_empty_password_file_and_empty_env_raises_missing_password(monkeypatch):
+    """When both KAFKA_PASSWORD_FILE="" and KAFKA_PASSWORD="", raises missing password error."""
+    monkeypatch.setenv("KAFKA_SECURITY_PROTOCOL", "SASL_PLAINTEXT")
+    monkeypatch.setenv("KAFKA_USERNAME", "test_user")
+    monkeypatch.setenv("KAFKA_PASSWORD_FILE", "")
+    monkeypatch.setenv("KAFKA_PASSWORD", "")
+
+    with pytest.raises(ValueError, match="KAFKA_PASSWORD"):
+        kafka_client_config()
+
+
+def test_empty_ssl_ca_location_no_ca_attempt(monkeypatch):
+    """KAFKA_SSL_CA_LOCATION="" makes no filesystem access attempt under SASL_SSL."""
+    monkeypatch.setenv("KAFKA_SECURITY_PROTOCOL", "SASL_SSL")
+    monkeypatch.setenv("KAFKA_USERNAME", "ssl_user")
+    monkeypatch.setenv("KAFKA_PASSWORD", "ssl_pass")
+    monkeypatch.setenv("KAFKA_SSL_CA_LOCATION", "")
+
+    conf = kafka_client_config()
+    assert conf["security.protocol"] == "SASL_SSL"
+    assert "ssl.ca.location" not in conf
+
+
