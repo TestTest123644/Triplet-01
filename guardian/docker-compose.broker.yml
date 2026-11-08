@@ -1,0 +1,176 @@
+x-logging: &default-logging
+  driver: fluentd
+  options:
+    fluentd-address: "127.0.0.1:24224"
+    fluentd-async: "true"
+    tag: "{{.Name}}"
+
+x-kafka-environment: &kafka-environment
+  CLUSTER_ID: "4L6g3nShT-eMCtK--X86sw"
+  KAFKA_PROCESS_ROLES: broker,controller
+  KAFKA_LISTENERS: "SASL_PLAINTEXT://:19094,CONTROLLER://:9093,SASL_PLAINTEXT_HOST://:9094"
+  KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "CONTROLLER:SASL_PLAINTEXT,SASL_PLAINTEXT:SASL_PLAINTEXT,SASL_PLAINTEXT_HOST:SASL_PLAINTEXT"
+  KAFKA_SASL_MECHANISM_CONTROLLER_PROTOCOL: PLAIN
+  KAFKA_LISTENER_NAME_CONTROLLER_SASL_ENABLED_MECHANISMS: PLAIN
+  KAFKA_INTER_BROKER_LISTENER_NAME: SASL_PLAINTEXT
+  KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+  KAFKA_EARLY_START_LISTENERS: "CONTROLLER"
+  KAFKA_CONTROLLER_QUORUM_VOTERS: "1@kafka-1:9093,2@kafka-2:9093,3@kafka-3:9093"
+  KAFKA_SASL_ENABLED_MECHANISMS: PLAIN
+  KAFKA_SASL_MECHANISM_INTER_BROKER_PROTOCOL: PLAIN
+  KAFKA_AUTHORIZER_CLASS_NAME: org.apache.kafka.metadata.authorizer.StandardAuthorizer
+  KAFKA_ALLOW_EVERYONE_IF_NO_ACL_FOUND: "false"
+  KAFKA_SUPER_USERS: "User:broker;User:admin"
+  KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 3
+  KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 3
+  KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 2
+  KAFKA_DEFAULT_REPLICATION_FACTOR: 3
+  KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+  KAFKA_MESSAGE_MAX_BYTES: 5242880
+  KAFKA_MIN_INSYNC_REPLICAS: 2
+  KAFKA_LOG_DIRS: /var/lib/kafka/data
+
+x-kafka-common: &kafka-common
+  image: apache/kafka:4.3.1
+  restart: unless-stopped
+  stop_grace_period: 30s
+  entrypoint: ["/bin/sh", "/scripts/kafka-entrypoint.sh"]
+  environment:
+    <<: *kafka-environment
+  volumes:
+    - ./scripts/kafka-entrypoint.sh:/scripts/kafka-entrypoint.sh:ro
+  logging: *default-logging
+
+services:
+  kafka-1:
+    <<: *kafka-common
+    hostname: kafka-1
+    ports:
+      - "127.0.0.1:29094:9094"
+    environment:
+      <<: *kafka-environment
+      KAFKA_NODE_ID: 1
+      KAFKA_ADVERTISED_LISTENERS: "SASL_PLAINTEXT://kafka-1:19094,SASL_PLAINTEXT_HOST://localhost:29094"
+    secrets:
+      - kafka_broker_password
+      - kafka_admin_password
+      - kafka_client_password
+      - kafka_twin_password
+      - kafka_brain_password
+      - kafka_broadcast_password
+      - kafka_action_taker_password
+    volumes:
+      - ./scripts/kafka-entrypoint.sh:/scripts/kafka-entrypoint.sh:ro
+      - kafka1_data:/var/lib/kafka/data
+    networks:
+      - shared-backend
+
+  kafka-2:
+    <<: *kafka-common
+    hostname: kafka-2
+    ports:
+      - "127.0.0.1:29095:9094"
+    environment:
+      <<: *kafka-environment
+      KAFKA_NODE_ID: 2
+      KAFKA_ADVERTISED_LISTENERS: "SASL_PLAINTEXT://kafka-2:19094,SASL_PLAINTEXT_HOST://localhost:29095"
+    secrets:
+      - kafka_broker_password
+      - kafka_admin_password
+      - kafka_client_password
+      - kafka_twin_password
+      - kafka_brain_password
+      - kafka_broadcast_password
+      - kafka_action_taker_password
+    volumes:
+      - ./scripts/kafka-entrypoint.sh:/scripts/kafka-entrypoint.sh:ro
+      - kafka2_data:/var/lib/kafka/data
+    networks:
+      - shared-backend
+
+  kafka-3:
+    <<: *kafka-common
+    hostname: kafka-3
+    ports:
+      - "127.0.0.1:29096:9094"
+    environment:
+      <<: *kafka-environment
+      KAFKA_NODE_ID: 3
+      KAFKA_ADVERTISED_LISTENERS: "SASL_PLAINTEXT://kafka-3:19094,SASL_PLAINTEXT_HOST://localhost:29096"
+    secrets:
+      - kafka_broker_password
+      - kafka_admin_password
+      - kafka_client_password
+      - kafka_twin_password
+      - kafka_brain_password
+      - kafka_broadcast_password
+      - kafka_action_taker_password
+    volumes:
+      - ./scripts/kafka-entrypoint.sh:/scripts/kafka-entrypoint.sh:ro
+      - kafka3_data:/var/lib/kafka/data
+    networks:
+      - shared-backend
+
+  kafka-init:
+    image: apache/kafka:4.3.1
+    restart: "no"
+    depends_on:
+      - kafka-1
+      - kafka-2
+      - kafka-3
+    secrets:
+      - kafka_admin_password
+    volumes:
+      - ./scripts/kafka-init.sh:/scripts/kafka-init.sh:ro
+    entrypoint: ["/bin/sh", "/scripts/kafka-init.sh"]
+    networks:
+      - shared-backend
+    logging: *default-logging
+
+  kafka-ui:
+    image: ghcr.io/kafbat/kafka-ui:latest
+    ports:
+      - "127.0.0.1:8080:8080"
+    environment:
+      SPRING_CONFIG_ADDITIONAL_LOCATION: /run/secrets/kafka_ui_config.yml
+    secrets:
+      - kafka_ui_config.yml
+    depends_on:
+      kafka-1:
+        condition: service_started
+      kafka-2:
+        condition: service_started
+      kafka-3:
+        condition: service_started
+      kafka-init:
+        condition: service_completed_successfully
+    networks:
+      - shared-backend
+    logging: *default-logging
+
+networks:
+  shared-backend:
+    external: true
+
+volumes:
+  kafka1_data:
+  kafka2_data:
+  kafka3_data:
+
+secrets:
+  kafka_broker_password:
+    file: ./secrets/kafka_broker_password.txt
+  kafka_admin_password:
+    file: ./secrets/kafka_admin_password.txt
+  kafka_client_password:
+    file: ./secrets/kafka_client_password.txt
+  kafka_twin_password:
+    file: ./secrets/kafka_twin_password.txt
+  kafka_brain_password:
+    file: ./secrets/kafka_brain_password.txt
+  kafka_broadcast_password:
+    file: ./secrets/kafka_broadcast_password.txt
+  kafka_action_taker_password:
+    file: ./secrets/kafka_action_taker_password.txt
+  kafka_ui_config.yml:
+    file: ./secrets/kafka-ui-config.yml

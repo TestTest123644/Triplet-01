@@ -1,0 +1,78 @@
+# Build context: ./src (consistent with Dockerfile.action_taker)
+
+# ==========================================
+# Stage 1: Builder
+# ==========================================
+FROM python:3.12-slim AS builder
+
+WORKDIR /build
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY guardian_layer/consumer_producer/kafka_producer/requirements.txt .
+
+RUN pip wheel \
+    --no-cache-dir \
+    --wheel-dir /wheels \
+    -r requirements.txt
+
+
+# ==========================================
+# Stage 2: Runtime
+# ==========================================
+FROM python:3.12-slim AS runtime
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/app/src \
+    GUARDIAN_LAYER_LOG=INFO
+
+WORKDIR /app
+
+# Install dependencies from builder
+COPY --from=builder /wheels /wheels
+COPY guardian_layer/consumer_producer/kafka_producer/requirements.txt .
+
+RUN pip install \
+    --no-cache-dir \
+    --no-index \
+    --find-links=/wheels \
+    -r requirements.txt \
+    && rm -rf /wheels requirements.txt
+
+# Create package structure with clean inits
+RUN mkdir -p /app/src/guardian_layer/consumer_producer \
+             /app/src/guardian_layer/utils \
+             /app/src/guardian_layer/models \
+    && touch /app/src/guardian_layer/__init__.py \
+    && touch /app/src/guardian_layer/consumer_producer/__init__.py \
+    && touch /app/src/guardian_layer/models/__init__.py
+
+# Copy models needed by config (sensor.py for Anomalies enum)
+COPY guardian_layer/models/sensor.py /app/src/guardian_layer/models/
+
+# Copy logger and its Elasticsearch dependencies (elastic, config, helpers)
+COPY guardian_layer/utils/__init__.py \
+     guardian_layer/utils/logger.py \
+     guardian_layer/utils/elastic.py \
+     guardian_layer/utils/config.py \
+     guardian_layer/utils/helpers.py \
+     /app/src/guardian_layer/utils/
+
+# Copy only kafka_producer code
+COPY guardian_layer/consumer_producer/kafka_producer/ /app/src/guardian_layer/consumer_producer/kafka_producer/
+
+# Clean up any leftover redundant files or cache
+RUN rm -rf /app/src/guardian_layer/consumer_producer/kafka_producer/data \
+    && mkdir -p /app/src/guardian_layer/consumer_producer/kafka_producer/data
+
+WORKDIR /app/src/guardian_layer/consumer_producer/kafka_producer
+
+RUN useradd --create-home --shell /usr/sbin/nologin producer \
+    && chown -R producer:producer /app
+
+USER producer
+
+CMD ["python", "-m", "guardian_layer.consumer_producer.kafka_producer.main"]

@@ -1,0 +1,57 @@
+{
+  "method": "haar",
+  "threshold": 0.9446693919599055,
+  "keys": [
+    "lw_rz_variance",
+    "lw_rz_rolling_variance_max",
+    "lw_rz_rate_of_change_mean_abs",
+    "lw_rz_rate_of_change_max_abs",
+    "lw_rz_flatline_ratio",
+    "lw_max_abs_step",
+    "lw_max_abs_level",
+    "lw_sign_flip_share",
+    "lw_diff_autocorr",
+    "lw_spectral_peak_share",
+    "lw_diff_kurtosis",
+    "lw_rolling_variance_ratio",
+    "lw_haar_d1_energy",
+    "lw_haar_d2_energy",
+    "lw_haar_d3_energy",
+    "lw_haar_d1_max_abs",
+    "lw_trend_scatter_ratio",
+    "lw_flat_run_share",
+    "lw_neighbour_slope_delta",
+    "lw_neighbor_count",
+    "lw_grid_points"
+  ],
+  "classes": [
+    "sensor_malfunction",
+    "not_sensor_data"
+  ],
+  "rate_thresholds": {
+    "0.0002777777777777778": 0.9038301929831504,
+    "0.0011098779134295228": 0.9051294103264808,
+    "0.0011111111111111111": 0.9566253498196601,
+    "0.0016260162601626016": 0.7351128160953521,
+    "0.0016666666666666668": 0.9439266435801982,
+    "0.002777777777777778": 0.703121244907379,
+    "0.0033333333333333335": 0.8252120912075043,
+    "0.00684931506849315": 0.9682898670434951,
+    "0.016666666666666666": 0.8488827198743819,
+    "0.03225806451612903": 0.8355202078819274,
+    "0.041666666666666664": 0.9840182475745677
+  },
+  "window_seconds": 86400.0,
+  "cleaning": {
+    "clean_method": "kalman",
+    "kalman": {
+      "mode": "smoother",
+      "noise": "fixed",
+      "process_ratio": 0.9,
+      "process_scale": 1.0,
+      "process_floor": 0.001,
+      "jump_sigmas": 4.0,
+      "keep_repeats": true
+    }
+  }
+}

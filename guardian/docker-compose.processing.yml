@@ -1,0 +1,181 @@
+x-logging: &default-logging
+  driver: fluentd
+  options:
+    fluentd-address: "127.0.0.1:24224"
+    fluentd-async: "true"
+    tag: "{{.Name}}"
+
+x-flink-common: &flink-common
+  build:
+    context: .
+    dockerfile: ./src/guardian_layer/consumer_producer/kafka_consumer/Dockerfile.flink
+    args:
+      # PyFlink 1.20.x supports Python 3.8-3.11 only
+      FLINK_IMAGE: flink:1.20.1-scala_2.12-java17
+      PYTHON_VERSION: "3.11"
+  image: sensor-flink:1.20
+  restart: unless-stopped
+  extra_hosts:
+    - "host.docker.internal:host-gateway"
+  logging: *default-logging
+  environment: &flink-env
+    KAFKA_BOOTSTRAP: kafka-1:19094,kafka-2:19094,kafka-3:19094
+    KAFKA_INPUT_TOPIC: telemetry-ingest
+    KAFKA_METADATA_TOPIC: devices-metadata
+    KAFKA_VALIDATED_TOPIC: telemetry-validated
+    KAFKA_DLQ_TOPIC: telemetry-dlq
+    KAFKA_GROUP_ID: guardian-processor-raw
+    MCP_URL: http://twin_layer:8000/sse
+    ENVIRONMENT: dev
+    PARALLELISM: "6"
+    FLINK_PROPERTIES: |
+      jobmanager.rpc.address: jobmanager
+      jobmanager.memory.process.size: 1024m
+      taskmanager.memory.process.size: 2048m
+      taskmanager.numberOfTaskSlots: 3
+      parallelism.default: 6
+      python.executable: /opt/venv/bin/python
+      python.client.executable: /opt/venv/bin/python
+      state.backend.type: hashmap
+      state.checkpoints.dir: file:///opt/flink/checkpoints
+      state.savepoints.dir: file:///opt/flink/savepoints
+      restart-strategy.type: exponential-delay
+      restart-strategy.exponential-delay.initial-backoff: 1s
+      restart-strategy.exponential-delay.max-backoff: 1min
+  volumes:
+    - flink_checkpoints:/opt/flink/checkpoints
+    - flink_savepoints:/opt/flink/savepoints
+  networks:
+    - shared-backend
+
+services:
+  jobmanager:
+    <<: *flink-common
+    container_name: flink-jobmanager
+    command: jobmanager
+    ports:
+      - "127.0.0.1:8081:8081"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8081/overview"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 15s
+
+  taskmanager:
+    <<: *flink-common
+    command: taskmanager
+    depends_on:
+      jobmanager:
+        condition: service_healthy
+    deploy:
+      replicas: 2 # 2 x 3 slots = 6 slots = env.set_parallelism(6)
+
+  job-submitter:
+    <<: *flink-common
+    restart: "no"
+    command: >
+      flink run -d -m jobmanager:8081
+      -py /opt/flink/usrlib/guardian_layer/consumer_producer/kafka_consumer/job.py
+    environment:
+      <<: *flink-env
+      KAFKA_USERNAME: guardian
+      KAFKA_PASSWORD_FILE: /run/secrets/kafka_client_password
+    secrets:
+      - kafka_client_password
+    depends_on:
+      jobmanager:
+        condition: service_healthy
+      taskmanager:
+        condition: service_started
+
+  device-metadata-producer:
+    build:
+      context: ./src
+      dockerfile: guardian_layer/consumer_producer/Dockerfile.producer
+    container_name: device-metadata-producer
+    restart: unless-stopped
+    environment:
+      SYNC_CONFIG: /app/src/guardian_layer/consumer_producer/kafka_producer/utils/settings.yaml
+      GUARDIAN_LAYER_LOG: INFO
+      KAFKA_PASSWORD: /run/secrets/kafka_broadcast_password
+      KAFKA_BOOTSTRAP: kafka-1:19094,kafka-2:19094,kafka-3:19094
+      MCP_URL: http://twin_layer:8000/sse
+      GUARDIAN_ELASTICSEARCH_URL: ${GUARDIAN_ELASTICSEARCH_URL:-http://elasticsearch:9200}
+      ELASTICSEARCH_USERNAME: ${ELASTICSEARCH_USERNAME:-elastic}
+      ELASTICSEARCH_PASSWORD: ${ELASTIC_PASSWORD:-}
+    secrets:
+      - kafka_broadcast_password
+    volumes:
+      - ./src/guardian_layer/consumer_producer/kafka_producer:/app/src/guardian_layer/consumer_producer/kafka_producer
+    networks:
+      - shared-backend
+
+  action-taker:
+    build:
+      context: ./src
+      dockerfile: Dockerfile.action_taker
+    container_name: action-taker
+    restart: unless-stopped
+    stop_grace_period: 15s
+    environment:
+      ACTION_TAKER_CONFIG: /app/src/guardian_layer/consumer_producer/action_taker/utils/settings.yaml
+      ACTION_TAKER_DRY_RUN: "false"
+      GUARDIAN_LAYER_LOG: INFO
+    secrets:
+      - kafka_action_taker_password
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./src/guardian_layer:/app/src/guardian_layer:ro
+    networks:
+      - shared-backend
+    logging: *default-logging
+
+  # twin-mcp:
+  #   build:
+  #     context: ./mocks/twin/
+  #     dockerfile: Dockerfile.mcp
+  #     target: runtime
+  #   image: twin-mcp:latest
+  #   container_name: twin-mcp
+  #   restart: unless-stopped
+  #   environment:
+  #     MCP_HOST: 0.0.0.0
+  #     MCP_PORT: "8000"
+  #   ports:
+  #     - "${MCP_PORT:-8000}:8000"
+  #   healthcheck:
+  #     test:
+  #       - CMD
+  #       - python
+  #       - -c
+  #       - "import socket; socket.create_connection(('127.0.0.1', 8000), 2).close()"
+  #     interval: 30s
+  #     timeout: 3s
+  #     start_period: 10s
+  #     retries: 3
+  #   read_only: true
+  #   cap_drop:
+  #     - ALL
+  #   security_opt:
+  #     - no-new-privileges:true
+  #   networks:
+  #     - shared-backend
+  #   logging: *default-logging
+
+networks:
+  shared-backend:
+    external: true
+
+volumes:
+  flink_checkpoints:
+  flink_savepoints:
+
+secrets:
+  kafka_client_password:
+    file: ./secrets/kafka_client_password.txt
+  kafka_broadcast_password:
+    file: ./secrets/kafka_broadcast_password.txt
+  kafka_action_taker_password:
+    file: ./secrets/kafka_action_taker_password.txt

@@ -1,0 +1,27 @@
+
+brain = {
+    "read": [
+        "comm/brain/guardian/private",
+        "comm/brain/twin/private",
+        "comm/guardian/brain/public",
+        "comm/twin/brain/public",
+    ]
+}
+
+guardian = {
+    "read": [
+        "comm/guardian/twin/private",
+        "comm/guardian/brain/private",
+        "comm/twin/guardian/public",
+        "comm/brain/guardian/public",
+    ]
+}
+
+twin = {
+    "read": [
+        "comm/twin/guardian/private",
+        "comm/twin/brain/private",
+        "comm/guardian/twin/public",
+        "comm/brain/twin/public",
+    ]
+}

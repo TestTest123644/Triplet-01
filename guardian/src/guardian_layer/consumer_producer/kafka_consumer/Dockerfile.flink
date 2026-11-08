@@ -1,0 +1,98 @@
+# ==========================================
+# Flink + PyFlink job image (Python 3.11)
+#
+# PyFlink 1.20.x supports Python 3.8-3.11.
+# Defaults match docker-compose.yml:
+#   FLINK_IMAGE: flink:1.20.1-scala_2.12-java17
+#   PYTHON_VERSION: 3.11
+# ==========================================
+ARG FLINK_IMAGE=flink:1.20.1-scala_2.12-java17
+FROM ${FLINK_IMAGE}
+
+ARG PYTHON_VERSION=3.11
+
+USER root
+
+# ------------------------------------------
+# Python from the deadsnakes PPA
+# ------------------------------------------
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    software-properties-common \
+    gnupg \
+    ca-certificates \
+    && add-apt-repository -y ppa:deadsnakes/ppa \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
+    python${PYTHON_VERSION} \
+    python${PYTHON_VERSION}-venv \
+    python${PYTHON_VERSION}-dev \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+# ------------------------------------------
+# Virtualenv used by the client AND the Python workers
+# ------------------------------------------
+RUN python${PYTHON_VERSION} -m venv /opt/venv
+ENV VIRTUAL_ENV=/opt/venv
+ENV PATH="/opt/venv/bin:${PATH}"
+
+WORKDIR /opt/flink/usrlib
+
+COPY src/guardian_layer/consumer_producer/kafka_consumer/requirements.txt /tmp/requirements.txt
+
+RUN pip install --no-cache-dir --upgrade pip "setuptools<70" wheel && \
+    pip install --no-cache-dir -r /tmp/requirements.txt && \
+    rm /tmp/requirements.txt
+
+# ------------------------------------------
+# Flink Kafka Connector
+# ------------------------------------------
+ADD --chmod=644 https://repo1.maven.org/maven2/org/apache/flink/flink-sql-connector-kafka/3.3.0-1.20/flink-sql-connector-kafka-3.3.0-1.20.jar /opt/flink/lib/
+
+# ------------------------------------------
+# Application code (only dependencies needed to run the Flink consumer jobs)
+# ------------------------------------------
+
+# Root package initialization (empty to avoid importing orchestrator & heavyweight ML packages)
+RUN mkdir -p guardian_layer && touch guardian_layer/__init__.py
+
+# Consumer-producer package
+COPY src/guardian_layer/consumer_producer/__init__.py \
+    guardian_layer/consumer_producer/
+
+# Kafka consumer: job, jobs, mcp_client
+COPY src/guardian_layer/consumer_producer/kafka_consumer/ \
+    guardian_layer/consumer_producer/kafka_consumer/
+
+# Domain models
+COPY src/guardian_layer/models/ \
+    guardian_layer/models/
+
+# Data transformers
+COPY src/guardian_layer/data_transformer/ \
+    guardian_layer/data_transformer/
+
+# Minimal utilities required by models, transformers and logging
+COPY src/guardian_layer/utils/__init__.py \
+    src/guardian_layer/utils/config.py \
+    src/guardian_layer/utils/elastic.py \
+    src/guardian_layer/utils/helpers.py \
+    src/guardian_layer/utils/logger.py \
+    src/guardian_layer/utils/schema.py \
+    src/guardian_layer/utils/sensor_verification.py \
+    guardian_layer/utils/
+
+# ------------------------------------------
+# Runtime environment configuration
+# ------------------------------------------
+ENV PYTHON=/opt/venv/bin/python
+ENV PYFLINK_CLIENT_EXECUTABLE=/opt/venv/bin/python
+ENV PYTHONPATH=/opt/flink/usrlib
+ENV KAFKA_CONNECTOR_JAR=file:///opt/flink/lib/flink-sql-connector-kafka-3.3.0-1.20.jar
+
+RUN chown -R flink:flink /opt/flink/usrlib /opt/venv /opt/flink/lib/flink-sql-connector-kafka-3.3.0-1.20.jar && \
+    mkdir -p /opt/flink/checkpoints /opt/flink/savepoints && \
+    chown -R flink:flink /opt/flink/checkpoints /opt/flink/savepoints
+
+USER flink

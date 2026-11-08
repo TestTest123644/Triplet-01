@@ -1,0 +1,53 @@
+# Build context: ./src, the folder this file is in (CI and docker-compose.yml both build from it).
+
+# ==========================================
+# Stage 1: Builder
+# ==========================================
+FROM python:3.12-slim AS builder
+
+WORKDIR /build
+
+# Tools needed to build the wheels that have no binary release for this platform
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+# Exported from uv.lock: uv export --no-dev --no-hashes --no-emit-project
+COPY guardian_layer/consumer_producer/action_taker/requirements.txt .
+
+RUN pip wheel \
+    --no-cache-dir \
+    --wheel-dir /wheels \
+    -r requirements.txt
+
+
+# ==========================================
+# Stage 2: Runtime
+# ==========================================
+FROM python:3.12-slim AS runtime
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/app/src
+
+WORKDIR /app
+
+COPY --from=builder /wheels /wheels
+COPY guardian_layer/consumer_producer/action_taker/requirements.txt .
+
+RUN pip install \
+    --no-cache-dir \
+    --no-index \
+    --find-links=/wheels \
+    -r requirements.txt \
+    && rm -rf /wheels requirements.txt
+
+# The whole package: action_taker imports guardian_layer.mcp_client and .utils
+COPY guardian_layer/ /app/src/guardian_layer/
+
+RUN useradd --create-home --shell /usr/sbin/nologin action_taker \
+    && chown -R action_taker:action_taker /app
+
+USER action_taker
+
+CMD ["python", "-m", "guardian_layer.consumer_producer.action_taker.main"]

@@ -1,0 +1,1544 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "description": "Guardian Layer monitoring: Elasticsearch logs plus PostgreSQL processed_readings and model_outputs.",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "id": 100,
+      "panels": [],
+      "title": "1 \u00b7 Server logs",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "elasticsearch",
+        "uid": "guardian-elasticsearch"
+      },
+      "description": "Documents in guardian-logs for the selected time range and log level.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          },
+          "unit": "none"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 0,
+        "y": 1
+      },
+      "id": 1,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "sum"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "bucketAggs": [
+            {
+              "field": "@timestamp",
+              "id": "2",
+              "settings": {
+                "interval": "1d",
+                "min_doc_count": 0
+              },
+              "type": "date_histogram"
+            }
+          ],
+          "datasource": {
+            "type": "elasticsearch",
+            "uid": "guardian-elasticsearch"
+          },
+          "metrics": [
+            {
+              "id": "1",
+              "type": "count"
+            }
+          ],
+          "query": "level:$level",
+          "refId": "A",
+          "timeField": "@timestamp"
+        }
+      ],
+      "title": "Total logs",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "elasticsearch",
+        "uid": "guardian-elasticsearch"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              }
+            ]
+          },
+          "unit": "none"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 6,
+        "y": 1
+      },
+      "id": 2,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "sum"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "bucketAggs": [
+            {
+              "field": "@timestamp",
+              "id": "2",
+              "settings": {
+                "interval": "1d",
+                "min_doc_count": 0
+              },
+              "type": "date_histogram"
+            }
+          ],
+          "datasource": {
+            "type": "elasticsearch",
+            "uid": "guardian-elasticsearch"
+          },
+          "metrics": [
+            {
+              "id": "1",
+              "type": "count"
+            }
+          ],
+          "query": "level:WARNING",
+          "refId": "A",
+          "timeField": "@timestamp"
+        }
+      ],
+      "title": "Warnings",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "elasticsearch",
+        "uid": "guardian-elasticsearch"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          },
+          "unit": "none"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 12,
+        "y": 1
+      },
+      "id": 3,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "sum"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "bucketAggs": [
+            {
+              "field": "@timestamp",
+              "id": "2",
+              "settings": {
+                "interval": "1d",
+                "min_doc_count": 0
+              },
+              "type": "date_histogram"
+            }
+          ],
+          "datasource": {
+            "type": "elasticsearch",
+            "uid": "guardian-elasticsearch"
+          },
+          "metrics": [
+            {
+              "id": "1",
+              "type": "count"
+            }
+          ],
+          "query": "level:ERROR",
+          "refId": "A",
+          "timeField": "@timestamp"
+        }
+      ],
+      "title": "Errors",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "elasticsearch",
+        "uid": "guardian-elasticsearch"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "dark-red",
+                "value": 1
+              }
+            ]
+          },
+          "unit": "none"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 18,
+        "y": 1
+      },
+      "id": 4,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "sum"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "bucketAggs": [
+            {
+              "field": "@timestamp",
+              "id": "2",
+              "settings": {
+                "interval": "1d",
+                "min_doc_count": 0
+              },
+              "type": "date_histogram"
+            }
+          ],
+          "datasource": {
+            "type": "elasticsearch",
+            "uid": "guardian-elasticsearch"
+          },
+          "metrics": [
+            {
+              "id": "1",
+              "type": "count"
+            }
+          ],
+          "query": "level:CRITICAL",
+          "refId": "A",
+          "timeField": "@timestamp"
+        }
+      ],
+      "title": "Critical",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "elasticsearch",
+        "uid": "guardian-elasticsearch"
+      },
+      "description": "How many log lines per level (INFO / WARNING / ERROR / CRITICAL) in the selected time range.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 16,
+        "x": 0,
+        "y": 5
+      },
+      "id": 5,
+      "options": {
+        "displayLabels": [
+          "name",
+          "percent"
+        ],
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true,
+          "values": [
+            "value",
+            "percent"
+          ]
+        },
+        "pieType": "donut",
+        "reduceOptions": {
+          "calcs": [
+            "sum"
+          ],
+          "fields": "",
+          "values": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "alias": "{{term level}}",
+          "bucketAggs": [
+            {
+              "field": "level",
+              "id": "2",
+              "settings": {
+                "min_doc_count": 1,
+                "order": "desc",
+                "orderBy": "_count",
+                "size": "10"
+              },
+              "type": "terms"
+            }
+          ],
+          "datasource": {
+            "type": "elasticsearch",
+            "uid": "guardian-elasticsearch"
+          },
+          "metrics": [
+            {
+              "id": "1",
+              "type": "count"
+            }
+          ],
+          "query": "level:$level",
+          "refId": "A",
+          "timeField": "@timestamp"
+        }
+      ],
+      "title": "Logs by level",
+      "type": "piechart"
+    },
+    {
+      "datasource": {
+        "type": "elasticsearch",
+        "uid": "guardian-elasticsearch"
+      },
+      "description": "Which loggers produced the most events.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 5
+      },
+      "id": 6,
+      "options": {
+        "displayMode": "gradient",
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": false
+        },
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "sum"
+          ],
+          "fields": "",
+          "values": true
+        },
+        "showUnfilled": true
+      },
+      "targets": [
+        {
+          "alias": "{{term logger}}",
+          "bucketAggs": [
+            {
+              "field": "logger",
+              "id": "2",
+              "settings": {
+                "min_doc_count": 1,
+                "order": "desc",
+                "orderBy": "_count",
+                "size": "10"
+              },
+              "type": "terms"
+            }
+          ],
+          "datasource": {
+            "type": "elasticsearch",
+            "uid": "guardian-elasticsearch"
+          },
+          "metrics": [
+            {
+              "id": "1",
+              "type": "count"
+            }
+          ],
+          "query": "level:$level",
+          "refId": "A",
+          "timeField": "@timestamp"
+        }
+      ],
+      "title": "Top loggers",
+      "type": "bargauge"
+    },
+    {
+      "datasource": {
+        "type": "elasticsearch",
+        "uid": "guardian-elasticsearch"
+      },
+      "description": "Recent log lines from guardian-logs. Empty until Fluent Bit is shipping container stdout.",
+      "gridPos": {
+        "h": 9,
+        "w": 24,
+        "x": 0,
+        "y": 13
+      },
+      "id": 7,
+      "options": {
+        "dedupStrategy": "none",
+        "enableLogDetails": true,
+        "prettifyLogMessage": false,
+        "showCommonLabels": false,
+        "showLabels": true,
+        "showTime": true,
+        "sortOrder": "Descending",
+        "wrapLogMessage": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "elasticsearch",
+            "uid": "guardian-elasticsearch"
+          },
+          "metrics": [
+            {
+              "id": "1",
+              "type": "logs"
+            }
+          ],
+          "query": "level:$level",
+          "refId": "A",
+          "timeField": "@timestamp"
+        }
+      ],
+      "title": "Log explorer",
+      "type": "logs"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 22
+      },
+      "id": 101,
+      "panels": [],
+      "title": "2 \u00b7 Model verdicts",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "guardian-postgres"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          },
+          "unit": "none"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 0,
+        "y": 23
+      },
+      "id": 10,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "guardian-postgres"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT COUNT(*) AS predictions\nFROM public.model_outputs\nWHERE sensor_id = ANY(ARRAY[${sensor_id:sqlstring}]::text[])\n  AND window_end BETWEEN $__timeFrom() AND $__timeTo()\n  AND (('${anomaly}' = 'all') OR ('${anomaly}' = 'yes' AND is_anomaly) OR ('${anomaly}' = 'no' AND NOT is_anomaly));",
+          "refId": "A"
+        }
+      ],
+      "title": "Stored verdicts",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "guardian-postgres"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          },
+          "unit": "none"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 6,
+        "y": 23
+      },
+      "id": 11,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "guardian-postgres"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT COUNT(*) AS anomalies\nFROM public.model_outputs\nWHERE is_anomaly\n  AND sensor_id = ANY(ARRAY[${sensor_id:sqlstring}]::text[])\n  AND window_end BETWEEN $__timeFrom() AND $__timeTo();",
+          "refId": "A"
+        }
+      ],
+      "title": "Stored anomalies",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "guardian-postgres"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 5
+              },
+              {
+                "color": "red",
+                "value": 20
+              }
+            ]
+          },
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 12,
+        "y": 23
+      },
+      "id": 12,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "guardian-postgres"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT CASE WHEN COUNT(*) = 0 THEN 0\n            ELSE ROUND(100.0 * COUNT(*) FILTER (WHERE is_anomaly) / COUNT(*), 1)\n       END AS anomaly_rate\nFROM public.model_outputs\nWHERE sensor_id = ANY(ARRAY[${sensor_id:sqlstring}]::text[])\n  AND window_end BETWEEN $__timeFrom() AND $__timeTo();",
+          "refId": "A"
+        }
+      ],
+      "title": "Anomaly rate",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "guardian-postgres"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "decimals": 4,
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "purple",
+                "value": null
+              }
+            ]
+          },
+          "unit": "none"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 18,
+        "y": 23
+      },
+      "id": 13,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "guardian-postgres"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT AVG(score) AS mean_score\nFROM public.model_outputs\nWHERE sensor_id = ANY(ARRAY[${sensor_id:sqlstring}]::text[])\n  AND window_end BETWEEN $__timeFrom() AND $__timeTo();",
+          "refId": "A"
+        }
+      ],
+      "title": "Mean score",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "guardian-postgres"
+      },
+      "description": "Scores and labels from public.model_outputs filtered by window_end.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "filterable": true
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 16,
+        "x": 0,
+        "y": 27
+      },
+      "id": 14,
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": true,
+          "reducer": [
+            "count"
+          ],
+          "show": true
+        },
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "guardian-postgres"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT\n  sensor_id,\n  score,\n  CASE WHEN is_anomaly THEN 'anomaly' ELSE NULL END AS label,\n  is_anomaly\nFROM public.model_outputs\nWHERE sensor_id = ANY(ARRAY[${sensor_id:sqlstring}]::text[])\n  AND window_end BETWEEN $__timeFrom() AND $__timeTo()\n  AND (('${anomaly}' = 'all') OR ('${anomaly}' = 'yes' AND is_anomaly) OR ('${anomaly}' = 'no' AND NOT is_anomaly))\nORDER BY id DESC\nLIMIT 100;",
+          "refId": "A"
+        }
+      ],
+      "title": "Verdict scores",
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "guardian-postgres"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 2
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 27
+      },
+      "id": 15,
+      "options": {
+        "displayMode": "gradient",
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": false
+        },
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "sum"
+          ],
+          "fields": "",
+          "values": true
+        },
+        "showUnfilled": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "guardian-postgres"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT\n  sensor_id AS metric,\n  COUNT(*) FILTER (WHERE is_anomaly) AS anomalies\nFROM public.model_outputs\nWHERE sensor_id = ANY(ARRAY[${sensor_id:sqlstring}]::text[])\n  AND window_end BETWEEN $__timeFrom() AND $__timeTo()\nGROUP BY sensor_id\nORDER BY anomalies DESC, metric;",
+          "refId": "A"
+        }
+      ],
+      "title": "Anomalies by sensor",
+      "type": "bargauge"
+    },
+    {
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "guardian-postgres"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "filterable": true
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "is_anomaly"
+            },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "mode": "color-background",
+                  "type": "color-background"
+                }
+              },
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "true": {
+                        "color": "red",
+                        "index": 0,
+                        "text": "yes"
+                      }
+                    }
+                  },
+                  {
+                    "type": "value",
+                    "options": {
+                      "false": {
+                        "color": "green",
+                        "index": 1,
+                        "text": "no"
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 35
+      },
+      "id": 16,
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": true,
+          "enablePagination": true,
+          "fields": "",
+          "reducer": [
+            "count"
+          ],
+          "show": true
+        },
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "guardian-postgres"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT\n  id,\n  sensor_id,\n  score,\n  CASE WHEN is_anomaly THEN 'anomaly' ELSE NULL END AS label,\n  is_anomaly,\n  model_version,\n  window_end\nFROM public.model_outputs\nWHERE sensor_id = ANY(ARRAY[${sensor_id:sqlstring}]::text[])\n  AND window_end BETWEEN $__timeFrom() AND $__timeTo()\n  AND (('${anomaly}' = 'all') OR ('${anomaly}' = 'yes' AND is_anomaly) OR ('${anomaly}' = 'no' AND NOT is_anomaly))\nORDER BY id DESC\nLIMIT 100;",
+          "refId": "A"
+        }
+      ],
+      "title": "Stored verdict details",
+      "type": "table"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 43
+      },
+      "id": 102,
+      "panels": [],
+      "title": "3 \u00b7 Sensors",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "guardian-postgres"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          },
+          "unit": "none"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 8,
+        "x": 0,
+        "y": 44
+      },
+      "id": 20,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "guardian-postgres"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT COUNT(*) AS readings\nFROM public.processed_readings\nWHERE \"timestamp\" BETWEEN $__timeFrom() AND $__timeTo()\n  AND sensor_id = ANY(ARRAY[${sensor_id:sqlstring}]::text[])\n  AND ('__all_clusters__' IN (${cluster_id:sqlstring}) OR cluster_id IN (${cluster_id:sqlstring}));",
+          "refId": "A"
+        }
+      ],
+      "title": "Readings",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "guardian-postgres"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "semi-dark-blue",
+                "value": null
+              }
+            ]
+          },
+          "unit": "none"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 8,
+        "x": 8,
+        "y": 44
+      },
+      "id": 21,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "guardian-postgres"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT COUNT(DISTINCT sensor_id) AS sensors\nFROM public.processed_readings\nWHERE \"timestamp\" BETWEEN $__timeFrom() AND $__timeTo()\n  AND sensor_id = ANY(ARRAY[${sensor_id:sqlstring}]::text[])\n  AND ('__all_clusters__' IN (${cluster_id:sqlstring}) OR cluster_id IN (${cluster_id:sqlstring}));",
+          "refId": "A"
+        }
+      ],
+      "title": "Sensors",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "guardian-postgres"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "semi-dark-green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "none"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 8,
+        "x": 16,
+        "y": 44
+      },
+      "id": 22,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "guardian-postgres"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT COUNT(DISTINCT cluster_id) AS clusters\nFROM public.processed_readings\nWHERE cluster_id IS NOT NULL\n  AND \"timestamp\" BETWEEN $__timeFrom() AND $__timeTo()\n  AND sensor_id = ANY(ARRAY[${sensor_id:sqlstring}]::text[])\n  AND ('__all_clusters__' IN (${cluster_id:sqlstring}) OR cluster_id IN (${cluster_id:sqlstring}));",
+          "refId": "A"
+        }
+      ],
+      "title": "Clusters",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "guardian-postgres"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "filterable": true
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 48
+      },
+      "id": 24,
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "guardian-postgres"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT\n  sensor_id,\n  cluster_id,\n  unit,\n  COUNT(*) AS readings,\n  ROUND(AVG(value)::numeric, 3) AS avg_value,\n  ROUND(MIN(value)::numeric, 3) AS min_value,\n  ROUND(MAX(value)::numeric, 3) AS max_value,\n  ROUND(STDDEV_SAMP(value)::numeric, 3) AS stddev,\n  MAX(\"timestamp\") AS latest_event\nFROM public.processed_readings\nWHERE \"timestamp\" BETWEEN $__timeFrom() AND $__timeTo()\n  AND sensor_id = ANY(ARRAY[${sensor_id:sqlstring}]::text[])\n  AND ('__all_clusters__' IN (${cluster_id:sqlstring}) OR cluster_id IN (${cluster_id:sqlstring}))\nGROUP BY sensor_id, cluster_id, unit\nORDER BY sensor_id;",
+          "refId": "A"
+        }
+      ],
+      "title": "Inventory",
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "guardian-postgres"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 20,
+            "lineWidth": 2,
+            "spanNulls": false
+          },
+          "unit": "none"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 56
+      },
+      "id": 26,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "guardian-postgres"
+          },
+          "editorMode": "code",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT\n  date_trunc('minute', \"timestamp\") AS time,\n  COALESCE(cluster_id, 'unknown') AS metric,\n  AVG(value) AS avg_value\nFROM public.processed_readings\nWHERE \"timestamp\" BETWEEN $__timeFrom() AND $__timeTo()\n  AND sensor_id = ANY(ARRAY[${sensor_id:sqlstring}]::text[])\n  AND ('__all_clusters__' IN (${cluster_id:sqlstring}) OR cluster_id IN (${cluster_id:sqlstring}))\nGROUP BY 1, 2\nORDER BY 1;",
+          "refId": "A"
+        }
+      ],
+      "title": "Avg value by cluster",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "guardian-postgres"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "filterable": true
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 56
+      },
+      "id": 27,
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": true,
+          "enablePagination": true,
+          "fields": "",
+          "reducer": [
+            "count"
+          ],
+          "show": true
+        },
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "guardian-postgres"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT\n  sensor_id,\n  cluster_id,\n  \"timestamp\" AS event_time,\n  ROUND(value::numeric, 3) AS value,\n  unit\nFROM public.processed_readings\nWHERE \"timestamp\" BETWEEN $__timeFrom() AND $__timeTo()\n  AND sensor_id = ANY(ARRAY[${sensor_id:sqlstring}]::text[])\n  AND ('__all_clusters__' IN (${cluster_id:sqlstring}) OR cluster_id IN (${cluster_id:sqlstring}))\nORDER BY \"timestamp\" DESC\nLIMIT 100;",
+          "refId": "A"
+        }
+      ],
+      "title": "Recent readings",
+      "type": "table"
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "tags": [
+    "guardian",
+    "monitoring"
+  ],
+  "templating": {
+    "list": [
+      {
+        "allValue": "*",
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "$__all"
+        },
+        "hide": 0,
+        "includeAll": true,
+        "label": "Log level",
+        "multi": false,
+        "name": "level",
+        "options": [
+          {
+            "selected": true,
+            "text": "All",
+            "value": "$__all"
+          },
+          {
+            "selected": false,
+            "text": "DEBUG",
+            "value": "DEBUG"
+          },
+          {
+            "selected": false,
+            "text": "INFO",
+            "value": "INFO"
+          },
+          {
+            "selected": false,
+            "text": "WARNING",
+            "value": "WARNING"
+          },
+          {
+            "selected": false,
+            "text": "ERROR",
+            "value": "ERROR"
+          },
+          {
+            "selected": false,
+            "text": "CRITICAL",
+            "value": "CRITICAL"
+          }
+        ],
+        "query": "DEBUG,INFO,WARNING,ERROR,CRITICAL",
+        "skipUrlSync": false,
+        "type": "custom"
+      },
+      {
+        "allValue": null,
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "$__all"
+        },
+        "datasource": {
+          "type": "grafana-postgresql-datasource",
+          "uid": "guardian-postgres"
+        },
+        "definition": "SELECT DISTINCT sensor_id FROM (\n  SELECT sensor_id FROM public.processed_readings\n  UNION\n  SELECT sensor_id FROM public.model_outputs\n) s WHERE sensor_id IS NOT NULL ORDER BY 1;",
+        "hide": 0,
+        "includeAll": true,
+        "label": "Sensor",
+        "multi": true,
+        "name": "sensor_id",
+        "options": [],
+        "query": "SELECT DISTINCT sensor_id FROM (\n  SELECT sensor_id FROM public.processed_readings\n  UNION\n  SELECT sensor_id FROM public.model_outputs\n) s WHERE sensor_id IS NOT NULL ORDER BY 1;",
+        "refresh": 2,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 1,
+        "type": "query"
+      },
+      {
+        "allValue": "'__all_clusters__'",
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "$__all"
+        },
+        "datasource": {
+          "type": "grafana-postgresql-datasource",
+          "uid": "guardian-postgres"
+        },
+        "definition": "SELECT DISTINCT cluster_id FROM public.processed_readings\nWHERE cluster_id IS NOT NULL ORDER BY 1;",
+        "hide": 0,
+        "includeAll": true,
+        "label": "Cluster",
+        "multi": true,
+        "name": "cluster_id",
+        "options": [],
+        "query": "SELECT DISTINCT cluster_id FROM public.processed_readings\nWHERE cluster_id IS NOT NULL ORDER BY 1;",
+        "refresh": 2,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 1,
+        "type": "query"
+      },
+      {
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "all"
+        },
+        "hide": 0,
+        "includeAll": false,
+        "label": "Anomaly",
+        "multi": false,
+        "name": "anomaly",
+        "options": [
+          {
+            "selected": true,
+            "text": "All",
+            "value": "all"
+          },
+          {
+            "selected": false,
+            "text": "Anomalies only",
+            "value": "yes"
+          },
+          {
+            "selected": false,
+            "text": "Normal only",
+            "value": "no"
+          }
+        ],
+        "query": "all,yes,no",
+        "skipUrlSync": false,
+        "type": "custom"
+      }
+    ]
+  },
+  "time": {
+    "from": "2004-02-01T00:00:00.000Z",
+    "to": "now"
+  },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "Guardian monitoring",
+  "uid": "guardian-monitoring",
+  "version": 11
+}

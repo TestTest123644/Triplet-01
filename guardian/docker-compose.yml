@@ -1,0 +1,4 @@
+include:
+  - docker-compose.broker.yml
+  - docker-compose.processing.yml
+  - docker-compose.monitoring.yml

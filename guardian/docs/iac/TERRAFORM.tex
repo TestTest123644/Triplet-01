@@ -1,0 +1,100 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage[margin=2cm,top=2.2cm,bottom=2.2cm]{geometry}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{enumitem}
+\usepackage{fancyhdr}
+\usepackage{titlesec}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{microtype}
+\usepackage[colorlinks=true,linkcolor=blue!70!black,citecolor=blue!70!black,urlcolor=blue!70!black]{hyperref}
+
+% Header and Footer styling
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\small\textsf{\textbf{Infrastructure as Code Spec} \textbar\ Guardian Layer}}
+\fancyhead[R]{\small\textsf{Page \thepage}}
+\fancyfoot[L]{\small\textsf{Terraform / OpenTofu Architecture Specification}}
+\fancyfoot[R]{\small\textsf{Version 1.0}}
+\renewcommand{\headrulewidth}{0.5pt}
+\renewcommand{\footrulewidth}{0.5pt}
+
+% Section formatting
+\titleformat{\section}
+  {\normalfont\sffamily\Large\bfseries\color{blue!80!black}}
+  {\thesection}{0.8em}{}
+\titleformat{\subsection}
+  {\normalfont\sffamily\large\bfseries\color{blue!70!black}}
+  {\thesubsection}{0.6em}{}
+
+\titlespacing*{\section}{0pt}{10pt}{5pt}
+\titlespacing*{\subsection}{0pt}{8pt}{4pt}
+\setlength{\parskip}{3pt}
+\setlength{\parindent}{0pt}
+
+% Code listing styling
+\definecolor{codegray}{rgb}{0.96,0.96,0.96}
+\definecolor{codeframe}{rgb}{0.85,0.85,0.85}
+\lstset{
+  backgroundcolor=\color{codegray},
+  basicstyle=\ttfamily\footnotesize,
+  breaklines=true,
+  frame=single,
+  rulecolor=\color{codeframe},
+  keepspaces=true
+}
+
+\title{\sffamily\bfseries\huge Infrastructure as Code (IaC) Specification\\[0.3em]
+\Large Declarative Provisioning for Guardian Streaming, Security \& Persistence}
+\author{\textsf{The Guardian Layer DevOps Team}}
+\date{\textsf{Version 1.0 \textbar\ November 2026}}
+
+\begin{document}
+
+\maketitle
+\thispagestyle{fancy}
+
+\section{Overview}
+This document outlines the Infrastructure as Code (IaC) design for the Guardian Layer using Terraform / OpenTofu. Declarative modules provision and manage the containerized message brokers, secrets managers, relational stores, and analytical observability engines underpinning the 3-layer urban monitoring platform.
+
+\section{Managed Infrastructure Modules}
+
+\subsection{Streaming Broker Infrastructure}
+\begin{itemize}[leftmargin=*,itemsep=2pt]
+  \item \textbf{Apache Kafka Cluster (KRaft mode):} 3 broker nodes deployed across isolated network zones.
+  \item \textbf{Pre-provisioned Topics:}
+    \begin{itemize}
+      \item \texttt{telemetry-ingest} (alias \texttt{sensors.raw}): 12 partitions, replication factor 3.
+      \item \texttt{telemetry-validated} (alias \texttt{sensors.validated}): 12 partitions, replication factor 3.
+      \item \texttt{telemetry-dlq} (alias \texttt{sensors.dlq}): 6 partitions, 30-day retention for post-incident security forensics.
+      \item \texttt{devices-metadata}: 3 partitions with a compacted log cleanup policy.
+    \end{itemize}
+\end{itemize}
+
+\subsection{Security Perimeter \& Vault}
+\begin{itemize}[leftmargin=*,itemsep=2pt]
+  \item \textbf{HashiCorp Vault HA:} 3-node cluster utilizing Raft integrated storage with auto-unseal capabilities.
+  \item \textbf{AppRole Automation:} Declarative provisioning of \texttt{guardian-app}, \texttt{twin-app}, \texttt{brain-app}, and \texttt{rotator} roles with scoped HCL policies.
+  \item \textbf{Network Isolation:} Docker bridge networks isolating internal database listeners from public edge ports.
+\end{itemize}
+
+\subsection{Persistence and Observability}
+\begin{itemize}[leftmargin=*,itemsep=2pt]
+  \item \textbf{PostgreSQL 16:} Managed relational instance for structured anomaly verdict tables, indexed temporal partitions, and connection pooling.
+  \item \textbf{Elasticsearch 8.15:} 3-node cluster with Index Lifecycle Management (ILM) for 90-day forensic log archiving.
+\end{itemize}
+
+\section{State Management \& CI Deployment}
+\begin{lstlisting}
+terraform init
+terraform plan -out=tfplan
+terraform apply tfplan
+\end{lstlisting}
+State files reside in remote object storage with state locking enabled. Credentials and tokens are pulled dynamically from Vault, guaranteeing zero hard-coded secrets in repository sources.
+
+\end{document}
+

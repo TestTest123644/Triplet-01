@@ -1,0 +1,47 @@
+{
+  "method": "none",
+  "threshold": 0.8289948254823685,
+  "keys": [
+    "duplicate_count",
+    "out_of_order_count",
+    "replay_count",
+    "packet_gap_max",
+    "rz_variance",
+    "rz_rolling_variance_max",
+    "rz_rate_of_change_mean_abs",
+    "rz_rate_of_change_max_abs",
+    "rz_flatline_ratio",
+    "max_abs_step",
+    "max_abs_level",
+    "sign_flip_share",
+    "diff_autocorr",
+    "spectral_peak_share",
+    "diff_kurtosis",
+    "rolling_variance_ratio",
+    "n_haar_d1_energy",
+    "n_haar_d2_energy",
+    "n_haar_d3_energy",
+    "n_haar_d1_max_abs"
+  ],
+  "classes": [
+    "sensor_malfunction",
+    "not_sensor_data"
+  ],
+  "rate_thresholds": {
+    "1.0": 0.9418477118015289,
+    "10.0": 0.8289948254823685
+  },
+  "window_seconds": 20.0,
+  "cleaning": {
+    "clean_method": "kalman",
+    "kalman": {
+      "mode": "smoother",
+      "noise": "fixed",
+      "process_ratio": 0.1,
+      "process_scale": 1.0,
+      "process_floor": 0.001,
+      "jump_sigmas": 4.0,
+      "keep_repeats": true
+    }
+  }
+}

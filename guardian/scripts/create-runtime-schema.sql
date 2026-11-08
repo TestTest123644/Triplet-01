@@ -1,0 +1,14 @@
+CREATE TABLE IF NOT EXISTS public.sensors (
+  id BIGSERIAL PRIMARY KEY,
+  data JSONB NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS public.sensor_summaries (
+  id BIGSERIAL PRIMARY KEY,
+  data JSONB NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS public.verdicts (
+  id BIGSERIAL PRIMARY KEY,
+  data JSONB NOT NULL
+);

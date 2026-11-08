@@ -1,0 +1,529 @@
+# Read by guardian_layer.utils.dataset_config (the dataset loaders of #69);
+# GUARDIAN_DATASETS_CONFIG names another file. The defaults in that module equal
+# these values.
+
+# the shared datasets folder next to the repository; relative to the project root,
+# or absolute
+root: ../datasets
+intel_lab:
+  folder: intel_lab
+  data_file: data.txt.gz
+  locations_file: mote_locs.txt
+  # type -> [unit, lower_range, upper_range], in the file's column order; light
+  # saturates at 1847.36 lux
+  types:
+    temperature: [C, 0.0, 50.0]
+    humidity: ["%", 0.0, 100.0]
+    light: [lux, 0.0, 1847.36]
+  voltage_min: 2.4  # below this, readings go bad
+  first_mote: 1
+  last_mote: 54  # ids 55-58 in the file are not real motes
+  bad_epoch: 65535  # 16-bit counter artefact
+  origin_lat: 36.79  # mote x/y metres become offsets from here
+  origin_lon: 10.18
+  metres_per_degree: 111320.0
+  skipped:
+    voltage: housekeeping; used only for the fault label
+nab:
+  folder: nab
+  windows_file: labels__combined_windows.json
+  # local file = local_prefix + NAB name with "/" as "__"
+  local_prefix: data__
+  # NAB name -> [station, type, unit]. NAB states no units: likely mph, % and s
+  # (MnDOT detectors), but none is documented
+  series:
+    realTraffic/speed_6005.csv: ["6005", speed, unknown]
+    realTraffic/speed_7578.csv: ["7578", speed, unknown]
+    realTraffic/speed_t4013.csv: [t4013, speed, unknown]
+    realTraffic/occupancy_6005.csv: ["6005", occupancy, unknown]
+    realTraffic/occupancy_t4013.csv: [t4013, occupancy, unknown]
+    realTraffic/TravelTime_387.csv: ["387", travel_time, unknown]
+    realTraffic/TravelTime_451.csv: ["451", travel_time, unknown]
+  skipped:
+    realKnownCause/ambient_temperature_system_failure.csv: indoor office temperature, not in the Twin scenario
+    realKnownCause/machine_temperature_system_failure.csv: inside an industrial machine
+    realKnownCause/nyc_taxi.csv: passenger counts, not a sensor
+array_of_things:
+  folder: array_of_things
+  data_file: AoT_Chicago_2018-01-01_to_2019-12-31.csv.gz
+  time_format: "%Y/%m/%d %H:%M:%S"
+  # sensors.csv with the units is not in the local folder yet
+  unit: unknown
+  skipped_parameters:
+    id: a chip id, not a measurement
+  skipped_sensors:
+    spv1840lr5h_b: "microphone: noise is not related to flooding"
+  skipped:
+    value_raw: uncalibrated; value_hrf is the calibrated value
+traffic_speeds:
+  folder: traffic_speeds
+  chicago_file: chicago_bus_regions.csv
+  nyc_file: nyc_links.csv
+  unit: unknown  # neither dataset page states the speed unit
+  skipped:
+    bus_count: Chicago metadata; 0 marks a row with no measurement
+    num_reads: metadata of the Chicago estimate
+    travel_time: derived from speed; 0 marks a NYC row with no measurement
+    status: not a measurement
+    id: row id
+uk_traffic:
+  folder: uk_traffic
+  pattern: site_*.json
+  # column -> [type, unit]; the units are in the column names
+  columns:
+    Avg mph: [average_speed, mph]
+    Total Volume: [volume, vehicles]
+  skipped:
+    length and speed bins: a breakdown of Total Volume
+    Time Interval: row index within the day
+    Site Name: the file name is the station
+uk_flood:
+  folder: uk_flood
+  pattern: readings-full-*.csv
+  skipped_parameters:
+    flow: computed from level, adds nothing
+  skipped:
+    date: part of dateTime
+    label: station name text
+    station: station URL; the measure id names the station
+    valueType: part of the measure id
+    period: part of the measure id
+    datumType: part of the measure id
+    location: lat/lon need the stations API
+usgs:
+  folder: usgs_water
+  pattern: "*.rdb"
+  # parameter code -> [type, unit]; the units are in each file's header
+  parameters:
+    "00065": [gage_height, ft]
+  # tz_cd -> UTC offset
+  time_zones:
+    EST: "-05:00"
+    EDT: "-04:00"
+    CST: "-06:00"
+    CDT: "-05:00"
+    MST: "-07:00"
+    MDT: "-06:00"
+    PST: "-08:00"
+    PDT: "-07:00"
+  skipped:
+    "00010": water quality, not a flood reading
+    "00095": water quality, not a flood reading
+    "00300": water quality, not a flood reading
+    "00400": water quality, not a flood reading
+    "63680": water quality, not a flood reading
+    "99133": water quality, not a flood reading
+    "99137": water quality, not a flood reading
+    "32295": water quality, not a flood reading
+    "32315": water quality, not a flood reading
+    "32321": water quality, not a flood reading
+    "00060": discharge, computed from gage height
+    "72137": tidally filtered discharge, computed
+    "63160": water level elevation, gage height plus a datum
+    "72147": depth of the sensor below the surface (housekeeping)
+    "72255": mean velocity computed for discharge
+    "80297": sediment load computed by regression
+    "99246": prediction limit of a regression
+    "99247": prediction limit of a regression
+    "99409": sediment concentration estimated by regression
+    _cd: qualifier columns (only P, provisional)
+noaa_tides:
+  folder: noaa_tides
+  pattern: "*_*.csv"  # <station>_<product>.csv
+  # product -> value column -> [type, unit]; metric, as the values show (CO-OPS
+  # units=metric: mb, °C, m, m/s)
+  products:
+    air_pressure:
+      Pressure: [air_pressure, mb]
+    air_temperature:
+      Air Temperature: [air_temperature, "°C"]
+    water_temperature:
+      Water Temperature: [water_temperature, "°C"]
+    water_level:
+      Water Level: [water_level, m]
+    wind:
+      Speed: [wind_speed, m/s]
+      Direction: [wind_direction, "°"]
+      Gust: [wind_gust, m/s]
+  # flag column set to 1 -> label, checked in this order (CO-OPS response help):
+  # X/N max/min expected exceeded, L water level limit, R rate of change, F flat
+  flag_labels:
+    X: out_of_range
+    N: out_of_range
+    L: out_of_range
+    R: sensor_malfunction
+    F: sensor_malfunction
+  skipped:
+    Sigma: spread of the 1 s samples, not a measurement
+    O or I (for verified): a count of samples outside 3 sigma, not a flag
+    Quality: preliminary or verified
+    Direction (second): compass text of the numeric direction
+bellinge:
+  folder: bellinge
+  # cleaned SCADA series: <location>[p<n>]_<measurement>_<system>p<period>_proc_v6.csv
+  cleaned_zip: 2_cleaned_data.zip
+  file_pattern: '(?P<location>[A-Z0-9]+)(?P<pump>p\d+)?_(?:(?P<measurement>[A-Za-z0-9]+)_)?(?P<system>iFix|System2000|Danova)p(?P<period>\d+)_proc_v6\.csv'
+  measurements: [Level1, Level2, LevelBasin, LevelInlet, LevelPS]
+  danova_measurement: Level  # Danova files name no measurement
+  level_kind: water_depth
+  level_unit: m  # 2_Sensordata_v2.pdf; both systems give 0-2 m after cleaning
+  # G71F68Yp1 is the flow meter in the pressure pipe of the G71F68Y pumps (ESSD
+  # 13, 4779, Table 1; design capacity 80 L/s). Sensordata_v2.pdf gives m3/h for the
+  # raw series but the cleaned values run 0.06-0.075 while pumping: 60-75 L/s, so
+  # m3/s (inferred, the cleaning scripts are not in the local folder). It runs about
+  # 3% of the time, so its frozen flags (a pump at constant speed) are not faults:
+  # it gets no label
+  pump_kind: pump_flow
+  pump_unit: m3/s
+  skip_flags: [ffill, stamp, man_remove]
+  # flag -> label, checked in this order after the skip flags
+  flag_labels:
+    outbound: out_of_range
+    frozen: sensor_malfunction
+    frozen_high: sensor_malfunction
+    outlier: sensor_malfunction
+  # rain gauges: zip member -> [station, time format]
+  gauges_zip: 3a_Raingauges.zip
+  gauges:
+    "#3a_Raingauges/5425_ts.txt": ["5425", "%Y-%m-%d %H:%M:%S"]
+    "#3a_Raingauges/5427_ts.txt": ["5427", "%Y-%m-%d %H:%M:%S"]
+    "#3a_Raingauges/Aabakken_bellinge_vandvaerk_v2_ts.txt": [aabakken, "%d-%m-%Y %H:%M:%S"]
+  gauge_kind: rain_intensity
+  gauge_unit: "µm/s"  # the _ts.txt header: mu-m/sec
+  # a gauge's periods with no or unaccepted data (UTC): readings inside are skipped
+  period_files: [_missing_data.txt, _planned_closing_and_not_accepted_data.txt]
+  period_line: '^(\d{8} \d{2}:\d{2})\s+(\d{8} \d{2}:\d{2})'  # start, stop
+  period_time_format: "%Y%m%d %H:%M"
+  skipped:
+    position: "throttle position: a gate actuator, not a sensor"
+    value_no_errors: derived from raw_value and the flags
+    depth_s: derived from raw_value
+    level: depth plus the 0-point
+    .kmd: the same rain series in an undocumented format
+    location: "coordinates are UTM: converting needs a new dependency"
+chicago_beach:
+  folder: chicago_beach
+  time_column: Measurement Timestamp
+  time_format: "%m/%d/%Y %I:%M:%S %p"
+  # no-data sentinels, matched by value: -100000 in any column; 999.9 only in the
+  # wind columns (999.9 hPa is a real pressure there, about as common as 999.8)
+  missing: ["-100000"]
+  column_missing:
+    Wind Speed: ["999.9"]
+    Maximum Wind Speed: ["999.9"]
+  # file -> [station column, column -> [type, unit]]; units from the Chicago Data
+  # Portal column descriptions
+  files:
+    weather_stations.csv:
+      - Station Name
+      - Air Temperature: [air_temperature, "°C"]
+        Wet Bulb Temperature: [wet_bulb_temperature, "°C"]
+        Humidity: [humidity, "%"]
+        Rain Intensity: [rain_intensity, mm/h]
+        Interval Rain: [interval_rain, mm]
+        Wind Direction: [wind_direction, "°"]
+        Wind Speed: [wind_speed, m/s]
+        Maximum Wind Speed: [max_wind_speed, m/s]
+        Barometric Pressure: [barometric_pressure, hPa]
+  skipped:
+    water_sensors.csv: lake conditions (waves, turbidity, depth), not a flood
+    Solar Radiation: not related to flooding
+    Battery Life: housekeeping
+    Heading: "housekeeping: the wind unit's heading"
+    Precipitation Type: categorical
+    Total Rain: cumulative of Interval Rain since midnight
+    Measurement Timestamp Label: text copy of the timestamp
+    Measurement ID: record id
+grid_frequency:
+  folder: grid_frequency
+  # FrequencyData__<station>__<file>; the Numbers.txt summaries are not data. The
+  # 100 ms zips are grid_frequency_100ms
+  patterns: ["FrequencyData__*__*.csv"]
+  # station keys left out (matched case-insensitively inside the key)
+  skipped_keys:
+    sync01: a 1 s copy of the 100 ms DE_KA, DE_OL, PT_LI, TUR_IS recordings
+    solar_eclipse: no timestamps
+  # quality indicator 1 = invalid, 2 = interpolated (Jumar et al., Table 3)
+  bad_qi: ["1", "2"]
+  kind: frequency_deviation
+  unit: mHz  # f - f_nominal, the paper's Table 2; times are UTC
+  skipped:
+    reference columns: the DE_KA series repeated in other stations' files
+grid_frequency_100ms:
+  # DE_KA01, DE_OL01, PT_LI01 and TUR_IS01 at 10 readings a second, 2019-07/08; the
+  # keys left out take the class defaults, the same as grid_frequency's
+  patterns: ["FrequencyData__*__*_100ms.zip"]
+ett:
+  folder: ett_transformer
+  files:
+    ETTm1.csv: transformer1
+    ETTm2.csv: transformer2
+  # loads (high/middle/low useful and useless): type = lower case
+  columns: [HUFL, HULL, MUFL, MULL, LUFL, LULL]
+  unit: unknown  # the ETT release states no units
+  skipped:
+    OT: oil temperature inside a transformer, not an environment reading
+uci_air_quality:
+  folder: uci_air_quality
+  zip_file: data.zip
+  member: AirQualityUCI.csv
+  time_format: "%d/%m/%Y %H.%M.%S"
+  station: multisensor  # one device in an Italian city
+  missing: ["-200"]
+  # column -> [type, unit], from the UCI page; GT = reference analyser, PT08 = the
+  # device's metal-oxide sensor responses (no unit stated)
+  columns:
+    CO(GT): [co_gt, "mg/m³"]
+    PT08.S1(CO): [pt08_s1_co, unknown]
+    NMHC(GT): [nmhc_gt, "µg/m³"]
+    C6H6(GT): [c6h6_gt, "µg/m³"]
+    PT08.S2(NMHC): [pt08_s2_nmhc, unknown]
+    NOx(GT): [nox_gt, ppb]
+    PT08.S3(NOx): [pt08_s3_nox, unknown]
+    NO2(GT): [no2_gt, "µg/m³"]
+    PT08.S4(NO2): [pt08_s4_no2, unknown]
+    PT08.S5(O3): [pt08_s5_o3, unknown]
+    T: [temperature, "°C"]
+    RH: [humidity, "%"]
+  skipped:
+    AH: absolute humidity, derived from T and RH
+    trailing columns: two empty columns after AH
+uci_load:
+  folder: uci_load_370_meters
+  zip_file: data.zip
+  member: LD2011_2014.txt
+  kind: load
+  unit: kW  # UCI page: "values in kW of each 15 min"
+  skipped:
+    leading zeros: "a meter's zeros before its first reading: not installed yet"
+uci_household:
+  folder: uci_household_power
+  zip_file: data.zip
+  member: household_power_consumption.txt
+  time_format: "%d/%m/%Y %H:%M:%S"
+  station: household  # one house near Paris
+  missing: ["?"]
+  # column -> [type, unit], from the UCI page
+  columns:
+    Global_active_power: [global_active_power, kW]
+    Global_reactive_power: [global_reactive_power, kW]
+    Voltage: [voltage, V]
+    Sub_metering_1: [sub_metering_1, Wh]
+    Sub_metering_2: [sub_metering_2, Wh]
+    Sub_metering_3: [sub_metering_3, Wh]
+  skipped:
+    Global_intensity: current, about active power divided by voltage
+beijing:
+  folder: beijing_air_quality
+  zip_file: data.zip
+  inner_zip: PRSA2017_Data_20130301-20170228.zip  # the 12 station CSVs
+  missing: [NA]
+  # column -> [type, unit], from the UCI page
+  columns:
+    PM2.5: [pm25, "µg/m³"]
+    PM10: [pm10, "µg/m³"]
+    SO2: [so2, "µg/m³"]
+    NO2: [no2, "µg/m³"]
+    CO: [co, "µg/m³"]
+    O3: [o3, "µg/m³"]
+    TEMP: [temperature, "°C"]
+    PRES: [pressure, hPa]
+    DEWP: [dew_point, "°C"]
+    RAIN: [rain, mm]
+    WSPM: [wind_speed, m/s]
+  skipped:
+    "No": row number
+    wd: wind direction as compass text (categorical)
+    year/month/day/hour: the time
+    data.csv, test.csv: stock prices in the same archive, not sensor data
+jena:
+  folder: jena_weather
+  pattern: mpi_roof_*.zip  # one CSV per zip, named like the zip
+  encoding: latin-1  # the header's unit symbols (µ, ²) are latin-1
+  time_format: "%d.%m.%Y %H:%M:%S"
+  station: mpi_roof  # the Max Planck Institute roof station
+  missing: ["-9999", "-9999.00"]
+  # header -> [type, unit]; the units are in the headers
+  columns:
+    p (mbar): [pressure, mbar]
+    T (degC): [temperature, "°C"]
+    rh (%): [humidity, "%"]
+    wv (m/s): [wind_speed, m/s]
+    max. wv (m/s): [max_wind_speed, m/s]
+    wd (deg): [wind_direction, "°"]
+    rain (mm): [rain, mm]
+    raining (s): [raining_time, s]
+  skipped:
+    "SWDR (W/m²), PAR (µmol/m²/s), max. PAR (µmol/m²/s), CO2 (ppm)": "solar radiation, PAR and CO2: not related to flooding"
+    Tpot, Tdew, VPmax, VPact, VPdef, sh, H2OC, rho: derived from p, T and rh
+    Tlog: the logger's own temperature (housekeeping)
+sensor_community:
+  folder: sensor_community
+  pattern: "*.csv"  # <date>_<model>_sensor_<id>.csv, one day each
+  # column -> quantity; type = <model>_<quantity>. P0/P1/P2/P4 follow the network's
+  # convention (PM1, PM10, PM2.5, PM4); no data dictionary states it or the units
+  columns:
+    pressure: pressure
+    temperature: temperature
+    humidity: humidity
+    P0: pm1
+    P1: pm10
+    P2: pm25
+    P4: pm4
+    N05: number_pm05
+    N1: number_pm1
+    N25: number_pm25
+    N4: number_pm4
+    N10: number_pm10
+  unit: unknown
+  skipped:
+    noise_LAeq, noise_LA_min, noise_LA_max: "noise: not related to flooding"
+    counts_per_minute: "radiation counter: not related to flooding"
+    co2_ppm: "CO2: not related to flooding"
+    altitude, pressure_sealevel: empty or derived from pressure
+    durP1, ratioP1, durP2, ratioP2: raw pulse timing of the PM sensor
+    TS: typical particle size, derived
+    noise_LA01, noise_LA95: percentiles of the noise level, derived
+    hv_pulses, tube, counts, sample_time_ms: radiation counter housekeeping
+    location: location id; lat/lon are kept
+melbourne:
+  folder: melbourne
+  microclimate_file: microclimate.csv
+  # column -> type; the City of Melbourne open data API states no units
+  microclimate_columns:
+    minimumwinddirection: wind_direction_min
+    averagewinddirection: wind_direction_avg
+    maximumwinddirection: wind_direction_max
+    minimumwindspeed: wind_speed_min
+    averagewindspeed: wind_speed_avg
+    gustwindspeed: wind_speed_gust
+    airtemperature: air_temperature
+    relativehumidity: humidity
+    atmosphericpressure: pressure
+    pm25: pm25
+    pm10: pm10
+  microclimate_unit: unknown
+  skipped:
+    noise: not related to flooding
+    pedestrian_counts.csv: pedestrian counts are not a Twin sensor type
+emergency_calls:
+  folder: emergency_calls
+  kind: call_count
+  unit: calls/min
+  # NYC EMS (Ida flash flood, 1 Sept 2021; borough as the zone) and New Orleans calls
+  # for service (Hurricane Ida, 29 Aug 2021; police district as the zone; CC BY, no
+  # commercial use). Both files are API extracts of the weeks around the flood
+  sources:
+    - file: nyc_ems.csv
+      source: nyc_ems
+      time_column: incident_datetime
+      zone_column: borough
+      # the real flood, read as UTC like every source time: start included, end not
+      event_start: "2021-09-01T00:00:00"
+      event_end: "2021-09-02T00:00:00"
+    - file: nola_calls.csv
+      source: nola_calls
+      time_column: timecreate
+      zone_column: policedistrict
+      event_start: "2021-08-29T00:00:00"
+      event_end: "2021-08-30T00:00:00"
+      exclude:  # column -> value of the rows left out
+        selfinitiated: "Y"
+  skipped:
+    incident_dispatch_area: "NYC: a finer zone than the borough, not used"
+    location, mapx, mapy: "NOLA: the call's point; the district is the zone"
+    selfinitiated: "NOLA: Y marks an officer's own stop, not a public call"
+injection:
+  # time slots per window (a sensor can have fewer readings in a window)
+  window_slots: 20
+  # window length in seconds; set, it replaces window_slots (max(1, round(
+  # window_seconds / period)) slots) and readings keep their real spacing; unset
+  # keeps window_slots one-second slots (#95)
+  window_seconds: null
+  # share of the eligible (window, station) pairs, earliest first, that train (one
+  # time cut for the whole source, not per sensor)
+  train_share: 0.7
+  inject_share: 0.1  # share of windows that get a fault
+  # the fault kinds drawn from, in this order (the order fixes the random draws)
+  fault_kinds: [stuck, spike, drift, noise, oscillation, spoof]
+  # fabricated signals that replace a whole window; they are not sensor data
+  fabricated_kinds: [sine, ramp, pattern, uniform]
+  # kind -> label; spoof is absent on purpose (the static check owns spoofed_data)
+  labels:
+    stuck: sensor_malfunction
+    spike: sensor_malfunction
+    drift: sensor_malfunction
+    noise: sensor_malfunction
+    oscillation: sensor_malfunction
+    sine: not_sensor_data
+    ramp: not_sensor_data
+    pattern: not_sensor_data
+    uniform: not_sensor_data
+  faults:
+    spike_count_max: 3  # most spikes in one window
+    # (low, high) ranges drawn per fault; "spreads" are multiples of the type's normal
+    # within-window spread (median std of clean training sensor-windows of that type)
+    spike_spreads: [5.0, 10.0]  # size of a spike
+    drift_spreads: [3.0, 6.0]  # size of a drift
+    noise_spreads: [1.0, 3.0]  # size of the added noise
+    oscillation_spreads: [2.0, 4.0]  # size of an oscillation
+    period_readings: [4.0, 8.0]  # oscillation and sine period
+    spoof_spreads: [3.0, 6.0]  # size of the spoof offset
+    sine_spreads: [2.0, 4.0]  # size of a sine
+    ramp_spreads: [3.0, 6.0]  # size of a ramp
+    pattern_values: [2, 4]  # motif length, both ends included
+    pattern_spreads: 3.0  # motif values lie within this many spreads
+  # source name -> measured seconds between one sensor's readings (median gap over the
+  # first 500,000 readings, whole seconds; Intel Lab keeps the notebook's 31.0)
+  sample_seconds:
+    array_of_things: 24.0  # ~3,103,232,571 readings (estimate)
+    beijing: 3600.0  # 4,556,243 readings
+    bellinge: 60.0  # 43,684,104 readings
+    chicago_beach: 3600.0  # 1,724,650 readings
+    emergency_calls: 60.0  # 563,882 readings
+    ett: 900.0  # 836,160 readings
+    # 216,976,068 readings, the 100 ms recordings included
+    grid_frequency: 1.0
+    grid_frequency_100ms: 0.1  # 126,210,910 lines (raw count)
+    intel_lab: 31.0  # 6,630,162 readings
+    jena: 600.0  # 842,088 readings
+    melbourne: 901.0  # 10,317,038 readings
+    nab: 300.0  # 15,664 readings
+    noaa_tides: 360.0  # 74,400 readings
+    sensor_community: 146.0  # 840,504 readings
+    traffic_speeds: 615.0  # 1,620,335 readings
+    uci_air_quality: 3600.0  # 95,949 readings
+    uci_household: 60.0  # 12,295,680 readings
+    uci_load: 900.0  # 41,936,458 readings
+    uk_flood: 900.0  # 1,394,777 readings
+    uk_traffic: 900.0  # 59,698 readings
+    usgs: 300.0  # 25,746 readings
+  # a memory cap (about 3-6 GB at the cap); only sources above it are sampled in hour
+  # blocks
+  max_readings: 50000000  # most readings kept from one source
+  block_hours: 2  # hours kept in each sampling block
+  # source name -> keep one block in this many hours; only sources over max_readings.
+  # For such a source, the smallest every_hours >= 1.2 * total * block_hours /
+  # 10,000,000 that shares no factor with 24, so block starts move through every hour
+  # of the day and every weekday.
+  sample_every_hours:
+    array_of_things: 745  # about 8.3M readings kept
+    # from a total that counted the 100 ms recordings: about 3.6M readings kept
+    grid_frequency: 53
+    grid_frequency_100ms: 31  # about 8.1M readings kept
+  # a sensor reporting faster than this fraction of its source's sample period
+  # is dropped
+  fast_sensor_share: 0.5
+
+# what the long-window model (#96) changes in injection; the rest is shared
+long_injection:
+  # the grid's bucket means smooth spike, noise and oscillation away; drift and stuck
+  # build up over hours
+  fault_kinds: [stuck, drift]
+  fabricated_kinds: [sine, ramp, pattern, uniform]
+  # a block must hold a whole 6 h or 24 h window
+  block_hours: 24
+  # merged into injection's: 1,801 shares no factor with 24 and is no multiple of
+  # 168, so the blocks fall on every hour and weekday (about 10 days of the source)
+  sample_every_hours:
+    array_of_things: 1801

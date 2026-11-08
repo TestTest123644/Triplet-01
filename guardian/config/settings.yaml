@@ -1,0 +1,176 @@
+# Read by guardian_layer.utils.config.Settings; GUARDIAN_CONFIG names another file.
+# The defaults in that module equal these values.
+
+preprocess:
+  # "none": on the Intel Lab data with subtle injected faults
+  # (research/decoupling/results.md) no decoupling method beats it beyond the noise for
+  # XGBoost (unseen-type PR-AUC 0.274 for none, 0.281-0.287 for the others). The wavelets
+  # lift Isolation Forest a little (0.154 db4, 0.145 haar vs 0.123 for none), but it stays
+  # close to chance. The ranking rule names fft, a tie with haar and db4 inside the noise
+  default_method: none
+
+  # noise cleaning of each sensor's series before the short-window features (#66):
+  # none or kalman (pipelines/denoise.py); the setup research section 11 picked (best
+  # mean PR-AUC on unseen sources)
+  clean_method: kalman
+  kalman:
+    # filter: forward only; smoother: also uses the readings after each point
+    mode: smoother
+    # fixed: measurement noise from the window, process noise = process_ratio x it;
+    # estimated: both noises from the window's one- and two-step changes
+    noise: fixed
+    process_ratio: 0.1
+    process_scale: 1.0  # process noise multiplied by this: smaller smooths more
+    # least process noise as a share of the measurement noise (estimated noise)
+    process_floor: 0.001
+    # a reading this many prediction sds away is taken as it is; null: all smoothed
+    jump_sigmas: 4.0
+    # a run of equal readings (a stuck value) comes out as it is, never smoothed
+    keep_repeats: true
+
+  # decoupling
+  min_samples: 4  # fewer readings than this give all-zero decoupling features
+  haar_levels: 3  # also used for db4
+  method_keys:
+    none: []
+    fft: [fft_low, fft_mid, fft_high, fft_peak]
+    haar: [haar_d1_energy, haar_d2_energy, haar_d3_energy, haar_d1_max_abs]
+    db4: [db4_d1_energy, db4_d2_energy, db4_d3_energy, db4_d1_max_abs]
+    ssa: [ssa_trend, ssa_oscillation, ssa_noise, ssa_first_ratio]
+
+  # deduplication
+  counter_keys: [duplicate_count, out_of_order_count, replay_count, packet_gap_max]
+  # packet_order this far behind the highest seen is reordering; further is a replay
+  out_of_order_tolerance: 2
+  # packet_order this far from the sensor's median in the window is corrupt, not a
+  # reference; 1 packet/s gives ~20 per 20 s window, so 1000 is generous
+  max_jump: 1000
+
+  # value features
+  value_keys:
+    - sample_count
+    - has_range
+    - mean
+    - variance
+    - rolling_variance_max
+    - rate_of_change_mean_abs
+    - rate_of_change_max_abs
+    - flatline_ratio
+  rolling_samples: 5  # sub-window length for rolling variance
+  # the window length: a replay without packet_order (or a bad clock) can carry a
+  # timestamp years old, and a 1 s grid back to it would need gigabytes
+  max_span_seconds: 20
+
+  # spatial deltas
+  spatial_keys: [spatial_delta_mean, spatial_delta_last, neighbor_count]
+  neighbors: 5  # k nearest, from the report's k-NN (k = 5)
+  earth_radius_km: 6371.0
+  # rows of the distance matrix per numpy call; 256 x 10,000 floats is ~20 MB per
+  # array, ~100 MB peak with the temporaries of one block
+  spatial_chunk_rows: 256
+
+  # short-window features, the short-window model's columns with the counters: value
+  # features of the robust z values, shape, and decoupling at the sensor's own rate
+  # (the generalization winner, research/short_window/results.md 4.2)
+  robust_keys:
+    - rz_variance
+    - rz_rolling_variance_max
+    - rz_rate_of_change_mean_abs
+    - rz_rate_of_change_max_abs
+    - rz_flatline_ratio
+  shape_keys:
+    - max_abs_step
+    - max_abs_level
+    - sign_flip_share
+    - diff_autocorr
+    - spectral_peak_share
+    - diff_kurtosis
+    - rolling_variance_ratio
+  native_method: haar
+  native_keys: [n_haar_d1_energy, n_haar_d2_energy, n_haar_d3_energy, n_haar_d1_max_abs]
+  ratio_cap: 1.0e6  # rolling_variance_ratio when the median variance is 0
+  # most native-grid points per reading: timestamps a burst sends microseconds apart
+  # must not give a grid of millions of points (a regular series needs about 1)
+  native_grid_per_reading: 4
+
+  # the long-window model's columns (#96): the robust z value features, shape and
+  # decoupling on the time grid, the 3 long-only features and the filled grid points
+  long_keys:
+    - lw_rz_variance
+    - lw_rz_rolling_variance_max
+    - lw_rz_rate_of_change_mean_abs
+    - lw_rz_rate_of_change_max_abs
+    - lw_rz_flatline_ratio
+    - lw_max_abs_step
+    - lw_max_abs_level
+    - lw_sign_flip_share
+    - lw_diff_autocorr
+    - lw_spectral_peak_share
+    - lw_diff_kurtosis
+    - lw_rolling_variance_ratio
+    - lw_haar_d1_energy
+    - lw_haar_d2_energy
+    - lw_haar_d3_energy
+    - lw_haar_d1_max_abs
+    - lw_trend_scatter_ratio
+    - lw_flat_run_share
+    - lw_neighbour_slope_delta
+    - lw_neighbor_count
+    - lw_grid_points
+
+static_check:
+  # silence before the window end that counts as down (half the 20 s window)
+  down_after_seconds: 60.0
+  # distance from the neighbours' mean in range-scaled units (0.2 = 20 % of the range)
+  spoof_delta: 0.2
+  min_neighbors: 3  # fewer neighbours than this skip the spoof check
+  # readings dated later than the window end plus this are ignored: one wrong or
+  # spoofed clock must not make a silent sensor look alive (small skew is normal)
+  future_tolerance_seconds: 2.0
+
+inference:
+  model_file: model.json  # XGBoost's own format: no pickle, safe to load
+  meta_file: meta.json
+  default_threshold: 0.5  # same as the research (research/general_model/results.md)
+  # readings per second from which a sensor goes to the short-window model: it trained
+  # at 1/s and 10/s, and 0.5 keeps a 1/s sensor that lost half its packets on it
+  short_window_min_rate: 0.5
+  # anomaly classes the model names, in order; class index 0 is always "normal"
+  classes: [sensor_malfunction, not_sensor_data]
+
+elasticsearch:
+  url: ""
+  username: elastic
+  request_timeout_seconds: 5.0
+  retry_attempts: 3
+  retry_backoff_seconds: 0.5
+  batch_size: 50
+  batch_window_seconds: 0.05
+  queue_size: 1000
+  shutdown_timeout_seconds: 5.0
+  error_log_interval_seconds: 30.0
+
+long_window:
+  # readings are averaged into buckets this long (never finer than the sensor's own
+  # period), so a series has the same shape at any sampling rate
+  grid_seconds: 300.0
+  # the window length: 24 h kept within the false-alarm budget, 6 h did not
+  # (research/long_window/results.md); add a length here to measure it again
+  window_seconds: [86400.0]
+  # filled buckets a sensor needs for a verdict; interpolated gaps do not count
+  min_grid_points: 6
+  # the cleaning of each sensor's grid before the features: none | kalman; the long
+  # model's own setup, as a 5-minute mean holds far less noise than one reading; the
+  # one research section 12 picked (best mean PR-AUC on unseen sources)
+  clean_method: kalman
+  kalman:
+    mode: smoother  # filter: forward only; smoother: also the readings after each point
+    noise: fixed  # fixed: process noise = process_ratio x measurement; estimated
+    process_ratio: 0.9
+    process_scale: 1.0  # process noise multiplied by this: smaller smooths more
+    process_floor: 0.001  # least process noise / measurement noise (estimated)
+    jump_sigmas: 4.0  # prediction sds past which a reading passes; null: none
+    keep_repeats: true  # a run of equal readings (a stuck value) is never smoothed
+mcp:
+  url: "http://localhost:8000/sse"
+  timeout: 3.0

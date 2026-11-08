@@ -1,0 +1,135 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage[margin=2cm,top=2.2cm,bottom=2.2cm]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{enumitem}
+\usepackage{fancyhdr}
+\usepackage{titlesec}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{microtype}
+\usepackage[colorlinks=true,linkcolor=blue!70!black,citecolor=blue!70!black,urlcolor=blue!70!black]{hyperref}
+
+% Header and Footer styling
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\small\textsf{\textbf{Vault Policy \& Key Rotation Spec} \textbar\ Guardian Layer}}
+\fancyhead[R]{\small\textsf{Page \thepage}}
+\fancyfoot[L]{\small\textsf{Security Specification \textbar\ Issue \#111}}
+\fancyfoot[R]{\small\textsf{24-Hour Automated Key Lifecycle}}
+\renewcommand{\headrulewidth}{0.5pt}
+\renewcommand{\footrulewidth}{0.5pt}
+
+% Section formatting
+\titleformat{\section}
+  {\normalfont\sffamily\Large\bfseries\color{blue!80!black}}
+  {\thesection}{0.8em}{}
+\titleformat{\subsection}
+  {\normalfont\sffamily\large\bfseries\color{blue!70!black}}
+  {\thesubsection}{0.6em}{}
+
+\titlespacing*{\section}{0pt}{10pt}{5pt}
+\titlespacing*{\subsection}{0pt}{8pt}{4pt}
+\setlength{\parskip}{3pt}
+\setlength{\parindent}{0pt}
+
+% Code listing styling
+\definecolor{codegray}{rgb}{0.96,0.96,0.96}
+\definecolor{codeframe}{rgb}{0.85,0.85,0.85}
+\lstset{
+  backgroundcolor=\color{codegray},
+  basicstyle=\ttfamily\footnotesize,
+  breaklines=true,
+  frame=single,
+  rulecolor=\color{codeframe},
+  keepspaces=true
+}
+
+\title{\sffamily\bfseries\huge Vault Access Policy \& Key Rotation Specification\\[0.3em]
+\Large Cryptographic Isolation, Automated 24-Hour Rollover, and Failure Recovery}
+\author{\textsf{The Guardian Layer Engineering Team}}
+\date{\textsf{Version 1.0 \textbar\ November 2026}}
+
+\begin{document}
+
+\maketitle
+\thispagestyle{fancy}
+
+\begin{abstract}
+\noindent This document defines the access control policies, path-scoped secret isolation, and automated 24-hour asymmetric key rotation protocol governing inter-service communication between the Guardian, Digital Twin, and City Brain layers.
+\end{abstract}
+
+\vspace{0.3cm}
+
+\section{Scope and Requirements}
+The specification enforces mutual cryptographic isolation and automated daily rollover of RSA-4096 communication keys between the \texttt{guardian}, \texttt{twin}, and \texttt{brain} services. All communications require asymmetric signing and encryption, preventing unauthorized lateral movement.
+
+\section{Identities and AppRole Policies}
+Four distinct AppRole identities govern the cryptographic perimeter:
+\begin{itemize}[leftmargin=*,itemsep=2pt]
+  \item \textbf{guardian-app, twin-app, brain-app:} Scoped microservice identities possessing read-only access restricted strictly to their own cryptographic paths.
+  \item \textbf{rotator:} Dedicated administrative AppRole used by the daily rotation daemon. Possesses create/update rights on \texttt{secret/data/comm/*} and metadata read rights, but cannot read plaintext key values.
+\end{itemize}
+Services authenticate using AppRole credentials to acquire short-lived leased tokens ($\text{TTL} = 15$\,min, $\text{max\_TTL} = 1$\,h). Policies reside in \texttt{vault/policies/} and are applied idempotently via \texttt{vault/setup\_policies.py}.
+
+\section{Key Ownership and Mutual Isolation}
+Each unidirectional channel between layers utilizes an independent RSA-4096 key pair owned by the sender:
+\begin{itemize}[leftmargin=*,itemsep=2pt]
+  \item \texttt{secret/comm/OWNER/PEER/private} is readable by \textbf{OWNER only}.
+  \item \texttt{secret/comm/OWNER/PEER/public} is readable by \textbf{PEER only}.
+\end{itemize}
+
+\begin{table}[htbp]
+\centering
+\small
+\caption{Service Key Access Matrix}
+\begin{tabularx}{\textwidth}{lXX}
+\toprule
+\textbf{Service} & \textbf{Readable Private Keys (Signing)} & \textbf{Readable Public Keys (Verification)} \\
+\midrule
+\textbf{Guardian} & \texttt{guardian/twin}, \texttt{guardian/brain} & \texttt{twin/guardian}, \texttt{brain/guardian} \\
+\textbf{Twin}     & \texttt{twin/guardian}, \texttt{twin/brain}     & \texttt{guardian/twin}, \texttt{brain/twin}     \\
+\textbf{Brain}    & \texttt{brain/guardian}, \texttt{brain/twin}    & \texttt{guardian/brain}, \texttt{twin/brain}    \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\noindent A default-deny policy applies to all other paths. Public keys are integrity-protected by Vault (TLS in transit, KV versioning, audit trail) and are never accepted from untrusted channels.
+
+\section{Automated 24-Hour Key Rotation Protocol}
+The key rotation daemon (\texttt{vault/rotate\_keys.py}) executes daily at 02:00 via a systemd timer. For each of the six communication channels, the workflow executes:
+\begin{enumerate}[leftmargin=*,itemsep=2pt]
+  \item Generates a fresh 4096-bit RSA key pair.
+  \item Writes the new public key (creating a new KV version with a unique Key ID \texttt{kid}).
+  \item Writes the new private key stamped with \texttt{active\_after = now + 1h}.
+\end{enumerate}
+
+\subsection{Safe Transition Window (Zero Downtime)}
+\begin{itemize}[leftmargin=*,itemsep=2pt]
+  \item \textbf{Dual Verification Window:} Peer receivers query \texttt{vault\_keys.verification\_keys}, accepting both Version $N$ (current) and Version $N-1$ (previous).
+  \item \textbf{Delayed Signing Activation:} The sender continues signing with Version $N-1$ until the 1-hour delay expires (\texttt{vault\_keys.signing\_key}), ensuring all peers have cached Version $N$ before first use.
+  \item \textbf{Version Retention:} KV v2 retains 5 historical versions before automated pruning.
+\end{itemize}
+
+\section{Revocation and Incident Response}
+\begin{itemize}[leftmargin=*,itemsep=2pt]
+  \item \textbf{Compromised Token:} Revoke immediately via \texttt{vault token revoke <token>}.
+  \item \textbf{Compromised Secret ID:} Destroy via \texttt{vault write auth/approle/role/ROLE/secret-id/destroy secret\_id=ID} and re-issue.
+  \item \textbf{Service Compromise:} Revoke all service tokens, trigger emergency execution of \texttt{rotate\_keys.py}, and purge compromised key versions via \texttt{vault kv destroy -versions=N}.
+\end{itemize}
+
+\section{Integration Testing}
+The security suite in \texttt{tests/vault\_keys/} validates rotation, AppRole isolation, and rollback mechanisms against a disposable local Vault instance:
+\begin{lstlisting}
+docker run --rm -d --name vault-test -p 127.0.0.1:8300:8200 \
+  -e VAULT_DEV_ROOT_TOKEN_ID=dev-root hashicorp/vault:1.17
+export VAULT_TEST_ADDR=http://127.0.0.1:8300 VAULT_TEST_TOKEN=dev-root
+uv run pytest tests/vault_keys -v
+\end{lstlisting}
+
+\end{document}
+

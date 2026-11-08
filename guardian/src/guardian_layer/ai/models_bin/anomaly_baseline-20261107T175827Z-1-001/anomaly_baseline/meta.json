@@ -1,0 +1,27 @@
+{
+  "method": "none",
+  "threshold": 0.5,
+  "keys": [
+    "sample_count",
+    "has_range",
+    "mean",
+    "variance",
+    "rolling_variance_max",
+    "rate_of_change_mean_abs",
+    "rate_of_change_max_abs",
+    "flatline_ratio",
+    "duplicate_count",
+    "out_of_order_count",
+    "replay_count",
+    "packet_gap_max",
+    "spatial_delta_mean",
+    "spatial_delta_last",
+    "neighbor_count"
+  ],
+  "classes": [
+    "sensor_malfunction",
+    "not_sensor_data"
+  ],
+  "rate_thresholds": {},
+  "window_seconds": null
+}
