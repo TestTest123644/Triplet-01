@@ -14,6 +14,7 @@ from scenarios._twin_common import (
     ScenarioContext,
     WireConsumer,
     get_scenario_kafka_consumer_config,
+    resolve_tokens,
 )
 import scenarios.run_all as run_all
 
@@ -38,6 +39,12 @@ def clean_kafka_env(monkeypatch):
         "KAFKA_PASSWORD_FILE",
         "KAFKA_SSL_CA_LOCATION",
         "KAFKA_BROKER_ADDRESS_FAMILY",
+        "MCP_AUTH_TOKENS",
+        "MCP_AUTH_TOKENS_FILE",
+        "MCP_AUTH_TOKEN",
+        "MCP_BRAIN_TOKEN",
+        "MCP_GUARDIAN_TOKEN",
+        "MCP_SCENARIO_TOKEN",
     ]
     for v in kafka_vars:
         monkeypatch.delenv(v, raising=False)
@@ -288,4 +295,67 @@ def test_run_all_stops_on_exit_2(tmp_path, monkeypatch, capsys):
     assert scenarios_executed == ["mod1"]
     captured = capsys.readouterr()
     assert "Scenario preflight failed (exit code 2). Stopping scenario suite." in captured.err
+
+
+def test_resolve_tokens_file_fallback_when_env_unset(tmp_path, monkeypatch):
+    """When MCP_AUTH_TOKENS is unset, resolve_tokens reads MCP_AUTH_TOKENS_FILE."""
+    token_file = tmp_path / "mcp_tokens.txt"
+    token_file.write_text("brain:tok-b-file\nguardian:tok-g-file,scenario:tok-s-file\n", encoding="utf-8")
+
+    monkeypatch.delenv("MCP_AUTH_TOKENS", raising=False)
+    monkeypatch.setenv("MCP_AUTH_TOKENS_FILE", str(token_file))
+
+    b, g, s = resolve_tokens()
+    assert b == "tok-b-file"
+    assert g == "tok-g-file"
+    assert s == "tok-s-file"
+
+
+def test_resolve_tokens_env_wins_over_file(tmp_path, monkeypatch):
+    """MCP_AUTH_TOKENS in environment takes precedence over MCP_AUTH_TOKENS_FILE."""
+    token_file = tmp_path / "mcp_tokens.txt"
+    token_file.write_text("brain:file-b,guardian:file-g,scenario:file-s\n", encoding="utf-8")
+
+    monkeypatch.setenv("MCP_AUTH_TOKENS", "brain:env-b,guardian:env-g,scenario:env-s")
+    monkeypatch.setenv("MCP_AUTH_TOKENS_FILE", str(token_file))
+
+    b, g, s = resolve_tokens()
+    assert b == "env-b"
+    assert g == "env-g"
+    assert s == "env-s"
+
+
+def test_resolve_tokens_missing_file_error_names_variable_and_path(capsys, monkeypatch):
+    """Missing token file prints an error naming MCP_AUTH_TOKENS_FILE and the file path."""
+    missing_path = "/tmp/does_not_exist_mcp_tokens_12345.txt"
+    monkeypatch.delenv("MCP_AUTH_TOKENS", raising=False)
+    monkeypatch.setenv("MCP_AUTH_TOKENS_FILE", missing_path)
+
+    b, g, s = resolve_tokens()
+    assert b is None
+    assert g is None
+    assert s is None
+
+    captured = capsys.readouterr()
+    assert "MCP_AUTH_TOKENS_FILE" in captured.err
+    assert missing_path in captured.err
+
+
+def test_resolve_tokens_token_values_never_in_errors_or_logs(tmp_path, capsys, monkeypatch):
+    """Secret token values are never printed or logged during unreadable file error."""
+    secret_val = "SECRET_SUPER_BEARER_TOKEN_99"
+    unreadable_file = tmp_path / "unreadable_tokens.txt"
+    unreadable_file.write_text(f"brain:{secret_val}\n", encoding="utf-8")
+    os.chmod(str(unreadable_file), 0o000)
+
+    try:
+        monkeypatch.delenv("MCP_AUTH_TOKENS", raising=False)
+        monkeypatch.setenv("MCP_AUTH_TOKENS_FILE", str(unreadable_file))
+
+        resolve_tokens()
+        captured = capsys.readouterr()
+        assert secret_val not in captured.err
+        assert secret_val not in captured.out
+    finally:
+        os.chmod(str(unreadable_file), 0o644)
 

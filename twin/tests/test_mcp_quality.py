@@ -505,6 +505,18 @@ class TestEndToEndAuthAndTransports:
             "tok-s": "scenario",
         }
 
+    def test_parse_auth_tokens_newline_separated(self, monkeypatch):
+        """Verify parse_auth_tokens handles newline and mixed delimiters."""
+        from twin.mcp_server import parse_auth_tokens
+
+        monkeypatch.setenv("MCP_AUTH_TOKENS", "brain:tok-b\nguardian:tok-g\nscenario:tok-s\n")
+        parsed = parse_auth_tokens()
+        assert parsed == {
+            "tok-b": "brain",
+            "tok-g": "guardian",
+            "tok-s": "scenario",
+        }
+
     @pytest.mark.asyncio
     async def test_live_auth_sse_and_mcp(self, tmp_path, monkeypatch):
         port = find_free_port()

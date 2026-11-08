@@ -12,8 +12,9 @@ If a container named "kafka" already exists, remove or rename it first (`docker 
 
 ```bash
 # 1. Start the Twin layer, Kafka broker, and console (SIM_SPEED=20 for scenario pace)
-# For demo runs with MCP auth enabled (routes test commands to Test harness lane):
-# MCP_AUTH_TOKENS="brain:tok-b,guardian:tok-g,scenario:tok-s" SIM_SPEED=20 docker compose up -d --build
+# Recommended for demos (distinguishes Brain and Guardian calls on the timeline):
+# export MCP_AUTH_TOKENS_FILE=secrets/mcp_auth_tokens
+# SIM_SPEED=20 docker compose up -d --build
 # To align with partner networks, set TRIPLET_NETWORK (e.g. twin_network for Brain, shared-backend for Guardian):
 # TRIPLET_NETWORK=twin_network SIM_SPEED=20 docker compose up -d --build
 SIM_SPEED=20 docker compose up -d --build
@@ -100,6 +101,23 @@ python3 scenarios/run_all.py --partners
 ```
 
 The Twin's user `twin` is write-only on that cluster, so the cluster owner must grant a reader (topic Read + Describe, group prefix Read).
+
+#### (d) Partner verdicts on the timeline
+
+```bash
+# Export from repository root before `cd twin` so absolute paths resolve:
+export VERDICT_TOPIC=<guardian verdict topic>
+export VERDICT_KAFKA_BOOTSTRAP_SERVERS=localhost:29094,localhost:29095,localhost:29096
+export VERDICT_KAFKA_SECURITY_PROTOCOL=SASL_PLAINTEXT
+export VERDICT_KAFKA_USERNAME=<user with Read on that topic and group>
+export VERDICT_KAFKA_PASSWORD_FILE=$PWD/secrets/<file>
+export TIMELINE_LOG_DIR=$PWD/logs/partners
+export GROUND_TRUTH_DB_PATH=$PWD/ground_truth.db   # (or the path the Twin was started with)
+cd twin && python3 -m console.verdict_collector
+```
+
+The collector must point at the same ledger the Twin writes (`GROUND_TRUTH_DB_PATH`).
+The operations console dashboard must be started with the same `TIMELINE_LOG_DIR` to display the correlated partner verdicts alongside Twin telemetry and MCP actuations. For Docker Compose, set `TIMELINE_LOG_DIR=/app/timeline_logs` before `docker compose --profile verdicts up -d` so the dashboard and the collector share it.
 
 If the Brain runs on the same host, set `TWIN_RED_TEAM_HOST_PORT` (default 8100) and `TWIN_MCP_HOST_PORT` (default 8000) to prevent port collisions.
 
