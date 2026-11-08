@@ -26,8 +26,9 @@ services:
       KAFKA_USERNAME: ${KAFKA_USERNAME:-brain}
       KAFKA_PASSWORD: ${KAFKA_PASSWORD:-}
       KAFKA_PASSWORD_FILE: ${KAFKA_PASSWORD_FILE:-}
-      MCP_AUTH_TOKEN: ${MCP_AUTH_TOKEN:-91e44d55cc4fc01383c101bc4dd5312d14cc8b9790c7c16f}
+      MCP_AUTH_TOKEN: ${MCP_AUTH_TOKEN:-}
       MCP_AUTH_TOKENS: ${MCP_AUTH_TOKENS:-}
+      MCP_AUTH_TOKENS_FILE: ${MCP_AUTH_TOKENS_FILE:-}
     command: ["python", "-m", "city_brain", "--config", "config/triplet.yaml",
               "--journal", "/app/logs/brain.db"]
     ports:

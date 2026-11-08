@@ -17,7 +17,6 @@ twin:
   profile: twin-triplet07
   mcp_url: http://twin_layer:8000/sse
   call_timeout_s: 2
-  auth_token: 91e44d55cc4fc01383c101bc4dd5312d14cc8b9790c7c16f
 guardian:
   profile: guardian-triplet07
   optional: true
