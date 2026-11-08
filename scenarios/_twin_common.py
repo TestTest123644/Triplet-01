@@ -495,15 +495,34 @@ def resolve_tokens(
     env_tokens: Dict[str, str] = {}
     raw = os.getenv("MCP_AUTH_TOKENS", "").strip()
     if raw:
-        for part in raw.split(","):
+        for part in raw.replace("\r", "\n").replace("\n", ",").split(","):
             part = part.strip()
             if ":" in part:
                 principal, token = part.split(":", 1)
                 env_tokens[principal.strip().lower()] = token.strip()
+    else:
+        file_path = os.getenv("MCP_AUTH_TOKENS_FILE", "").strip()
+        if file_path:
+            if not os.path.exists(file_path):
+                print(f"Token file specified by MCP_AUTH_TOKENS_FILE does not exist: '{file_path}'", file=sys.stderr)
+            elif not os.path.isfile(file_path):
+                print(f"Token path specified by MCP_AUTH_TOKENS_FILE is not a regular file: '{file_path}'", file=sys.stderr)
+            else:
+                try:
+                    with open(file_path, "r", encoding="utf-8") as f:
+                        file_raw = f.read()
+                    for part in file_raw.replace("\r", "\n").replace("\n", ",").split(","):
+                        part = part.strip()
+                        if ":" in part:
+                            principal, token = part.split(":", 1)
+                            env_tokens[principal.strip().lower()] = token.strip()
+                except Exception as e:
+                    print(f"Could not read token file MCP_AUTH_TOKENS_FILE at '{file_path}': {type(e).__name__}", file=sys.stderr)
 
-    b_tok = brain_token or os.getenv("MCP_BRAIN_TOKEN") or env_tokens.get("brain") or mcp_token
-    g_tok = guardian_token or os.getenv("MCP_GUARDIAN_TOKEN") or env_tokens.get("guardian") or mcp_token
-    s_tok = scenario_token or os.getenv("MCP_SCENARIO_TOKEN") or env_tokens.get("scenario") or mcp_token
+    default_tok = mcp_token or os.getenv("MCP_AUTH_TOKEN")
+    b_tok = brain_token or os.getenv("MCP_BRAIN_TOKEN") or env_tokens.get("brain") or default_tok
+    g_tok = guardian_token or os.getenv("MCP_GUARDIAN_TOKEN") or env_tokens.get("guardian") or default_tok
+    s_tok = scenario_token or os.getenv("MCP_SCENARIO_TOKEN") or env_tokens.get("scenario") or default_tok
     return b_tok, g_tok, s_tok
 
 

@@ -311,3 +311,32 @@ def test_ledger_stat_unchanged_read_only(temp_ledger, tmp_path):
     after_stat = os.stat(temp_ledger)
     assert after_stat.st_size == before_size
     assert after_stat.st_mtime_ns == before_mtime
+
+
+def test_db_error_counted_as_unresolved_and_db_errors(tmp_path, capsys):
+    """sqlite3.Error during sim_ts lookup increments unresolved and db_errors counters without raising."""
+    class FakeCursor:
+        def execute(self, *args, **kwargs):
+            raise sqlite3.OperationalError("disk I/O error or table locked")
+
+    class FakeConn:
+        def cursor(self):
+            return FakeCursor()
+
+    config = {
+        "topic": "verdicts.topic",
+        "layer": "guardian",
+        "log_dir": str(tmp_path),
+        "db_path": "/path/does/not/matter",
+    }
+    collector = VerdictCollector(config, db_conn=FakeConn())
+    payload = json.dumps({"device_id": "z1-tc1", "reading_id": "r-100"}).encode("utf-8")
+
+    success = collector.process_message_bytes(payload)
+    assert success is False
+    assert collector.unresolved == 1
+    assert collector.db_errors == 1
+    assert collector.written == 0
+
+    captured = capsys.readouterr()
+    assert "Database error resolving sim_ts: OperationalError" in captured.err

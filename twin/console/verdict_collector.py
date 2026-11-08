@@ -271,7 +271,9 @@ class VerdictCollector:
         self.written = 0
         self.skipped_invalid = 0
         self.unresolved = 0
+        self.db_errors = 0
         self.by_source: Dict[str, int] = {"reading_id": 0, "device_latest": 0}
+        self._last_db_warning_time = 0.0
 
         self.running = False
         self._out_file = None
@@ -334,7 +336,21 @@ class VerdictCollector:
             self.skipped_invalid += 1
             return False
 
-        sim_ts, source = self.resolve_sim_ts(norm["reading_id"], norm["device_id"])
+        try:
+            sim_ts, source = self.resolve_sim_ts(norm["reading_id"], norm["device_id"])
+        except (sqlite3.Error, FileNotFoundError) as e:
+            self.unresolved += 1
+            self.db_errors += 1
+            now = time.monotonic()
+            if now - self._last_db_warning_time >= 10.0:
+                self._last_db_warning_time = now
+                print(
+                    f"[VERDICT COLLECTOR] Database error resolving sim_ts: {type(e).__name__}: {e}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+            return False
+
         if not sim_ts or not source:
             self.unresolved += 1
             return False
@@ -369,6 +385,7 @@ class VerdictCollector:
         print(
             f"[VERDICT COLLECTOR] Stats: consumed={self.consumed}, written={self.written}, "
             f"skipped_invalid={self.skipped_invalid}, unresolved={self.unresolved}, "
+            f"db_errors={self.db_errors}, "
             f"by_source={by_src_str}",
             flush=True,
         )

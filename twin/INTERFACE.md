@@ -18,9 +18,12 @@ Exposes 16 MCP tools over SSE (`http://localhost:8000/sse`) and Streamable HTTP 
 - Actuation: `dispatch`, `set_signal_plan`, `set_valve`, `switch_grid`, `get_command_result`
 - Containment: `isolate_device`, `quarantine_device`, `reinstate_device`, `release_device`, `rollback_reading`
 
-Example call and reply (`set_valve`):
+Example call (`set_valve`):
 ```json
-// Call: {"device_id": "z1-wl1", "target_state": "open"}
+{"device_id": "z1-wl1", "target_state": "open"}
+```
+Reply:
+```json
 {"status": "ok", "device_id": "z1-wl1", "valve_position": "open"}
 ```
 

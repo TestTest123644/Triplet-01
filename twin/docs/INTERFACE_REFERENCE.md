@@ -11,6 +11,8 @@ This document provides the full reference specification for all 16 Model Context
   - SSE (Server-Sent Events) over HTTP: `http://localhost:8000/sse` (messages posted to `/messages/`)
   - Streamable HTTP: `http://localhost:8000/mcp`
 - Docker internal address: `http://twin_layer:8000/sse`
+- Authentication: When `MCP_AUTH_TOKENS` or `MCP_AUTH_TOKENS_FILE` is configured, calls require `Authorization: Bearer <token>`. Unauthorized MCP calls return HTTP 401 UNAUTHORIZED. When unset, access is open ("anonymous").
+- Kafka topics: The Twin never creates topics (`KAFKA_TOPIC` must already exist on the broker).
 
 ---
 

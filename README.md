@@ -38,13 +38,14 @@ To launch the triplet infrastructure (Kafka broker, Twin Layer simulation, and O
 ```bash
 # 1. Start infrastructure (pass SIM_SPEED=20 for scenario pace):
 # Recommended for demos (distinguishes Brain and Guardian calls on the timeline):
-MCP_AUTH_TOKENS_FILE=secrets/mcp_auth_tokens SIM_SPEED=20 docker compose up -d --build
+export MCP_AUTH_TOKENS_FILE=secrets/mcp_auth_tokens
+SIM_SPEED=20 docker compose up -d --build
 
 # Fallback without auth:
 SIM_SPEED=20 docker compose up -d --build
 ```
 
-Without `MCP_AUTH_TOKENS_FILE`, MCP is open and the timeline cannot distinguish Brain from Guardian calls (both show as "anonymous" in the Brain lane, which is fine for headless tests but less readable during demos).
+Run everything from the repository root; the relative path works both on the host (scenarios) and in the container (`WORKDIR /app`, secrets mounted at `/app/secrets`). Without `MCP_AUTH_TOKENS_FILE`, MCP is open and the timeline cannot distinguish Brain from Guardian calls (both show as "anonymous" in the Brain lane, which is fine for headless tests but less readable during demos).
 
 ```bash
 # 2. Export the red-team token generated inside the container:

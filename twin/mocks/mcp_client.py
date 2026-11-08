@@ -11,9 +11,36 @@ import concurrent.futures
 import contextlib
 import json
 import logging
+import os
 from typing import Any, Callable, Dict, Optional
 
 logger = logging.getLogger("mocks.mcp_client")
+
+
+def resolve_mock_token(principal: str, explicit_token: Optional[str] = None) -> Optional[str]:
+    """Resolve mock bearer token for principal from args, env, or token file."""
+    if explicit_token:
+        return explicit_token
+    spec_env = os.getenv(f"MCP_{principal.upper()}_TOKEN")
+    if spec_env:
+        return spec_env
+    raw = os.getenv("MCP_AUTH_TOKENS", "").strip()
+    if not raw:
+        fpath = os.getenv("MCP_AUTH_TOKENS_FILE", "").strip()
+        if fpath and os.path.isfile(fpath):
+            try:
+                with open(fpath, "r", encoding="utf-8") as f:
+                    raw = f.read()
+            except Exception:
+                pass
+    if raw:
+        for part in raw.replace("\r", "\n").replace("\n", ",").split(","):
+            part = part.strip()
+            if ":" in part:
+                p, tok = part.split(":", 1)
+                if p.strip().lower() == principal.lower():
+                    return tok.strip()
+    return os.getenv("MCP_AUTH_TOKEN")
 
 
 def run_sync(coro):
@@ -41,7 +68,7 @@ class McpCaller:
         call_tool_fn: Optional[Callable[[str, Dict[str, Any]], Any]] = None,
     ):
         self.base_url = base_url.rstrip("/")
-        self.token = token
+        self.token = token or os.getenv("MCP_AUTH_TOKEN")
         self._session = session
         self._call_tool_fn = call_tool_fn
         self._exit_stack: Optional[contextlib.AsyncExitStack] = None

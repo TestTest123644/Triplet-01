@@ -69,7 +69,7 @@ def parse_auth_tokens() -> Dict[str, str]:
     if not raw:
         return {}
     tokens: Dict[str, str] = {}
-    for part in raw.strip().split(","):
+    for part in raw.replace("\r", "\n").replace("\n", ",").split(","):
         part = part.strip()
         if ":" in part:
             principal, token = part.split(":", 1)
