@@ -71,6 +71,11 @@ def main() -> int:
             with ctx:
                 ok = mod.run(ctx)
                 results.append((sc_id, sc_mod_name, ok, ctx.log_file))
+        except SystemExit as e:
+            if e.code == 2:
+                print(f"[{sc_id}] Scenario preflight failed (exit code 2). Stopping scenario suite.", file=sys.stderr)
+                return 2
+            results.append((sc_id, sc_mod_name, False, getattr(ctx, "log_file", "none")))
         except Exception as e:
             print(f"[{sc_id}] UNHANDLED EXCEPTION: {e}", file=sys.stderr)
             results.append((sc_id, sc_mod_name, False, getattr(ctx, "log_file", "none")))

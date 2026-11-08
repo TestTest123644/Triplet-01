@@ -217,8 +217,154 @@ class TwinMcpClient:
 
 
 # ==============================================================================
-# 4. Wire Telemetry Consumer
+# 4. Wire Telemetry Consumer & Kafka Configuration
 # ==============================================================================
+
+def get_scenario_kafka_consumer_config(bootstrap_servers: str = "localhost:19092") -> Dict[str, Any]:
+    """Build client configuration dictionary for confluent-kafka Consumer in scenarios.
+
+    Precedence:
+    - SCENARIO_KAFKA_* environment variables take priority.
+    - Falls back to KAFKA_* if SCENARIO_KAFKA_* is unset or empty.
+    - Password file takes precedence over literal password (trailing newline stripped).
+
+    Returns:
+        Dict[str, Any] configuration dictionary for confluent_kafka.Consumer.
+        With default environment, returns today's baseline config:
+        bootstrap.servers, group.id (<prefix>-<ms>), auto.offset.reset (latest),
+        enable.auto.commit (False).
+    """
+    def _resolve(base_name: str) -> Tuple[Optional[str], str]:
+        sc_name = f"SCENARIO_{base_name}"
+        sc_val = os.getenv(sc_name)
+        if sc_val is not None and sc_val.strip() != "":
+            return sc_val.strip(), sc_name
+        fb_val = os.getenv(base_name)
+        if fb_val is not None and fb_val.strip() != "":
+            return fb_val.strip(), base_name
+        return None, sc_name
+
+    # 1. Security protocol
+    raw_proto, proto_var = _resolve("KAFKA_SECURITY_PROTOCOL")
+    protocol = raw_proto if raw_proto is not None else "PLAINTEXT"
+    allowed_protocols = ("PLAINTEXT", "SASL_PLAINTEXT", "SASL_SSL")
+    if protocol not in allowed_protocols:
+        raise ValueError(
+            f"Invalid {proto_var}: '{protocol}'. Allowed: {', '.join(allowed_protocols)}"
+        )
+
+    # 2. Group prefix & baseline settings
+    group_prefix = (os.getenv("SCENARIO_KAFKA_GROUP_PREFIX") or "").strip() or "scenario-runner"
+    config: Dict[str, Any] = {
+        "bootstrap.servers": bootstrap_servers,
+        "group.id": f"{group_prefix}-{int(time.time() * 1000)}",
+        "auto.offset.reset": "latest",
+        "enable.auto.commit": False,
+    }
+
+    # 3. Address family (optional)
+    raw_fam, fam_var = _resolve("KAFKA_BROKER_ADDRESS_FAMILY")
+    if raw_fam is not None:
+        family = raw_fam.lower()
+        allowed_families = ("any", "v4", "v6")
+        if family not in allowed_families:
+            raise ValueError(
+                f"Invalid {fam_var}: '{raw_fam}'. Allowed: {', '.join(allowed_families)}"
+            )
+        config["broker.address.family"] = family
+
+    # When protocol is PLAINTEXT
+    if protocol == "PLAINTEXT":
+        if raw_proto is not None:
+            config["security.protocol"] = "PLAINTEXT"
+        return config
+
+    # Protocol is SASL_PLAINTEXT or SASL_SSL
+    config["security.protocol"] = protocol
+
+    # 4. SASL mechanism
+    raw_mech, mech_var = _resolve("KAFKA_SASL_MECHANISM")
+    mechanism = raw_mech if raw_mech is not None else "PLAIN"
+    allowed_mechanisms = ("PLAIN", "SCRAM-SHA-256", "SCRAM-SHA-512")
+    if mechanism not in allowed_mechanisms:
+        raise ValueError(
+            f"Invalid {mech_var}: '{mechanism}'. Allowed: {', '.join(allowed_mechanisms)}"
+        )
+    config["sasl.mechanism"] = mechanism
+
+    # 5. Username
+    username, user_var = _resolve("KAFKA_USERNAME")
+    if not username:
+        raise ValueError(
+            f"Missing required environment variable for SASL authentication: {user_var}"
+        )
+    config["sasl.username"] = username
+
+    # 6. Password resolution
+    # SCENARIO_KAFKA_PASSWORD_FILE > SCENARIO_KAFKA_PASSWORD > KAFKA_PASSWORD_FILE > KAFKA_PASSWORD
+    pw_file: Optional[str] = None
+    pw_file_var: str = ""
+    pw_literal: Optional[str] = None
+    pw_literal_var: str = ""
+
+    if os.getenv("SCENARIO_KAFKA_PASSWORD_FILE") is not None and os.getenv("SCENARIO_KAFKA_PASSWORD_FILE").strip() != "":
+        pw_file = os.getenv("SCENARIO_KAFKA_PASSWORD_FILE").strip()
+        pw_file_var = "SCENARIO_KAFKA_PASSWORD_FILE"
+    elif "SCENARIO_KAFKA_PASSWORD" in os.environ:
+        pw_literal = os.environ["SCENARIO_KAFKA_PASSWORD"]
+        pw_literal_var = "SCENARIO_KAFKA_PASSWORD"
+    elif os.getenv("KAFKA_PASSWORD_FILE") is not None and os.getenv("KAFKA_PASSWORD_FILE").strip() != "":
+        pw_file = os.getenv("KAFKA_PASSWORD_FILE").strip()
+        pw_file_var = "KAFKA_PASSWORD_FILE"
+    elif "KAFKA_PASSWORD" in os.environ:
+        pw_literal = os.environ["KAFKA_PASSWORD"]
+        pw_literal_var = "KAFKA_PASSWORD"
+
+    password: str = ""
+    if pw_file is not None:
+        if not os.path.exists(pw_file):
+            raise ValueError(
+                f"Password file specified by {pw_file_var} does not exist: '{pw_file}'"
+            )
+        try:
+            with open(pw_file, "r", encoding="utf-8") as f:
+                content = f.read()
+                password = content.rstrip("\r\n")
+        except Exception as e:
+            raise ValueError(
+                f"Unreadable password file specified by {pw_file_var} '{pw_file}': {e}"
+            )
+        if not password.strip():
+            raise ValueError(
+                f"Password file specified by {pw_file_var} is empty: '{pw_file}'"
+            )
+    elif pw_literal is not None:
+        if not pw_literal:
+            raise ValueError(
+                f"Environment variable {pw_literal_var} is set but empty. Must provide non-empty password."
+            )
+        password = pw_literal
+    else:
+        var_pw = "SCENARIO_KAFKA_PASSWORD" if "SCENARIO" in user_var else "KAFKA_PASSWORD"
+        var_file = "SCENARIO_KAFKA_PASSWORD_FILE" if "SCENARIO" in user_var else "KAFKA_PASSWORD_FILE"
+        raise ValueError(
+            f"Missing required environment variable for SASL authentication: {var_pw} or {var_file}"
+        )
+
+    config["sasl.password"] = password
+
+    # 7. CA certificate location for SASL_SSL
+    if protocol == "SASL_SSL":
+        ca_location, ca_var = _resolve("KAFKA_SSL_CA_LOCATION")
+        if ca_location:
+            if not os.path.exists(ca_location):
+                raise ValueError(
+                    f"CA file specified by {ca_var} does not exist: '{ca_location}'"
+                )
+            config["ssl.ca.location"] = ca_location
+
+    return config
+
 
 class WireConsumer:
     """Consumes wire frames from Kafka topic or an in-memory queue."""
@@ -229,24 +375,62 @@ class WireConsumer:
         topic: str = "twin.sensors",
         queue_source: Optional[Any] = None,
     ):
+        self.bootstrap_servers = bootstrap_servers
+        self.topic = topic
         self.queue_source = queue_source
         self.consumer = None
+        self.config_error: Optional[str] = None
+        self.creation_error: Optional[str] = None
+        self.consumer_config: Optional[Dict[str, Any]] = None
+        self._preflight_buffer: List[Tuple[bytes, Dict[str, Any]]] = []
+
         if not self.queue_source:
             try:
+                self.consumer_config = get_scenario_kafka_consumer_config(bootstrap_servers=bootstrap_servers)
+            except ValueError as e:
+                self.config_error = str(e)
+                logger.warning(f"Kafka consumer configuration error: {e}")
+                return
+
+            try:
                 import confluent_kafka
-                self.consumer = confluent_kafka.Consumer({
-                    "bootstrap.servers": bootstrap_servers,
-                    "group.id": f"scenario-runner-{int(time.time()*1000)}",
-                    "auto.offset.reset": "latest",
-                    "enable.auto.commit": False,
-                })
+                self.consumer = confluent_kafka.Consumer(self.consumer_config)
                 self.consumer.subscribe([topic])
             except Exception as e:
+                self.creation_error = str(e)
                 logger.warning(f"Kafka consumer could not be created: {e}")
+                self.consumer = None
+
+    def reset(self) -> None:
+        """Reset the consumer so the scenario starts cleanly from latest offset on next poll."""
+        if self.queue_source:
+            return
+        if self.consumer is not None:
+            try:
+                self.consumer.close()
+            except Exception:
+                pass
+            self.consumer = None
+        self._preflight_buffer.clear()
+        if not self.config_error and self.consumer_config:
+            try:
+                import confluent_kafka
+                conf = dict(self.consumer_config)
+                if "group.id" in conf:
+                    prefix = conf["group.id"].rsplit("-", 1)[0]
+                    conf["group.id"] = f"{prefix}-{int(time.time() * 1000)}"
+                self.consumer = confluent_kafka.Consumer(conf)
+                self.consumer.subscribe([self.topic])
+                self.creation_error = None
+            except Exception as e:
+                self.creation_error = str(e)
                 self.consumer = None
 
     def poll(self, timeout: float = 1.0) -> Optional[Tuple[bytes, Dict[str, Any]]]:
         """Returns (raw_bytes, payload_dict) or None."""
+        if self._preflight_buffer:
+            return self._preflight_buffer.pop(0)
+
         if self.queue_source:
             raw = self.queue_source.get_reading(timeout=timeout)
             if raw is None:
@@ -349,6 +533,7 @@ class ScenarioContext:
         no_brain: bool = False,
         log_dir: str = "logs",
         queue_source: Optional[Any] = None,
+        wire_preflight_timeout: float = 20.0,
     ):
         self.scenario_id = scenario_id
         self.name = name
@@ -363,6 +548,7 @@ class ScenarioContext:
         self.no_brain = no_brain
         self.log_dir = log_dir
         self.queue_source = queue_source
+        self.wire_preflight_timeout = wire_preflight_timeout
 
         b_tok, g_tok, s_tok = resolve_tokens(
             mcp_token=mcp_token,
@@ -419,6 +605,7 @@ class ScenarioContext:
             partners=getattr(args, "partners", False),
             no_brain=getattr(args, "no_brain", False),
             log_dir=getattr(args, "log_dir", "logs"),
+            wire_preflight_timeout=getattr(args, "wire_preflight_timeout", 20.0),
         )
 
     def get_sim_ts_now(self) -> str:
@@ -625,6 +812,84 @@ class ScenarioContext:
         )
         return duration_sim_s
 
+    def _check_wire_preflight(self) -> None:
+        """Verify Kafka reader configuration and topic readability before scenario execution."""
+        if self.queue_source is not None:
+            return
+
+        timeout = float(os.getenv("SCENARIO_WIRE_PREFLIGHT_TIMEOUT", str(self.wire_preflight_timeout)))
+
+        # 1. Config error
+        if self.wire.config_error:
+            msg = f"Kafka reader configuration error: {self.wire.config_error}"
+            print(msg, file=sys.stderr)
+            self.log_event("", "scenario", "wire_preflight", {
+                "bootstrap": self.kafka_bootstrap,
+                "topic": self.kafka_topic,
+                "protocol": "unknown",
+                "username": "",
+                "result": f"config_error: {self.wire.config_error}",
+            })
+            self.record_check("wire_preflight", False, self.wire.config_error)
+            self.finish()
+            sys.exit(2)
+
+        # 2. Consumer creation error
+        if self.wire.consumer is None or self.wire.creation_error:
+            err = self.wire.creation_error or "consumer could not be created"
+            msg = f"Kafka consumer could not be created: {err}"
+            print(msg, file=sys.stderr)
+            self.log_event("", "scenario", "wire_preflight", {
+                "bootstrap": self.kafka_bootstrap,
+                "topic": self.kafka_topic,
+                "protocol": "unknown",
+                "username": "",
+                "result": f"creation_error: {err}",
+            })
+            self.record_check("wire_preflight", False, err)
+            self.finish()
+            sys.exit(2)
+
+        conf = self.wire.consumer_config or {}
+        protocol = conf.get("security.protocol", "PLAINTEXT")
+        username = conf.get("sasl.username", "")
+
+        # 3. Wait up to timeout seconds for the first message on the topic
+        start = time.monotonic()
+        first_frame = None
+        while time.monotonic() - start < timeout:
+            item = self.wire.poll(timeout=min(0.5, max(0.01, timeout - (time.monotonic() - start))))
+            if item is not None:
+                first_frame = item
+                break
+
+        if first_frame is None:
+            msg = (
+                f"Stream is not readable at {self.kafka_bootstrap} topic {self.kafka_topic}. "
+                "Likely causes: wrong topic, invalid SASL credentials, missing Read ACL on the topic, "
+                "or missing Read ACL on group prefix."
+            )
+            print(msg, file=sys.stderr)
+            self.log_event("", "scenario", "wire_preflight", {
+                "bootstrap": self.kafka_bootstrap,
+                "topic": self.kafka_topic,
+                "protocol": protocol,
+                "username": username,
+                "result": "timeout_no_messages",
+            })
+            self.record_check("wire_preflight", False, "timeout_no_messages")
+            self.finish()
+            sys.exit(2)
+
+        self.log_event("", "scenario", "wire_preflight", {
+            "bootstrap": self.kafka_bootstrap,
+            "topic": self.kafka_topic,
+            "protocol": protocol,
+            "username": username,
+            "result": "ok",
+        })
+        self.wire.reset()
+
     def __enter__(self) -> "ScenarioContext":
         print(f"=== Starting Scenario {self.scenario_id}: {self.name} ===", flush=True)
         # Fetch initial status to get sim_speed and verify reachability
@@ -646,6 +911,9 @@ class ScenarioContext:
             sys.exit(1)
 
         self.sim_speed = float(st.get("sim_speed", 1.0))
+
+        # Check wire telemetry preflight before settle or scenario execution
+        self._check_wire_preflight()
 
         # Run settle step before mocks and scenario logic start
         if not self.partners:
@@ -724,8 +992,8 @@ class ScenarioContext:
             except (ValueError, AttributeError):
                 pass
 
-        # Allow mocks 2 seconds to connect and establish baseline stream
-        time.sleep(2.0)
+        # Allow mocks 3.5 seconds to connect and establish baseline stream
+        time.sleep(3.5)
 
     def _stop_mocks_processes(self) -> None:
         for name, proc, log_path in (
@@ -845,8 +1113,8 @@ class ScenarioContext:
         if self._finished:
             return all(c["pass"] for c in self.checks) and len(self.checks) > 0
 
-        # Guarantee cleanup: clear all events and attacks before writing final line (only if twin reachable)
-        preflight_failed = any(c.get("name") == "twin_reachable" and not c.get("pass") for c in self.checks)
+        # Guarantee cleanup: clear all events and attacks before writing final line (only if twin reachable and wire preflight succeeded)
+        preflight_failed = any(c.get("name") in ("twin_reachable", "wire_preflight") and not c.get("pass") for c in self.checks)
         if not preflight_failed:
             try:
                 self.rest.clear_event("all")

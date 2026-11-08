@@ -59,6 +59,19 @@ To run against live partner implementations (City Brain and Guardian):
 python3 scenarios/run_all.py --partners
 ```
 
+### Running Against Guardian SASL Cluster from Host
+
+```bash
+export KAFKA_BOOTSTRAP_SERVERS=localhost:29094,localhost:29095,localhost:29096
+export KAFKA_TOPIC=telemetry-ingest
+export SCENARIO_KAFKA_SECURITY_PROTOCOL=SASL_PLAINTEXT
+export SCENARIO_KAFKA_USERNAME=<a user with Read on the topic and on group prefix scenario-runner>
+export SCENARIO_KAFKA_PASSWORD_FILE=secrets/<file>
+python3 scenarios/run_all.py --partners
+```
+
+The Twin's user `twin` is write-only on that cluster, so the cluster owner must grant a reader (topic Read + Describe, group prefix Read).
+
 ### Command Flags
 
 - `--with-mocks`: Starts `mocks.mock_guardian` and `mocks.mock_brain` as live subprocesses, authenticated via `--brain-token` and `--guardian-token`. Both mocks monitor parent process liveness (`--exit-with-parent`) and terminate cleanly on exit.
