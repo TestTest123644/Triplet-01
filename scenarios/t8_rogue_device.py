@@ -28,6 +28,8 @@ def run(ctx: ScenarioContext) -> bool:
     attack_id = inj_res.get("attack_id") or inj_res.get("event_id")
     ctx.log_event("", "scenario", "inject_attack", {"attack_id": attack_id, "response": inj_res})
     ctx.record_check("rogue_device_injected", bool(attack_id), f"attack_id: {attack_id}")
+    if not attack_id:
+        return ctx.finish()
 
     # Verify MCP query get_device_key returns null for unknown rogue device
     print(f"[{ctx.scenario_id}] Verifying MCP get_device_key returns null for rg-p1...")

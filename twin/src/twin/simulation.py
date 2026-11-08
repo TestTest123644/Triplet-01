@@ -185,6 +185,7 @@ class DeviceState:
     reported_actuator_state: Dict[str, Any] = field(default_factory=dict)
     active_attacks: List[Dict[str, Any]] = field(default_factory=list)
     camera_variety: float = 1.0
+    water_catchment: float = 1.0
 
     @property
     def active_attack(self) -> Optional[Dict[str, Any]]:
@@ -400,11 +401,15 @@ class CitySimulator:
 
                 initial_actuator: Dict[str, Any] = {}
                 cam_variety = 1.0
+                water_catchment = 1.0
+                init_val = tmpl["init"]
                 if tmpl["type"] == "traffic_camera":
                     initial_actuator = {"signal_plan": "normal"}
                     cam_variety = self.physics_rng.uniform(0.85, 1.15)
                 elif tmpl["type"] == "water_level":
                     initial_actuator = {"valve_position": "half", "valve_ratio": 0.5}
+                    water_catchment = self.physics_rng.uniform(0.85, 1.15)
+                    init_val = round(self.physics_rng.uniform(3.0, 3.8), 4)
                 elif tmpl["type"] == "power_load":
                     initial_actuator = {"grid_state": "grid_a"}
 
@@ -421,11 +426,12 @@ class CitySimulator:
                     public_key=pub_key,
                     status="ok",
                     seq=0,
-                    current_value=tmpl["init"],
-                    last_broadcast_value=tmpl["init"],
+                    current_value=init_val,
+                    last_broadcast_value=init_val,
                     actuator_state=dict(initial_actuator),
                     reported_actuator_state=dict(initial_actuator),
                     camera_variety=cam_variety,
+                    water_catchment=water_catchment,
                 )
                 self.devices[device_id] = dev_state
 
@@ -711,11 +717,11 @@ class CitySimulator:
             if dev.device_type != "water_level":
                 continue
 
-            q_in = q_base
+            q_in = q_base * dev.water_catchment
             for ev in self.active_events.values():
                 if ev.zone_id == dev.zone_id and ev.type == "rain_storm":
                     intensity = float(ev.params.get("intensity", ev.intensity or 3.0))
-                    q_in *= intensity
+                    q_in += q_base * (intensity - 1.0)
                     break
 
             valve = dev.actuator_state.get("valve_position", "half")

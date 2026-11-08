@@ -9,8 +9,11 @@ The consumer is injected so the adapter can be exercised without a broker; `conn
 builds the real one.
 """
 
+import logging
 from collections.abc import Mapping, Sequence
 from typing import Any
+
+logger = logging.getLogger("city_brain.kafka_source")
 
 PAUSE_AT = 10_000
 RESUME_AT = 5_000
@@ -28,6 +31,7 @@ class KafkaSource:
         consumer: Any | None = None,
         pause_at: int = PAUSE_AT,
         resume_at: int = RESUME_AT,
+        security_config: Mapping[str, Any] | None = None,
     ):
         self._bootstrap = bootstrap
         self._group = group
@@ -37,6 +41,7 @@ class KafkaSource:
         self._offset_reset = offset_reset
         self._consumer = consumer
         self._pause_at, self._resume_at = int(pause_at), int(resume_at)
+        self._security_config = dict(security_config) if security_config else {}
         self._paused = False
         self._uncommitted = 0
 
@@ -44,13 +49,16 @@ class KafkaSource:
 
     @property
     def config(self) -> dict[str, Any]:
-        return {
+        cfg = {
             "bootstrap.servers": self._bootstrap,
             "group.id": self._group,
             "auto.offset.reset": self._offset_reset,
             "enable.auto.commit": False,  # the Brain commits what it has taken on
             "enable.partition.eof": False,
         }
+        if self._security_config:
+            cfg.update(self._security_config)
+        return cfg
 
     @property
     def topics(self) -> list[str]:
@@ -81,7 +89,12 @@ class KafkaSource:
         for message in self._consume(timeout_s, limit):
             if message is None:
                 break
-            if message.error():
+            err = message.error()
+            if err:
+                code_fn = getattr(err, "code", None)
+                code_str = str(code_fn()) if code_fn else ""
+                if code_str not in ("_PARTITION_EOF", "-191"):
+                    logger.warning("KafkaSource poll error on topic %s: %s", message.topic(), err)
                 continue  # a broker-side error is not a reading; the next poll tries again
             stream = self._by_topic.get(message.topic())
             if stream is None:

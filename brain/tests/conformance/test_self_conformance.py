@@ -164,7 +164,8 @@ def test_the_interface_card_documents_the_configuration():
     text = (BRAIN / "INTERFACE.md").read_text(encoding="utf-8")
     for needed in (
         "twin.sensors", "guardian.verdicts", "guardian.events", "brain.events",
-        "BRAIN__", "BRAIN_OPERATOR_TOKEN", "ed25519", "8100", "8110", "8120",
+        "BRAIN__", "BRAIN_OPERATOR_TOKEN", "ed25519", "8200", "8110", "8120",
+        "MCP_AUTH_TOKEN", "KAFKA_PASSWORD_FILE", "telemetry-ingest", "guardian.optional",
     ):
         assert needed in text, needed
 

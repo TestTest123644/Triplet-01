@@ -85,14 +85,14 @@ class City:
                 device_id, LagFilter(lag_params(PARAMS, profile.kind), min_val=low, max_val=high))
             f.update(value, tick, weight, at_ceiling=at_ceiling)
 
-    def findings(self, zone_id=ZONE, tick=None):
+    def findings(self, zone_id=ZONE, tick=None, policy=POLICY):
         return detect_findings(
-            zone_id, self.registry, self.water, self.lag, POLICY,
+            zone_id, self.registry, self.water, self.lag, policy,
             tick if tick is not None else self.tick, now=T0,
         )
 
-    def kinds(self, zone_id=ZONE, tick=None):
-        return [f.kind for f in self.findings(zone_id, tick)]
+    def kinds(self, zone_id=ZONE, tick=None, policy=POLICY):
+        return [f.kind for f in self.findings(zone_id, tick, policy=policy)]
 
 
 def one(findings, kind) -> Finding:
@@ -234,6 +234,15 @@ def test_a_normal_grid_produces_nothing():
 
 def test_load_high_above_the_threshold():
     assert one(power_city(95.0).findings(), "LOAD_HIGH").direction == 1
+
+
+def test_triplet_policy_midday_peak_threshold():
+    triplet_cfg = load_config("config/triplet.yaml")
+    assert triplet_cfg.policy["detectors"]["power"]["load_high"] == 105.0
+    city = City().add("p1", SensorKind.POWER_LOAD).hold("p1", 99.0, 120)
+    assert city.kinds(policy=triplet_cfg.policy) == []
+    city_over = City().add("p1", SensorKind.POWER_LOAD).hold("p1", 110.0, 120)
+    assert one(city_over.findings(policy=triplet_cfg.policy), "LOAD_HIGH").direction == 1
 
 
 def test_a_stolen_key_spike_is_a_load_jump():

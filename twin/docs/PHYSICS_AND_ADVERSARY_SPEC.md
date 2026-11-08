@@ -64,11 +64,13 @@ The digital twin models 42 IoT devices across 5 municipal categories:
   - Retention threshold: $H_0 = 1.2\text{ meters}$.
   - Calibrated discharge coefficient: $c = 0.00089$.
   - Inflow rate: $Q_{\text{base}} = 0.003\text{ m/s}$ modulated by a $\pm 10\%$ tidal term with a 12.4-hour period ($44,640\text{ s}$):
-    $$Q_{\text{in}}(t) = 0.003 \cdot \left(1.0 + 0.10 \cdot \sin\left(\frac{2\pi \cdot t_{\text{sim\_sec}}}{44640}\right)\right)$$
+    $$Q_{\text{base}}(t) = 0.003 \cdot \left(1.0 + 0.10 \cdot \sin\left(\frac{2\pi \cdot t_{\text{sim\_sec}}}{44640}\right)\right)$$
+  - Each device has a fixed catchment multiplier $C_i \sim \mathcal{U}(0.85, 1.15)$ drawn from the physics RNG applied to inflow ($Q_{\text{in}, i}(t) = Q_{\text{base}}(t) \cdot C_i$).
+  - Each device has a starting level drawn from the physics RNG ($H_{0, i} \sim \mathcal{U}(3.0, 3.8)\text{ meters}$).
+  - No sensor noise on water (spec preserved), determinism for a given seed, storms scale per zone ($Q_{\text{in}, i}(t) = Q_{\text{base}}(t) \cdot C_i + Q_{\text{base}}(t) \cdot (\text{intensity} - 1.0)$), and the two sensors in one zone stay strongly correlated.
 - **Actuation Impact (`set_valve`):**
   - Valve ratio $k$: `open` ($1.0$), `half` ($0.5$), `closed` ($0.0$), `"NN%"` ($\text{NN}/100$).
   - Default initial valve position: `"half"` ($k = 0.5$).
-  - Initial baseline water level: $3.5\text{ meters}$.
 - **Calibrated Behaviors:**
   - *Nominal Half Valve:* Holds steady between $2.5\text{ m}$ and $4.5\text{ m}$ for 2+ simulation hours.
   - *Closed Valve:* Starting from $3.5\text{ m}$, crosses the $8.0\text{ m}$ critical threshold after $15$ to $40$ simulation minutes (~25 min).

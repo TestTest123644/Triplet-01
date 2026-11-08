@@ -196,8 +196,13 @@ class BrainApp:
             return None  # the log and the Twin already have everything this step produced
         if isinstance(effect, Publish):
             record = self._log.append(self._with_tool(effect.event))
+            published = True
             if self._event_sink is not None:
-                self._event_sink(record)  # the same bytes the log holds, for the bus
+                res = self._event_sink(record)
+                if res is False:
+                    published = False
+            if published:
+                self._confirm_published(effect)
         elif isinstance(effect, SendCommand):
             return await self._send(effect)
         elif isinstance(effect, StartTimer):
@@ -238,6 +243,15 @@ class BrainApp:
         for effect_id, effect in self._journal.pending_outbox():
             if isinstance(effect, SendCommand) and effect.idempotency_key == command.idempotency_key:
                 self._journal.mark_dispatched(effect_id)
+
+    def _confirm_published(self, effect: Publish) -> None:
+        """The event has been written to the log: the outbox no longer owes it (spec 9.4)."""
+        if self._journal is None:
+            return
+        for effect_id, eff in self._journal.pending_outbox():
+            if isinstance(eff, Publish) and eff.event == effect.event:
+                self._journal.mark_dispatched(effect_id)
+                break
 
 
 def _outcome_of(reply: dict) -> Literal["ACCEPTED", "REJECTED", "UNKNOWN"]:

@@ -5,7 +5,7 @@ import tempfile
 import pytest
 from unittest.mock import MagicMock, patch
 
-from twin.kafka_config import kafka_client_config
+from twin.kafka_config import get_broker_address_family, kafka_client_config
 from twin.kafka_streamer import KafkaStreamer
 from twin.main import wait_for_kafka_ready
 from mocks.reading_source import KafkaSource
@@ -311,6 +311,74 @@ def test_mock_kafka_config_ssl_ca_location(monkeypatch):
             os.remove(ca_file)
 
 
+def test_broker_address_family_default(monkeypatch):
+    """Default broker address family is 'any'."""
+    monkeypatch.delenv("KAFKA_BROKER_ADDRESS_FAMILY", raising=False)
+    assert get_broker_address_family() == "any"
+
+
+def test_broker_address_family_valid(monkeypatch):
+    """Explicit valid families 'v4', 'v6', and 'any' (case-insensitive)."""
+    monkeypatch.setenv("KAFKA_BROKER_ADDRESS_FAMILY", "v4")
+    assert get_broker_address_family() == "v4"
+
+    monkeypatch.setenv("KAFKA_BROKER_ADDRESS_FAMILY", "V6")
+    assert get_broker_address_family() == "v6"
+
+    monkeypatch.setenv("KAFKA_BROKER_ADDRESS_FAMILY", "any")
+    assert get_broker_address_family() == "any"
+
+
+def test_broker_address_family_invalid_raises(monkeypatch):
+    """Invalid family raises ValueError naming KAFKA_BROKER_ADDRESS_FAMILY."""
+    monkeypatch.setenv("KAFKA_BROKER_ADDRESS_FAMILY", "ipv4")
+    with pytest.raises(ValueError, match="KAFKA_BROKER_ADDRESS_FAMILY"):
+        get_broker_address_family()
+
+
+def test_producer_receives_broker_address_family(monkeypatch):
+    """Producer configuration includes broker.address.family."""
+    monkeypatch.setenv("KAFKA_BROKER_ADDRESS_FAMILY", "v4")
+    conf = KafkaStreamer.build_producer_config(bootstrap_servers="mock:9092")
+    assert conf["broker.address.family"] == "v4"
+
+
+def test_streamer_init_invalid_broker_address_family_raises(monkeypatch):
+    """KafkaStreamer raises ValueError on startup if KAFKA_BROKER_ADDRESS_FAMILY is invalid."""
+    monkeypatch.setenv("KAFKA_BROKER_ADDRESS_FAMILY", "invalid_family")
+    with pytest.raises(ValueError, match="KAFKA_BROKER_ADDRESS_FAMILY"):
+        KafkaStreamer(bootstrap_servers="mock:9092", mock_mode=False)
+
+
+def test_consumer_receives_broker_address_family(monkeypatch):
+    """KafkaSource Consumer receives broker.address.family."""
+    monkeypatch.setenv("KAFKA_BROKER_ADDRESS_FAMILY", "v6")
+
+    captured_conf = {}
+
+    def mock_consumer_init(conf):
+        captured_conf.update(conf)
+        return MagicMock()
+
+    import confluent_kafka
+    monkeypatch.setattr(confluent_kafka, "Consumer", mock_consumer_init)
+
+    source = KafkaSource(bootstrap_servers="mock:9092", group_id="test-grp", topic="twin.sensors")
+    assert captured_conf.get("broker.address.family") == "v6"
+
+
+def test_mock_kafka_config_broker_address_family(monkeypatch):
+    """twin/mocks/kafka_config handles KAFKA_BROKER_ADDRESS_FAMILY identically."""
+    import mocks.kafka_config as mock_kc
+
+    monkeypatch.setenv("KAFKA_BROKER_ADDRESS_FAMILY", "v4")
+    assert mock_kc.get_broker_address_family() == "v4"
+
+    monkeypatch.setenv("KAFKA_BROKER_ADDRESS_FAMILY", "invalid")
+    with pytest.raises(ValueError, match="KAFKA_BROKER_ADDRESS_FAMILY"):
+        mock_kc.get_broker_address_family()
+
+
 def test_twin_src_never_touches_broker():
     """Verify twin/src contains zero broker administration or topic creation methods."""
     forbidden = ["create_topics", "NewTopic", "alter_configs", "create_partitions"]
@@ -326,4 +394,73 @@ def test_twin_src_never_touches_broker():
                             if term in line:
                                 violations.append(f"{path}:{line_num}: {term} found in '{line.strip()}'")
     assert not violations, f"Forbidden broker manipulation detected:\n" + "\n".join(violations)
+
+
+def test_empty_string_env_vars_treated_as_unset_in_plaintext(monkeypatch):
+    """Empty strings from compose expansion behave identically to unset variables in PLAINTEXT."""
+    monkeypatch.setenv("KAFKA_SECURITY_PROTOCOL", "")
+    monkeypatch.setenv("KAFKA_PASSWORD_FILE", "")
+    monkeypatch.setenv("KAFKA_PASSWORD", "")
+    monkeypatch.setenv("KAFKA_USERNAME", "")
+    monkeypatch.setenv("KAFKA_SSL_CA_LOCATION", "")
+    monkeypatch.setenv("KAFKA_SASL_MECHANISM", "")
+
+    conf = kafka_client_config()
+    assert conf == {"security.protocol": "PLAINTEXT"}
+    sasl_keys = [k for k in conf if k.startswith("sasl.") or k.startswith("ssl.")]
+    assert len(sasl_keys) == 0
+
+
+def test_empty_broker_address_family_defaults_to_any(monkeypatch):
+    """KAFKA_BROKER_ADDRESS_FAMILY="" defaults to 'any'."""
+    monkeypatch.setenv("KAFKA_BROKER_ADDRESS_FAMILY", "")
+    assert get_broker_address_family() == "any"
+
+
+def test_empty_sasl_mechanism_defaults_to_plain(monkeypatch):
+    """KAFKA_SASL_MECHANISM="" defaults to 'PLAIN' under SASL protocol."""
+    monkeypatch.setenv("KAFKA_SECURITY_PROTOCOL", "SASL_PLAINTEXT")
+    monkeypatch.setenv("KAFKA_SASL_MECHANISM", "")
+    monkeypatch.setenv("KAFKA_USERNAME", "test_user")
+    monkeypatch.setenv("KAFKA_PASSWORD", "test_pass")
+
+    conf = kafka_client_config()
+    assert conf["sasl.mechanism"] == "PLAIN"
+    assert conf["sasl.username"] == "test_user"
+    assert conf["sasl.password"] == "test_pass"
+
+
+def test_empty_password_file_falls_through_to_env(monkeypatch):
+    """KAFKA_PASSWORD_FILE="" does not attempt to open empty path and falls through to env."""
+    monkeypatch.setenv("KAFKA_SECURITY_PROTOCOL", "SASL_PLAINTEXT")
+    monkeypatch.setenv("KAFKA_USERNAME", "test_user")
+    monkeypatch.setenv("KAFKA_PASSWORD_FILE", "")
+    monkeypatch.setenv("KAFKA_PASSWORD", "fallback_pass")
+
+    conf = kafka_client_config()
+    assert conf["sasl.password"] == "fallback_pass"
+
+
+def test_empty_password_file_and_empty_env_raises_missing_password(monkeypatch):
+    """When both KAFKA_PASSWORD_FILE="" and KAFKA_PASSWORD="", raises missing password error."""
+    monkeypatch.setenv("KAFKA_SECURITY_PROTOCOL", "SASL_PLAINTEXT")
+    monkeypatch.setenv("KAFKA_USERNAME", "test_user")
+    monkeypatch.setenv("KAFKA_PASSWORD_FILE", "")
+    monkeypatch.setenv("KAFKA_PASSWORD", "")
+
+    with pytest.raises(ValueError, match="KAFKA_PASSWORD"):
+        kafka_client_config()
+
+
+def test_empty_ssl_ca_location_no_ca_attempt(monkeypatch):
+    """KAFKA_SSL_CA_LOCATION="" makes no filesystem access attempt under SASL_SSL."""
+    monkeypatch.setenv("KAFKA_SECURITY_PROTOCOL", "SASL_SSL")
+    monkeypatch.setenv("KAFKA_USERNAME", "ssl_user")
+    monkeypatch.setenv("KAFKA_PASSWORD", "ssl_pass")
+    monkeypatch.setenv("KAFKA_SSL_CA_LOCATION", "")
+
+    conf = kafka_client_config()
+    assert conf["security.protocol"] == "SASL_SSL"
+    assert "ssl.ca.location" not in conf
+
 

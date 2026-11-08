@@ -416,6 +416,17 @@ def build_timeline_rows(
         zone_id = details.get("zone_id") or extract_zone_from_device(dev_id, device_zone_map)
 
         if layer == "guardian" and event not in ("mock_started", "mock_stopped"):
+            raw_reason = details.get("reason")
+            reason_str = str(raw_reason).strip() if (raw_reason is not None and str(raw_reason).strip()) else ""
+            src_tag = ""
+            if details.get("sim_ts_source") == "reading_id":
+                src_tag = " (sim time from reading_id)"
+            elif details.get("sim_ts_source") == "device_latest":
+                src_tag = " (sim time approximate)"
+            if reason_str:
+                summary = f"Guardian verdict: {event} ({reason_str}){src_tag}"
+            else:
+                summary = f"Guardian verdict: {event}{src_tag}"
             rows.append(
                 TimelineRow(
                     row_id=f"log:guardian:{l_idx}",
@@ -424,11 +435,22 @@ def build_timeline_rows(
                     event_type="verdict",
                     device_id=dev_id,
                     zone_id=zone_id,
-                    summary=f"Guardian verdict: {event} ({details.get('reason') or json.dumps(details)})",
+                    summary=summary,
                     raw_json=log_record,
                 )
             )
         elif layer == "brain" and event not in ("mock_started", "mock_stopped"):
+            raw_reason = details.get("reason")
+            reason_str = str(raw_reason).strip() if (raw_reason is not None and str(raw_reason).strip()) else ""
+            src_tag = ""
+            if details.get("sim_ts_source") == "reading_id":
+                src_tag = " (sim time from reading_id)"
+            elif details.get("sim_ts_source") == "device_latest":
+                src_tag = " (sim time approximate)"
+            if reason_str:
+                summary = f"Brain verdict: {event} ({reason_str}){src_tag}"
+            else:
+                summary = f"Brain verdict: {event}{src_tag}"
             rows.append(
                 TimelineRow(
                     row_id=f"log:brain:{l_idx}",
@@ -437,7 +459,7 @@ def build_timeline_rows(
                     event_type="verdict",
                     device_id=dev_id,
                     zone_id=zone_id,
-                    summary=f"Brain verdict: {event} ({json.dumps(details)})",
+                    summary=summary,
                     raw_json=log_record,
                 )
             )
