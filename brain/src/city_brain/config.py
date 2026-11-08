@@ -1,6 +1,7 @@
 """Configuration loader: YAML file + BRAIN__A__B env overrides, validated strictly."""
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any, Literal, Mapping
 
@@ -8,6 +9,8 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 ENV_PREFIX = "BRAIN__"
+
+logger = logging.getLogger("city_brain.config")
 
 
 class _Strict(BaseModel):
@@ -40,21 +43,38 @@ class KafkaConfig(_Strict):
         if self.sasl_username:
             cfg["sasl.username"] = self.sasl_username
 
-        password = self.sasl_password
-        if not password and self.sasl_password_file:
-            p = Path(self.sasl_password_file)
-            if p.is_file():
-                password = p.read_text(encoding="utf-8").strip()
-        elif password and Path(password).is_file():
-            password = Path(password).read_text(encoding="utf-8").strip()
-
+        password = self.resolve_password()
         if password:
             cfg["sasl.password"] = password
+        elif self.sasl_username:
+            # The silent failure: the client goes out with a user and no secret, and the
+            # broker's rejection says nothing about the empty variable behind it.
+            logger.warning(
+                "%s is configured with user %r but no password could be resolved. Set "
+                "KAFKA_PASSWORD or KAFKA_PASSWORD_FILE (an empty value counts as unset); "
+                "the broker will reject this client.", protocol, self.sasl_username)
 
         if protocol == "SASL_SSL" and self.ssl_ca_location:
             cfg["ssl.ca.location"] = self.ssl_ca_location
 
         return cfg
+
+    def resolve_password(self) -> str | None:
+        """The SASL password, from the file first.
+
+        The triplet's `.env.example` states that `KAFKA_PASSWORD_FILE` takes precedence
+        over `KAFKA_PASSWORD`, so a stale literal left in an `.env` cannot quietly send
+        the Brain to the broker with a different secret than its partners use.
+        """
+        if self.sasl_password_file:
+            found = _read_secret(self.sasl_password_file)
+            if found:
+                return found
+        literal = (self.sasl_password or "").strip()
+        if not literal:
+            return None
+        # A literal that is itself a path is read, as it was before.
+        return _read_secret(literal) or literal
 
 
 class TwinConfig(_Strict):
@@ -112,8 +132,45 @@ def _read_yaml(path: Path) -> dict:
     return data
 
 
+def _read_secret(path: str) -> str | None:
+    """A secret from a file, or `None` if there is no file there."""
+    try:
+        p = Path(path)
+        if p.is_file():
+            return p.read_text(encoding="utf-8").strip() or None
+    except (OSError, ValueError):
+        pass  # not a usable path: the caller falls back to treating it as a value
+    return None
+
+
+def _brain_token(text: str) -> str | None:
+    """The Brain's bearer token out of a shared `brain:<tok>,guardian:<tok>` list.
+
+    A file or variable holding nothing but the token is accepted too, since that is the
+    usual shape of a Docker secret.
+    """
+    text = text.strip()
+    if not text:
+        return None
+    for entry in text.split(","):
+        entry = entry.strip()
+        if ":" in entry:
+            principal, token = entry.split(":", 1)
+            if principal.strip().lower() == "brain":
+                return token.strip() or None
+    if ":" not in text and "," not in text and len(text.split()) == 1:
+        return text
+    return None
+
+
 def _apply_standard_kafka_env(data: dict, env: Mapping[str, str]) -> None:
-    """Map standard KAFKA_* and MCP_* environment variables into config."""
+    """Map standard KAFKA_* and MCP_* environment variables into config.
+
+    An empty variable is not a value. Compose files carry defaults like
+    `KAFKA_PASSWORD: ${KAFKA_PASSWORD:-}`, which arrive as empty strings; treating those
+    as settings would wipe what `config/triplet.yaml` says and hide the matching
+    `*_FILE` variable behind nothing at all.
+    """
     kafka = data.setdefault("kafka", {})
     mapping = {
         "KAFKA_BOOTSTRAP_SERVERS": "bootstrap",
@@ -127,31 +184,24 @@ def _apply_standard_kafka_env(data: dict, env: Mapping[str, str]) -> None:
         "KAFKA_ACKS": "acks",
     }
     for env_key, conf_key in mapping.items():
-        if env_key in env:
-            kafka[conf_key] = env[env_key]
+        value = (env.get(env_key) or "").strip()
+        if value:
+            kafka[conf_key] = value
 
+    # MCP_AUTH_TOKEN is the Brain's own override and stays the most specific thing anyone
+    # can set. The shared list follows, the file ahead of the variable: `.env.example`
+    # says MCP_AUTH_TOKENS_FILE "takes priority over MCP_AUTH_TOKENS".
     twin = data.setdefault("twin", {})
-    if "MCP_AUTH_TOKEN" in env:
-        twin["auth_token"] = env["MCP_AUTH_TOKEN"]
-    elif "MCP_AUTH_TOKENS" in env:
-        # Parse 'brain:<tok>,guardian:<tok>'
-        for entry in env["MCP_AUTH_TOKENS"].split(","):
-            entry = entry.strip()
-            if ":" in entry:
-                principal, token = entry.split(":", 1)
-                if principal.strip().lower() == "brain":
-                    twin["auth_token"] = token.strip()
-                    break
-    elif "MCP_AUTH_TOKENS_FILE" in env:
-        p = Path(env["MCP_AUTH_TOKENS_FILE"])
-        if p.is_file():
-            for entry in p.read_text(encoding="utf-8").split(","):
-                entry = entry.strip()
-                if ":" in entry:
-                    principal, token = entry.split(":", 1)
-                    if principal.strip().lower() == "brain":
-                        twin["auth_token"] = token.strip()
-                        break
+    token = (env.get("MCP_AUTH_TOKEN") or "").strip()
+    if not token:
+        tokens_file = (env.get("MCP_AUTH_TOKENS_FILE") or "").strip()
+        if tokens_file:
+            contents = _read_secret(tokens_file)
+            token = (_brain_token(contents) or "") if contents else ""
+    if not token:
+        token = _brain_token(env.get("MCP_AUTH_TOKENS") or "") or ""
+    if token:
+        twin["auth_token"] = token
 
 
 def _apply_env(data: dict, env: Mapping[str, str]) -> None:
