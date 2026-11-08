@@ -1,0 +1,119 @@
+\documentclass[10pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage[margin=1.4cm,top=1.45cm,bottom=1.45cm]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{array}
+\usepackage{enumitem}
+\usepackage{float}
+\usepackage[table]{xcolor}
+\usepackage{colortbl}
+\usepackage{fancyhdr}
+\usepackage{titlesec}
+\usepackage{microtype}
+\usepackage[colorlinks=true,linkcolor=blue!70!black,citecolor=blue!70!black,urlcolor=blue!70!black]{hyperref}
+
+\newcolumntype{L}[1]{>{\raggedright\arraybackslash}p{#1}}
+\newcolumntype{Y}{>{\raggedright\arraybackslash}X}
+\renewcommand{\_}{\textunderscore\allowbreak}
+
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\small\textsf{\textbf{Twin inputs for Part 0 and Part 4} \textbar\ 3-Layer Urban IoT Monitoring Platform}}
+\fancyhead[R]{\small\textsf{Page \thepage}}
+\fancyfoot[L]{\small\textsf{Twin Layer Report \textbar\ Version 1.0}}
+\fancyfoot[R]{\small\textsf{Signed telemetry \textbar\ Ground truth}}
+\renewcommand{\headrulewidth}{0.5pt}
+\renewcommand{\footrulewidth}{0.5pt}
+
+\titleformat{\section}
+  {\normalfont\sffamily\Large\bfseries\color{blue!80!black}}
+  {\thesection}{0.8em}{}
+\titleformat{\subsection}
+  {\normalfont\sffamily\large\bfseries\color{blue!70!black}}
+  {\thesubsection}{0.6em}{}
+\titlespacing*{\section}{0pt}{4pt}{2pt}
+\titlespacing*{\subsection}{0pt}{3pt}{1.5pt}
+\setlength{\parskip}{2pt}
+\setlength{\parindent}{0pt}
+\setlength{\intextsep}{4pt plus 1pt minus 1pt}
+\setlength{\abovecaptionskip}{2pt}
+\setlength{\belowcaptionskip}{1.5pt}
+
+\begin{document}
+
+\section*{Twin inputs for the shared parts}
+The Twin team's contribution to \textbf{Part 0} (triplet overview and integration) and \textbf{Part 4} (Test Book). The Guardian and Brain columns state what each partner layer is designed to do, from its code; what we actually observed in the joint runs is in the last section, \emph{Observed in the joint runs}.
+
+\subsection*{Part 0 input: one scenario traced through the three layers}
+\textbf{Port flood in La Goulette (scenario T3).} A storm triples the inflow to the drainage channel in zone 2. The Twin's physics raises the real water level at floats \texttt{z2-wl1} and \texttt{z2-wl2}, and both keep reporting ten times per second on Kafka, each reading signed with its own Ed25519 key (for example \texttt{"device\_id":"z2-wl1"}, \texttt{"value":6.92}, \texttt{"unit":"meters"}, \texttt{"status":"ok"}, plus its signature). The Guardian verifies every signature with the public key it fetched from the Twin over MCP (\texttt{get\_device\_key}), checks the reading against its rules and models, and passes it on as trusted. The Brain sees the level climbing toward the 8\,m danger line on two agreeing, trusted sensors and calls the Twin's MCP tool \texttt{set\_valve \{"device\_id":"z2-wl1","target\_state":"open"\}}. The Twin applies the command to the physics: the drain opens, the level peaks around 7.3\,m and never crosses 8\,m. The ground-truth ledger records the storm, the command (caller \texttt{brain}, executed) and the real level, so the run log \texttt{logs/t3-*.log} proves the outcome independently of what any layer claims.
+
+\textbf{What the Twin contributes to the triplet:} the stream (Kafka, signed, $\le$ 300\,B, keyed by device), the command surface (16 MCP tools: queries, actuation, containment), the attack engine that gives the Guardian something real to catch, and the ground truth the jury can check afterwards.
+
+\textbf{Shared decisions the Twin relies on:} Kafka with SASL on the Guardian's three-broker cluster (the Twin writes \texttt{telemetry-ingest} as user \texttt{twin}); MCP over HTTP on port 8000 with one bearer token per layer; Ed25519 over the sorted compact JSON without \texttt{sig}; device public keys come only from \texttt{get\_device\_key}; containment (isolate, quarantine) is executed by the Twin at the Guardian's request.
+
+\subsection*{Part 4 input: Twin scenarios}
+Every scenario starts with one command and writes \texttt{logs/tN-<timestamp>.log}:
+\begin{itemize}[leftmargin=*,itemsep=0pt,topsep=1pt]
+  \item \texttt{export RED\_TEAM\_TOKEN=\$(docker exec twin\_layer cat /app/data/red\_team.token)}
+  \item \texttt{python3 scenarios/run\_all.py -{}-with-mocks} (all 11, about 5 minutes at \texttt{SIM\_SPEED=20}), or one at a time, e.g.\ \texttt{python3 scenarios/t6\_fake\_port\_flood.py -{}-with-mocks}
+\end{itemize}
+\texttt{-{}-with-mocks} uses our stand-in Guardian and Brain; \texttt{-{}-partners} runs the same trigger against the real partner layers and sends no actuation or containment itself.
+
+\textbf{Coverage of the interactions required by the rules.} Twin $\to$ Brain (real events): T2 accident, T3 port flood, T4 fire, T5 grid overload. Twin $\to$ Guardian (healthy vs unhealthy data): T1 baseline, T7 stuck sensor, T8 rogue device, T9 stolen key, T10 link tampering. Brain $\leftrightarrow$ Guardian (trust changes decisions): T6 fake port flood, T9 stolen key. All three: T11 storm with a lying actuator.
+
+\begin{table}[H]
+\centering
+\scriptsize
+\renewcommand{\arraystretch}{0.95}
+\caption{Twin scenarios with concrete, observable expected outputs}
+\label{tab:testbook}
+\begin{tabularx}{\textwidth}{L{0.45cm}L{1.6cm}L{4.3cm}L{2.9cm}L{2.5cm}Y}
+\toprule
+\textbf{ID} & \textbf{Name} & \textbf{Expected: Twin} & \textbf{Expected: Guardian} & \textbf{Expected: Brain} & \textbf{How to verify} \\
+\midrule
+T1 & Calm baseline & 42/42 devices, every frame $\le$ 300\,B, all signatures valid, about 420\,msg/s, no containment & Accepts all readings, no flags & No actuation & checks \texttt{devices\_42\_emitted}, \texttt{all\_signatures\_verified}, \texttt{message\_rate\_nominal} \\
+T2 & Traffic accident, zone 1 & \texttt{z1-tc1} flow drops to $\times0.3$, zone calls +6/min; resolved only by a matching dispatch & Readings trusted & \texttt{dispatch} medical in zone-1 & journal: dispatch executed, \texttt{resolved\_by: dispatch:*} \\
+T3 & Port flood, zone 2 & Storm $\times3$; after \texttt{set\_valve open} the peak stays below 8\,m (observed 7.25\,m) & Readings trusted (unit \texttt{"meters"} accepted) & \texttt{set\_valve z2-wl1 open} & \texttt{mitigated\_storm\_level\_under\_8m} \\
+T4 & Fire, zone 5 & AQI at \texttt{z5-aq1} above 150, calls +8/min; resolved by a fire dispatch & Readings trusted & \texttt{dispatch} fire in zone-5 & journal: \texttt{resolved\_by: dispatch:*} \\
+T5 & Grid overload, zone 3 & Load $\ge$ 118\,MW; blackout above 114\,MW for 60\,s; resolved by shedding & Readings trusted & \texttt{switch\_grid z3-pl1 shed} & journal: \texttt{resolved\_by: actuation:switch\_grid} \\
+T6 & Fake port flood & \texttt{z2-wl1} broadcasts 9.5\,m with a \textbf{valid} signature; true level and \texttt{z2-wl2} stay below 5\,m & Flags the two floats disagreeing; \texttt{isolate\_device z2-wl1} & Does \textbf{not} open the valve & \texttt{z2\_wl1\_isolated}, \texttt{no\_set\_valve\_command\_emitted} \\
+T7 & Stuck sensor & \texttt{z4-aq1} frozen at 42.0 while the real AQI moves & Detects the stuck signal; isolates \texttt{z4-aq1} & Ignores the device & \texttt{z4\_aq1\_isolated\_for\_stuck\_fault} \\
+T8 & Rogue device & Frames from unregistered \texttt{rg-p1}; \texttt{get\_device\_key} returns \texttt{null}; blocked after quarantine & Rejects as unknown device; \texttt{quarantine\_device rg-p1} & Never acts on it & \texttt{mcp\_device\_key\_null\_for\_rogue}, \texttt{rogue\_device\_quarantined} \\
+T9 & Stolen key & \texttt{z1-pl1} sends 180\,MW (above the 120\,MW maximum) with a valid signature & Flags the impossible value; \texttt{quarantine\_device z1-pl1} & No \texttt{switch\_grid} on that device & \texttt{z1\_pl1\_quarantined}, \texttt{no\_switch\_grid\_dispatched} \\
+T10 & Link tampering & On \texttt{z3-tc1}: corrupted bytes, broken signature, replayed \texttt{reading\_id}, 5\,s delay, dropped frames & Bad signature, replay and late-frame detection, silence & Ignores rejected data & five sub-checks in \texttt{logs/t10-*.log} \\
+T11 & Storm + lying actuator & \texttt{set\_valve open} answers ``ok'' but the ledger records \texttt{executed: false} and the level keeps rising (+1.4\,m in 5\,min) & --- & Notices the level not falling and escalates & \texttt{journal\_records\_executed\_false}, \texttt{physical\_water\_level\_rise\_ge\_0\_3m} \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\textbf{One scenario in the rule format (T6, fake flood at the port).} \textit{Layers:} Twin, Guardian, City Brain. \textit{Description:} float \texttt{z2-wl1} reports 9.5\,m with a valid signature while the real level, and the second float \texttt{z2-wl2}, stay near 3.5\,m. \textit{Trigger:} \texttt{python3 scenarios/t6\_fake\_port\_flood.py} (injects \texttt{device\_physical} on \texttt{z2-wl1}, value 9.5). \textit{Expected, Twin:} streams the fake 9.5\,m with a valid signature, keeps the true level in the ledger, executes \texttt{isolate\_device} when asked. \textit{Expected, Guardian:} marks \texttt{z2-wl1} untrusted (it disagrees with \texttt{z2-wl2} by more than 5\,m) and calls \texttt{isolate\_device z2-wl1}. \textit{Expected, Brain:} does not call \texttt{set\_valve} for zone 2 and records why. \textit{How to verify:} timeline screen (fake reading, Guardian isolation, no Brain action); log \texttt{logs/t6-*.log} shows \texttt{spoofed\_reading\_signature\_verified}, \texttt{z2\_wl1\_isolated} and \texttt{no\_set\_valve\_command\_emitted} as PASS.
+
+\subsection*{Observed in the joint runs}
+Two full runs on the Guardian's three-broker SASL cluster, with all three layers on one laptop.
+
+\begin{table}[H]
+\centering
+\scriptsize
+\renewcommand{\arraystretch}{0.95}
+\caption{What the joint runs actually showed}
+\label{tab:observed}
+\begin{tabularx}{\textwidth}{L{2.6cm}YY}
+\toprule
+ & \textbf{Run 1 (8 Nov, morning)} & \textbf{Run 2 (8 Nov, evening, Guardian's final version)} \\
+\midrule
+Twin delivery to \texttt{telemetry-ingest} & 779{,}325 of 779{,}360 (19 failures at broker startup) & 126{,}344 of 126{,}378 (14 failures at broker startup) \\
+Twin-side scenario checks & All pass in all 11 scenarios & Not run (see last row) \\
+Guardian & No output: its validation job read the wrong topics and had no SASL settings & Metadata producer listed all 42 devices over MCP; the validation job processed the stream; the AI orchestrator ran about 60{,}000 readings behind and labelled healthy devices \texttt{sensor\_is\_down}; its containment calls timed out (3\,s limit) \\
+Brain & Rejected 690 bad signatures (T10) and 352 rogue frames (T8) itself; T3 opened valves (6 commands, peak 6.62\,m); T6 correctly held back; no incident opened for T2, T4, T5 & Stopped after its first decisions: not allowed to write \texttt{brain.events} on the new cluster, and the Guardian publishes verdicts to \texttt{telemetry-confirmation}, not the \texttt{guardian.verdicts} it reads \\
+Scenarios passed end to end & 3 of 11 (T1, T3, T11) & Not run: the CPU was saturated (Twin at 22--68 readings/s, MCP replies 10--25\,s), so the results would have measured the laptop, not the layers \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\textbf{What this shows.} The Twin side of every interface works against the real partner infrastructure. The remaining gaps are in the Guardian--Brain link (topic names, ACLs, a verdict signing key that is never published) and in running the whole stack on one machine. For the demo, each layer runs on its own machine.
+
+\end{document}
