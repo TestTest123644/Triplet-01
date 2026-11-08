@@ -790,3 +790,47 @@ def test_event_resolved_chain_summary():
     start_row = next(r for r in rows if r.event_type == "event_start")
     expected = "flood in zone-1 -> no Guardian action -> no Brain action -> resolved by set_valve:v1"
     assert start_row.chain_summary == expected
+
+
+def test_verdict_row_summary_without_reason_is_clean():
+    """When details.reason is null/empty, summary is 'Guardian verdict: <event>' plus sim time tag, under 120 chars, no '{'."""
+    large_raw = {"extra_" + str(i): "value_" * 10 for i in range(50)}
+    entries = [
+        {
+            "layer": "guardian",
+            "sim_ts": "2026-10-17T12:00:10Z",
+            "event": "tamper_detected",
+            "details": {
+                "device_id": "z1-tc1",
+                "reading_id": "r-100",
+                "reason": None,
+                "sim_ts_source": "reading_id",
+                "raw": large_raw,
+            },
+        },
+        {
+            "layer": "brain",
+            "sim_ts": "2026-10-17T12:00:15Z",
+            "event": "flood_alert",
+            "details": {
+                "device_id": "z2-wl1",
+                "reason": "",
+                "raw": large_raw,
+            },
+        },
+    ]
+
+    rows = build_timeline_rows([], log_entries=entries)
+    assert len(rows) == 2
+
+    r0 = rows[0]
+    assert r0.lane == "Guardian"
+    assert r0.summary == "Guardian verdict: tamper_detected (sim time from reading_id)"
+    assert len(r0.summary) < 120
+    assert "{" not in r0.summary
+
+    r1 = rows[1]
+    assert r1.lane == "Brain"
+    assert r1.summary == "Brain verdict: flood_alert"
+    assert len(r1.summary) < 120
+    assert "{" not in r1.summary

@@ -316,17 +316,18 @@ def _resolve(
     """
     device = state.registry.get(ref.device_id)
     current = device.status if device is not None else DeviceStatus.ISOLATED
+    implicit = bool(state.policy.get("trust", {}).get("implicit_ok", False))
     if honour_history:
         verdict = state.ledger.latest(ref.reading_id, ref.sig_hash)
         if verdict is None:
-            return ref, False
-        weight = trust_weight(verdict, ref.device_status, state.policy["trust"]["caps"])
-        return evidence_ref(ref, verdict, weight), False
+            return (evidence_ref(ref, None, 1.0, implicit_ok=True), False) if implicit else (ref, False)
+        weight = trust_weight(verdict, ref.device_status, state.policy["trust"]["caps"], implicit_ok=implicit)
+        return evidence_ref(ref, verdict, weight, implicit_ok=implicit), False
     verdict = state.ledger.lookup(ref.reading_id, ref.sig_hash, state.sim_now)
     status = current if ref.device_status is DeviceStatus.OK else ref.device_status
-    weight = trust_weight(verdict, status, state.policy["trust"]["caps"])
+    weight = trust_weight(verdict, status, state.policy["trust"]["caps"], implicit_ok=implicit)
     known = ref.verdict_id is not None or state.ledger.latest(ref.reading_id, ref.sig_hash) is not None
-    return evidence_ref(ref, verdict, weight), verdict is None and known
+    return evidence_ref(ref, verdict, weight, implicit_ok=implicit), verdict is None and known and not implicit
 
 
 def _check_trust(state: BrainState, record: ActionRecord) -> tuple[bool | None, tuple[str, ...]]:

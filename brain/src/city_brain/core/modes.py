@@ -38,9 +38,10 @@ def guardian_down(state: BrainState) -> bool:
 
 def resting_mode(state: BrainState) -> BrainMode:
     """The mode to settle in once nothing else is wrong."""
-    if not state.guardian_heard or not state.registry:
+    guardian_optional = bool(_modes(state).get("guardian_optional", False))
+    if (not state.guardian_heard and not guardian_optional) or not state.registry:
         return BrainMode.WARMUP
-    return BrainMode.GUARDIAN_DEGRADED if guardian_down(state) else BrainMode.NORMAL
+    return BrainMode.GUARDIAN_DEGRADED if (guardian_down(state) and not guardian_optional) else BrainMode.NORMAL
 
 
 def _open_outage(state: BrainState) -> None:
@@ -89,7 +90,8 @@ def transition_mode(state: BrainState, reason: str, new_mode: BrainMode) -> list
 
 
 def on_registry(state: BrainState) -> list[Effect]:
-    if state.mode is BrainMode.WARMUP and state.guardian_heard:
+    guardian_optional = bool(_modes(state).get("guardian_optional", False))
+    if state.mode is BrainMode.WARMUP and (state.guardian_heard or guardian_optional):
         return transition_mode(state, "registry_loaded", BrainMode.NORMAL)
     return []
 
@@ -113,16 +115,20 @@ def on_reading(state: BrainState) -> list[Effect]:
     """An accepted reading: the Twin is alive, and the Guardian's lag can be checked."""
     effects = _rearm(state, TWIN_STALE_TIMER, TWIN_STALE_KIND,
                      float(_modes(state)["twin_stale_timeout_s"]))
+    guardian_optional = bool(_modes(state).get("guardian_optional", False))
     if state.mode is BrainMode.TWIN_DEGRADED:
         effects.extend(transition_mode(state, "twin_recovered", resting_mode(state)))
-    elif state.mode is BrainMode.NORMAL and not _lag_ok(state, "verdict_lag_degraded_s"):
+    elif state.mode is BrainMode.NORMAL and not guardian_optional and not _lag_ok(state, "verdict_lag_degraded_s"):
         _open_outage(state)
         effects.extend(transition_mode(state, "verdict_lag", BrainMode.GUARDIAN_DEGRADED))
     return effects
 
 
 def on_timer(state: BrainState, timer: TimerFired) -> list[Effect]:
+    guardian_optional = bool(_modes(state).get("guardian_optional", False))
     if timer.kind == GUARDIAN_HB_KIND:
+        if guardian_optional:
+            return []
         _open_outage(state)
         if state.mode in (BrainMode.WARMUP, BrainMode.NORMAL):
             return transition_mode(state, "guardian_silent", BrainMode.GUARDIAN_DEGRADED)

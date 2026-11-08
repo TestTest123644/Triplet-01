@@ -59,14 +59,20 @@ def run_mode(ctx: ScenarioContext, mode: str) -> bool:
     # Record injection sim time before injecting attack
     inj_sim_time = ctx.get_sim_time_seconds()
 
+    inj_params = {"link_mode": mode}
+    if mode == "delay":
+        inj_params["delay_ticks"] = 50
+
     inj_res = ctx.rest.inject_event({
         "capability": "link",
         "target_device_id": "z3-tc1",
-        "params": {"link_mode": mode},
+        "params": inj_params,
     })
     attack_id = inj_res.get("attack_id") or inj_res.get("event_id")
     ctx.log_event("", "scenario", "inject_attack", {"attack_id": attack_id, "mode": mode, "response": inj_res})
     ctx.record_check(f"link_attack_injected_{mode}", bool(attack_id), f"attack_id: {attack_id}")
+    if not attack_id:
+        return ctx.finish()
 
     pub_key = ctx.mcp.get_device_key("z3-tc1")
 
@@ -148,19 +154,24 @@ def run_mode(ctx: ScenarioContext, mode: str) -> bool:
         deadline_sim = start_sim + sim_duration
         wall_safety = time.time() + 20.0
         while True:
-            frames = ctx.wire.drain(max_seconds=0.5)
+            frames = ctx.wire.drain(max_seconds=0.2)
             for _, p in frames:
                 t = _parse_ts(p.get("ts", ""))
                 if t > head_ts:
                     head_ts = t
                 if p.get("device_id") == "z3-tc1":
                     tc1_ts = t
-            if head_ts > 0 and tc1_ts > 0 and (head_ts - tc1_ts) >= 1.0:
-                lag_detected = True
+                    if head_ts > 0:
+                        lag = (head_ts - tc1_ts) / max(0.1, ctx.sim_speed)
+                        if 4.0 <= lag <= 7.0:
+                            lag_detected = True
+                            break
+            if lag_detected:
                 break
             if ctx.get_sim_time_seconds() >= deadline_sim or time.time() >= wall_safety:
                 break
-        ctx.record_check("z3_tc1_frame_ts_lags_stream_head", lag_detected, f"head_ts - tc1_ts = {head_ts - tc1_ts:.2f}s")
+        measured_lag = ((head_ts - tc1_ts) / max(0.1, ctx.sim_speed)) if (head_ts > 0 and tc1_ts > 0) else 0.0
+        ctx.record_check("z3_tc1_frame_ts_lags_stream_head", lag_detected, f"head_ts - tc1_ts = {measured_lag:.2f}s")
 
         print(f"[{ctx.scenario_id}] [delay] Waiting for Guardian late frame detection and isolation...")
         entry = ctx.wait_for_journal(

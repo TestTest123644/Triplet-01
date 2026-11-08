@@ -97,8 +97,9 @@ def get_secret(name: str) -> Optional[str]:
     # Tier 3: Environment variable <NAME>
     if name in os.environ:
         val = os.environ[name]
-        logger.debug(f"Secret '{name}' resolved from environment variable '{name}'")
-        return val
+        if val != "":
+            logger.debug(f"Secret '{name}' resolved from environment variable '{name}'")
+            return val
 
     return None
 
@@ -141,6 +142,13 @@ def reload_secrets(sim: Optional[Any] = None, streamer: Optional[Any] = None) ->
             results["KAFKA_PASSWORD"] = "changed"
         else:
             results["KAFKA_PASSWORD"] = "unchanged"
+
+    # 4. Vault Keys reload
+    try:
+        from twin.vault_keys import reload_vault_keys
+        results["VAULT_KEYS"] = reload_vault_keys()
+    except Exception as e:
+        results["VAULT_KEYS"] = f"error: {e}"
 
     now_wall = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
     now_sim = sim.get_sim_time() if sim is not None else now_wall

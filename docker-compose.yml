@@ -37,26 +37,40 @@ services:
       kafka:
         condition: service_healthy
     environment:
-      KAFKA_BOOTSTRAP_SERVERS: "kafka:9092"
-      KAFKA_TOPIC: "twin.sensors"
+      KAFKA_BOOTSTRAP_SERVERS: "${KAFKA_BOOTSTRAP_SERVERS:-kafka:9092}"
+      KAFKA_TOPIC: "${KAFKA_TOPIC:-twin.sensors}"
+      KAFKA_SECURITY_PROTOCOL: "${KAFKA_SECURITY_PROTOCOL:-PLAINTEXT}"
+      KAFKA_SASL_MECHANISM: "${KAFKA_SASL_MECHANISM:-PLAIN}"
+      KAFKA_USERNAME: "${KAFKA_USERNAME:-}"
+      KAFKA_PASSWORD_FILE: "${KAFKA_PASSWORD_FILE:-}"
+      KAFKA_SSL_CA_LOCATION: "${KAFKA_SSL_CA_LOCATION:-}"
+      KAFKA_ACKS: "${KAFKA_ACKS:-all}"
+      KAFKA_BROKER_ADDRESS_FAMILY: "${KAFKA_BROKER_ADDRESS_FAMILY:-any}"
+      WAIT_FOR_KAFKA: "${WAIT_FOR_KAFKA:-true}"
       MCP_HOST: "0.0.0.0"
       MCP_PORT: "8000"
       MCP_AUTH_TOKENS: "${MCP_AUTH_TOKENS:-}"
       MCP_AUTH_TOKENS_FILE: "${MCP_AUTH_TOKENS_FILE:-}"
       RED_TEAM_HOST: "0.0.0.0"
       RED_TEAM_PORT: "8100"
-      WAIT_FOR_KAFKA: "true"
       SIM_SEED: "42"
       SIM_SPEED: "${SIM_SPEED:-1}"
       GROUND_TRUTH_DB_PATH: "/app/data/ground_truth.db"
       RED_TEAM_TOKEN_FILE: "/app/data/red_team.token"
       KEYSTORE_PATH: "/app/keys/device_keys.json"
+      VAULT_ADDR: "${VAULT_ADDR:-}"
+      VAULT_NAMESPACE: "${VAULT_NAMESPACE:-}"
+      VAULT_ROLE_ID_FILE: "${VAULT_ROLE_ID_FILE:-}"
+      VAULT_SECRET_ID_FILE: "${VAULT_SECRET_ID_FILE:-}"
+      VAULT_CACERT: "${VAULT_CACERT:-}"
+      VAULT_REFRESH_SECONDS: "${VAULT_REFRESH_SECONDS:-}"
     volumes:
       - shared_data:/app/data
       - twin_keys:/app/keys
+      - ${TWIN_SECRETS_DIR:-./secrets}:/app/secrets:ro
     ports:
-      - "8000:8000"  # MCP command server (JSON-RPC over HTTP/SSE)
-      - "8100:8100"  # Red-team adversary REST API
+      - "${TWIN_MCP_HOST_PORT:-8000}:8000"  # MCP command server (JSON-RPC over HTTP/SSE)
+      - "${TWIN_RED_TEAM_HOST_PORT:-8100}:8100"  # Red-team adversary REST API
     networks:
       - city_network
     restart: unless-stopped
@@ -75,10 +89,46 @@ services:
       TWIN_API_URL: "http://twin_layer:8100"
       MCP_URL: "http://twin_layer:8000"
       RED_TEAM_TOKEN_FILE: "/app/data/red_team.token"
+      TIMELINE_LOG_DIR: "${TIMELINE_LOG_DIR:-}"
     ports:
-      - "8501:8501"  # Streamlit operations console
+      - "${TWIN_CONSOLE_HOST_PORT:-8501}:8501"  # Streamlit operations console
     volumes:
       - shared_data:/app/data
+      - timeline_logs:/app/timeline_logs
+    networks:
+      - city_network
+    restart: unless-stopped
+
+  # Optional partner verdict collector (Guardian/Brain) for timeline correlation
+  verdict-collector:
+    build:
+      context: ./twin
+      dockerfile: Dockerfile
+    container_name: twin_verdict_collector
+    profiles:
+      - verdicts
+    command: python3 -m console.verdict_collector
+    depends_on:
+      - twin_layer
+    environment:
+      GROUND_TRUTH_DB_PATH: "/app/data/ground_truth.db"
+      TIMELINE_LOG_DIR: "${TIMELINE_LOG_DIR:-/app/timeline_logs}"
+      VERDICT_TOPIC: "${VERDICT_TOPIC:-}"
+      VERDICT_LAYER: "${VERDICT_LAYER:-guardian}"
+      VERDICT_KAFKA_BOOTSTRAP_SERVERS: "${VERDICT_KAFKA_BOOTSTRAP_SERVERS:-${KAFKA_BOOTSTRAP_SERVERS:-kafka:9092}}"
+      VERDICT_KAFKA_SECURITY_PROTOCOL: "${VERDICT_KAFKA_SECURITY_PROTOCOL:-${KAFKA_SECURITY_PROTOCOL:-PLAINTEXT}}"
+      VERDICT_KAFKA_SASL_MECHANISM: "${VERDICT_KAFKA_SASL_MECHANISM:-${KAFKA_SASL_MECHANISM:-PLAIN}}"
+      VERDICT_KAFKA_USERNAME: "${VERDICT_KAFKA_USERNAME:-${KAFKA_USERNAME:-}}"
+      VERDICT_KAFKA_PASSWORD_FILE: "${VERDICT_KAFKA_PASSWORD_FILE:-${KAFKA_PASSWORD_FILE:-}}"
+      VERDICT_KAFKA_PASSWORD: "${VERDICT_KAFKA_PASSWORD:-${KAFKA_PASSWORD:-}}"
+      VERDICT_KAFKA_SSL_CA_LOCATION: "${VERDICT_KAFKA_SSL_CA_LOCATION:-${KAFKA_SSL_CA_LOCATION:-}}"
+      VERDICT_KAFKA_BROKER_ADDRESS_FAMILY: "${VERDICT_KAFKA_BROKER_ADDRESS_FAMILY:-${KAFKA_BROKER_ADDRESS_FAMILY:-any}}"
+      VERDICT_GROUP_ID: "${VERDICT_GROUP_ID:-twin-verdict-collector}"
+      VERDICT_OFFSET_RESET: "${VERDICT_OFFSET_RESET:-latest}"
+    volumes:
+      - shared_data:/app/data:ro
+      - timeline_logs:/app/timeline_logs
+      - ${TWIN_SECRETS_DIR:-./secrets}:/app/secrets:ro
     networks:
       - city_network
     restart: unless-stopped
@@ -123,9 +173,11 @@ services:
 
 networks:
   city_network:
-    name: city_network
+    name: ${TRIPLET_NETWORK:-city_network}
     driver: bridge
+    external: ${TRIPLET_NETWORK_EXTERNAL:-false}
 
 volumes:
   shared_data:
   twin_keys:
+  timeline_logs:

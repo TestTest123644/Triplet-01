@@ -251,7 +251,7 @@ def test_the_triplet_config_names_the_partner_topics(tmp_path):
     runtime = build_triplet_runtime(
         config, twin=object(), journal_path=None, guardian_key="x" * 44,
         log=JsonlLog(tmp_path / "wired.jsonl"))
-    assert runtime.source.topics == ["guardian.events", "guardian.verdicts", "twin.sensors"]
+    assert runtime.source.topics == ["guardian.events", "guardian.verdicts", "telemetry-ingest"]
     assert runtime.sink.topic == "brain.events"
 
 

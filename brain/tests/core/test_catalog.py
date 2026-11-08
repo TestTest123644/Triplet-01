@@ -267,3 +267,12 @@ def test_the_same_readings_give_the_same_commands():
     second = congested(calm_city())
     assert [(c.capability, c.target, c.state) for c in sends(first)] == [
         (c.capability, c.target, c.state) for c in sends(second)]
+
+
+def test_triplet_policy_sheds_load_first_for_grid_stress():
+    from city_brain.config import load_config
+    triplet_cfg = load_config("config/triplet.yaml")
+    steps = triplet_cfg.policy["catalog"]["GRID_STRESS"]["steps"]
+    assert steps[0]["state"] == "shed", "twin overload clear requires load shedding first"
+    assert steps[1]["state"] == "secondary"
+

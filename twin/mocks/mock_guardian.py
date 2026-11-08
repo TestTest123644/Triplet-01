@@ -31,7 +31,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 from cryptography.hazmat.primitives.asymmetric import ed25519
 
-from mocks.mcp_client import McpCaller, run_sync
+from mocks.mcp_client import McpCaller, run_sync, resolve_mock_token
 from mocks.reading_source import KafkaSource, QueueSource, ReadingSource
 
 logger = logging.getLogger("mock_guardian")
@@ -502,10 +502,11 @@ def main():
 
     gid = args.group_id or f"mock-guardian-{os.getpid()}-{int(time.time()*1000)}"
     source = KafkaSource(bootstrap_servers=args.kafka_bootstrap, group_id=gid)
+    token = resolve_mock_token("guardian", args.mcp_token)
     guardian = MockGuardian(
         reading_source=source,
         mcp_url=args.mcp_url,
-        mcp_token=args.mcp_token,
+        mcp_token=token,
         log_file=args.log_file,
     )
     if args.live:

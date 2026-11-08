@@ -11,6 +11,7 @@ Every partner is injected, so the loop can be driven without a broker or a Twin.
 import asyncio
 import contextlib
 import time
+import os
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -27,8 +28,8 @@ from city_brain.persistence.journal import SqliteJournal
 from city_brain.runtime.app import BrainApp
 from city_brain.runtime.clocks import RealClock
 
-REST_PORT = 8100
-MCP_PORT = 8110
+REST_PORT = int(os.getenv("BRAIN_REST_PORT", os.getenv("BRAIN__REST_PORT", "8200")))
+MCP_PORT = int(os.getenv("BRAIN_MCP_PORT", os.getenv("BRAIN__MCP_PORT", "8110")))
 PROFILES = Path(__file__).resolve().parents[3] / "profiles"
 SCHEMA_DIR = Path(__file__).resolve().parents[3] / "schemas"
 
@@ -65,6 +66,10 @@ class TripletRuntime:
             await self.app.submit_raw(stream, raw)
         # Only now: the Brain has journalled and acted on them, so the offsets may move.
         self.source.commit()
+        if self.sink is not None:
+            flush = getattr(self.sink, "flush", None)
+            if flush is not None:
+                flush(0.0)
         await self._fire_timers()
         self.pumped += 1
         return len(batch)
@@ -125,12 +130,18 @@ def build_triplet_runtime(
         public_key_b64=guardian_key or _guardian_key(config))
     keyring, registry = KeyRing(), {}
     twin = twin if twin is not None else McpTwinClient(
-        config.twin.mcp_url, timeout_s=config.twin.call_timeout_s)
+        config.twin.mcp_url,
+        timeout_s=config.twin.call_timeout_s,
+        auth_token=config.twin.resolve_auth_token(),
+    )
     topics = dict(config.kafka.topics) or {
         "readings": "twin.sensors", "verdicts": "guardian.verdicts", "events": "guardian.events"}
+    security_cfg = config.kafka.client_security_config()
     source = source if source is not None else KafkaSource(
-        config.kafka.bootstrap, config.kafka.group, topics)
-    sink = sink if sink is not None else KafkaSink(config.kafka.bootstrap)
+        config.kafka.bootstrap, config.kafka.group, topics,
+        offset_reset=config.kafka.offset_reset, security_config=security_cfg)
+    sink = sink if sink is not None else KafkaSink(
+        config.kafka.bootstrap, security_config=security_cfg, acks=config.kafka.acks)
     timers: asyncio.Queue = asyncio.Queue()
     journal = SqliteJournal(journal_path) if journal_path is not None else None
     app = BrainApp(

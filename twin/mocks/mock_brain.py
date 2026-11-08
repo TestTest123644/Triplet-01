@@ -30,7 +30,7 @@ import sys
 import time
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
-from mocks.mcp_client import McpCaller, run_sync
+from mocks.mcp_client import McpCaller, run_sync, resolve_mock_token
 from mocks.reading_source import KafkaSource, QueueSource, ReadingSource
 
 logger = logging.getLogger("mock_brain")
@@ -369,10 +369,11 @@ def main():
 
     gid = args.group_id or f"mock-brain-{os.getpid()}-{int(time.time()*1000)}"
     source = KafkaSource(bootstrap_servers=args.kafka_bootstrap, group_id=gid)
+    token = resolve_mock_token("brain", args.mcp_token)
     brain = MockCityBrain(
         reading_source=source,
         mcp_url=args.mcp_url,
-        mcp_token=args.mcp_token,
+        mcp_token=token,
         log_file=args.log_file,
     )
     if args.live:

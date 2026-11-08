@@ -11,6 +11,8 @@ This document provides the full reference specification for all 16 Model Context
   - SSE (Server-Sent Events) over HTTP: `http://localhost:8000/sse` (messages posted to `/messages/`)
   - Streamable HTTP: `http://localhost:8000/mcp`
 - Docker internal address: `http://twin_layer:8000/sse`
+- Authentication: When `MCP_AUTH_TOKENS` or `MCP_AUTH_TOKENS_FILE` is configured, calls require `Authorization: Bearer <token>`. Unauthorized MCP calls return HTTP 401 UNAUTHORIZED. When unset, access is open ("anonymous").
+- Kafka topics: The Twin never creates topics (`KAFKA_TOPIC` must already exist on the broker).
 
 ---
 
@@ -321,5 +323,87 @@ During reload:
 - Red-team API token swaps immediately after validating the reload request.
 - Kafka producer validates new credentials against the broker with a metadata probe before swapping; if authentication fails, the active producer is preserved and `"error: new credentials rejected by broker"` is reported. Message sequence continuity is maintained across successful swaps (`seq` numbers increment continuously).
 - Rotation events are written to the SQLite ledger `secret_rotations` table and visible via `GET /api/journal`.
+
+---
+
+## 6. Environment and Compose Configuration
+
+All runtime networking, authentication, and port bindings are configurable via environment variables without editing compose files.
+
+### Configuration reference
+
+| Variable | Default | Description |
+| :--- | :--- | :--- |
+| `KAFKA_BOOTSTRAP_SERVERS` | `kafka:9092` (`localhost:19092` host) | Comma-separated broker list (`h1:p,h2:p,h3:p`) |
+| `KAFKA_TOPIC` | `twin.sensors` | Telemetry topic name (must already exist; Twin does not create topics) |
+| `KAFKA_SECURITY_PROTOCOL` | `PLAINTEXT` | Broker protocol: `PLAINTEXT`, `SASL_PLAINTEXT`, `SASL_SSL` |
+| `KAFKA_SASL_MECHANISM` | `PLAIN` | SASL auth mechanism: `PLAIN`, `SCRAM-SHA-256`, `SCRAM-SHA-512` |
+| `KAFKA_USERNAME` | *(unset)* | SASL username (required when protocol is `SASL_*`) |
+| `KAFKA_PASSWORD_FILE` | *(unset)* | Path to file containing SASL password (48 hex chars from `openssl rand -hex 24`) |
+| `KAFKA_PASSWORD` | *(unset)* | SASL plaintext password (used if `KAFKA_PASSWORD_FILE` unset) |
+| `KAFKA_SSL_CA_LOCATION` | *(unset)* | Path to CA certificate file (optional for `SASL_SSL`) |
+| `KAFKA_ACKS` | `all` | Producer durability: `all` (with idempotence), `1`, or `0` |
+| `KAFKA_BROKER_ADDRESS_FAMILY` | `any` | Address family: `any`, `v4`, `v6` (use `v4` to suppress IPv6 connection refused logs) |
+| `WAIT_FOR_KAFKA` | `true` | Skip broker describe check on startup if `false` (useful under restrictive broker ACLs) |
+| `MCP_HOST` / `MCP_PORT` | `0.0.0.0` / `8000` | MCP server binding address |
+| `TWIN_MCP_HOST_PORT` | `8000` | Host port mapped to container port 8000 (MCP command server) |
+| `MCP_AUTH_TOKENS` | *(unset)* | Bearer tokens `principal:token,...` (off by default; callers logged as "anonymous") |
+| `MCP_AUTH_TOKENS_FILE` | *(unset)* | Path to file containing bearer tokens (takes priority over `MCP_AUTH_TOKENS`) |
+| `RED_TEAM_PORT` | `8100` | Dedicated red-team attack injection REST port |
+| `TWIN_RED_TEAM_HOST_PORT` | `8100` | Host port mapped to container port 8100 (Red Team REST API) |
+| `TWIN_CONSOLE_HOST_PORT` | `8501` | Host port mapped to container port 8501 (Streamlit operations console) |
+| `RED_TEAM_TOKEN` | *(unset)* | Red-team API token literal |
+| `RED_TEAM_TOKEN_FILE` | *(unset)* | Path to red-team token file (compose writes to `/app/data/red_team.token`) |
+| `TWIN_SECRET_HOOK` | *(unset)* | Pluggable secret resolver `module:func` called as `func(name) -> str | None` |
+| `TWIN_SECRET_RELOAD_SECONDS` | *(unset)* | Periodic background reload interval in seconds (optional) |
+| `TRIPLET_NETWORK` | `city_network` | Docker bridge network name (e.g. `shared-backend` for Guardian) |
+| `TRIPLET_NETWORK_EXTERNAL` | `false` | Set `true` to connect to an existing external Docker network |
+| `TWIN_SECRETS_DIR` | `./secrets` | Host secrets directory mounted read-only to `/app/secrets:ro` (`../secrets` in `twin/`) |
+| `VAULT_ADDR` | *(unset)* | Vault cluster URL (e.g. `https://<cluster>.hashicorp.cloud:8200`; unset = disabled) |
+| `VAULT_NAMESPACE` | `admin` | Vault namespace header (default `admin`; empty string = no header) |
+| `VAULT_ROLE_ID_FILE` | *(unset)* | Path to AppRole Role ID file (e.g. `./secrets/vault_twin_role_id`; container `/app/secrets/vault_twin_role_id`) |
+| `VAULT_SECRET_ID_FILE` | *(unset)* | Path to AppRole Secret ID file (e.g. `./secrets/vault_twin_secret_id`; container `/app/secrets/vault_twin_secret_id`) |
+| `VAULT_CACERT` | *(unset)* | Path to custom CA bundle (unset = certifi or system default; verification never disabled) |
+| `VAULT_REFRESH_SECONDS` | `300` | Background key refresh interval in seconds (0 = disabled) |
+| `SIM_SPEED` | `1.0` | Simulation speed multiplier (pass `20.0` for scenarios) |
+
+### Path resolution: host vs container
+
+When configuring `KAFKA_PASSWORD_FILE`, `MCP_AUTH_TOKENS_FILE`, `VAULT_ROLE_ID_FILE`, or `VAULT_SECRET_ID_FILE`:
+- **Running on host (`python -m twin.main`):** Use the host relative or absolute path (e.g. `KAFKA_PASSWORD_FILE=./secrets/kafka_password`, `VAULT_ROLE_ID_FILE=./secrets/vault_twin_role_id`, `VAULT_SECRET_ID_FILE=./secrets/vault_twin_secret_id`).
+- **Running in Docker Compose:** The host directory `${TWIN_SECRETS_DIR:-./secrets}` is mounted to `/app/secrets:ro`. Configure the container-internal path (e.g. `KAFKA_PASSWORD_FILE=/app/secrets/kafka_password`, `VAULT_ROLE_ID_FILE=/app/secrets/vault_twin_role_id`, `VAULT_SECRET_ID_FILE=/app/secrets/vault_twin_secret_id`).
+
+### HashiCorp Vault Key Synchronization
+
+The Twin optionally fetches and maintains dynamic communication keys from HashiCorp Vault KV v2:
+- **Paths synchronized:** `comm/twin/guardian/private`, `comm/twin/brain/private`, `comm/guardian/twin/public`, `comm/brain/twin/public`.
+- **Formats supported:** PEM (`{"key": "<PEM>"}`) and kid (`{"kid", "private_key"|"public_key", "fingerprint", "active_after"}`).
+- **Key algorithms:** Automatically detects X25519, Ed25519, and RSA keys.
+- **Rotation:** Private keys with future `active_after` pick version-1; public keys preserve latest and previous versions.
+- **Status inspection:** Query `GET /api/status` for the `vault` metadata block.
+- **Traffic usage note:** Communication keys are fetched and kept fresh in memory but not yet used for any traffic encryption.
+
+---
+
+## 7. Behaviour Changes in Rework
+
+1. `get_device_state` and `get_city_state` return the last broadcast value, not physical truth.
+2. Actuation with unknown `target_state`, or on isolated/quarantined devices, returns structured error.
+3. Repeating an idempotency key returns cached output without re-executing.
+4. Public keys and sequence counters persist across restarts.
+5. Rogue messages reach `twin.sensors` wire topic.
+6. Red-team REST API moved to isolated port 8100.
+7. Zone 2 coordinates placed on land in La Goulette.
+8. MCP supports optional bearer auth and adds `/mcp` streamable HTTP transport alongside `/sse`.
+9. Root compose network named `city_network`.
+10. `get_reading` for missing ID returns `READING_NOT_FOUND` error object instead of null.
+11. `get_device_state` and `get_command_result` return structured errors instead of null. `get_device_key` returns null for unknown devices.
+12. Containment on rogue IDs blocks subsequent wire frames.
+13. `reinstate_device` and `release_device` both restore devices to status `ok`.
+14. Diurnal physical kinetics: power load peaks at mid-day, traffic peaks at rush hours, water valves affect water levels.
+15. Water level is continuous without artificial sensor jitter.
+16. Containment state persists across restarts.
+
+
 
 

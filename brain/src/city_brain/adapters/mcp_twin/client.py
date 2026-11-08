@@ -12,6 +12,7 @@ to the wrong command.
 
 import asyncio
 import json
+import logging
 from contextlib import AsyncExitStack
 from typing import Any
 
@@ -20,6 +21,8 @@ from mcp.client.sse import sse_client
 
 from city_brain.edge.profiles import ToolCall
 from city_brain.ports import CommandOutcome
+
+logger = logging.getLogger("city_brain.mcp_twin")
 
 REGISTRY_TOOLS = ("list_devices", "get_device_key", "get_city_state")
 RESULT_TOOL = "get_command_result"
@@ -44,9 +47,10 @@ def _content_to_json(result: Any) -> Any:
 class McpTwinClient:
     """Holds one MCP session to the Twin, reconnecting when it has been lost."""
 
-    def __init__(self, sse_url: str, timeout_s: float = 2.0):
+    def __init__(self, sse_url: str, timeout_s: float = 2.0, auth_token: str | None = None):
         self._url = sse_url
         self._timeout = timeout_s
+        self._auth_token = auth_token
         self._lock = asyncio.Lock()
         self._stack: AsyncExitStack | None = None
         self._session: ClientSession | None = None
@@ -57,9 +61,10 @@ class McpTwinClient:
         if self._session is not None:
             return
         stack = AsyncExitStack()
+        headers = {"Authorization": f"Bearer {self._auth_token}"} if self._auth_token else None
         try:
             read, write = await asyncio.wait_for(
-                stack.enter_async_context(sse_client(self._url)), timeout=self._timeout)
+                stack.enter_async_context(sse_client(self._url, headers=headers)), timeout=self._timeout)
             session = await stack.enter_async_context(ClientSession(read, write))
             await asyncio.wait_for(session.initialize(), timeout=self._timeout)
         except BaseException:
@@ -94,24 +99,39 @@ class McpTwinClient:
 
     # ----- TwinPort -----
 
-    async def load_registry(self) -> tuple[list[dict], dict[str, str], dict]:
-        devices = await self._call_tool("list_devices", {})
-        if isinstance(devices, dict):
-            devices = devices.get("devices", [])
-        if not isinstance(devices, list):
-            raise ValueError(f"list_devices did not return a list: {devices!r:.80}")
-        keys: dict[str, str] = {}
-        for device in devices:
-            device_id = device.get("device_id")
-            if device_id is None:
-                continue
-            key = await self._call_tool("get_device_key", {"device_id": device_id})
-            if isinstance(key, dict):
-                key = key.get("public_key") or key.get("key")
-            if isinstance(key, str):
-                keys[device_id] = key
-        city = await self._call_tool("get_city_state", {})
-        return devices, keys, city if isinstance(city, dict) else {}
+    async def load_registry(self, max_retries: int = 5, retry_delay_s: float = 1.0) -> tuple[list[dict], dict[str, str], dict]:
+        last_exc: Exception | None = None
+        for attempt in range(max_retries):
+            try:
+                devices = await self._call_tool("list_devices", {})
+                if isinstance(devices, dict):
+                    devices = devices.get("devices", [])
+                if not isinstance(devices, list):
+                    raise ValueError(f"list_devices did not return a list: {devices!r:.80}")
+                keys: dict[str, str] = {}
+                for device in devices:
+                    device_id = device.get("device_id")
+                    if device_id is None:
+                        continue
+                    key = await self._call_tool("get_device_key", {"device_id": device_id})
+                    if isinstance(key, dict):
+                        key = key.get("public_key") or key.get("key")
+                    if isinstance(key, str):
+                        keys[device_id] = key
+                city = await self._call_tool("get_city_state", {})
+                return devices, keys, city if isinstance(city, dict) else {}
+            except Exception as exc:
+                last_exc = exc
+                if attempt == max_retries - 1:
+                    break
+                logger.warning(
+                    "Failed to connect or fetch registry from Twin MCP at %s (%s). Retrying in %.1fs (attempt %d/%d)...",
+                    self._url, exc, retry_delay_s, attempt + 1, max_retries,
+                )
+                await asyncio.sleep(retry_delay_s)
+        if last_exc is not None:
+            raise last_exc
+        raise RuntimeError("failed to load registry")
 
     async def call(self, tool_call: ToolCall, idempotency_key: str) -> CommandOutcome:
         args = {**tool_call.args, "idempotency_key": idempotency_key}

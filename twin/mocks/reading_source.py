@@ -59,9 +59,10 @@ class KafkaSource(ReadingSource):
         try:
             import confluent_kafka
             try:
-                from mocks.kafka_config import kafka_client_config
+                from mocks.kafka_config import get_broker_address_family, kafka_client_config
             except ImportError:
-                from .kafka_config import kafka_client_config
+                from .kafka_config import get_broker_address_family, kafka_client_config
+            address_family = get_broker_address_family()
             sasl_conf = kafka_client_config()
 
             consumer_conf = {
@@ -69,6 +70,7 @@ class KafkaSource(ReadingSource):
                 "group.id": group_id,
                 "auto.offset.reset": "latest",
                 "enable.auto.commit": True,
+                "broker.address.family": address_family,
             }
             consumer_conf.update(sasl_conf)
             self.consumer = confluent_kafka.Consumer(consumer_conf)

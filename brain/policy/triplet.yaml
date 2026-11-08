@@ -1,0 +1,136 @@
+water:
+  planner: mpc              # mpc (capability tier T2) or t0 (bang-bang, tier T0)
+  high_band: 6.0
+  low_band: 3.0
+  critical_band: 9.0
+  horizon_s: 60.0           # how far ahead the containment exception looks (spec 8.7)
+  close_sustain_s: 5.0
+  evidence_count: 3
+  mpc:                      # enumerative model predictive control (spec 8.5, 10.3)
+    candidates: [0, 20, 33, 50, 75, 100]
+    target: 4.0
+    lambda_change: 8.0      # the cost of moving the valve at all
+    mu_high: 2000.0         # the cost of sitting above the high band: a flood is the hazard
+    mu_low: 50.0            # below the low band only wastes the drain
+    horizon_s: 60.0           # the fine horizon, in step_s steps
+    step_s: 1.0
+    tail_s: 600.0             # a coarse tail, so a position is judged by where it settles
+    tail_step_s: 10.0
+    replan_s: 1.0
+    tolerance: 0.012        # m/s of slack the expected effect allows
+    open_window_s: 3.0
+    close_window_s: 5.0
+    close_sustain_s: 5.0    # trusted data a closing move needs behind it
+detectors:
+  water:
+    rising_rate: 0.005        # m/s above which a channel counts as rising
+    forecast_s: 60.0          # how far ahead RISING looks
+  traffic:
+    anomaly_z: 4.0            # rolling z-score of the measured flow
+    anomaly_level: 140.0      # veh/min, both conditions must hold
+  power:
+    load_high: 105.0          # MW (midday peaks near 100 MW by design; true overload is >105 MW)
+  air_quality:
+    aqi_high: 150.0
+    traffic_lag_s: 5.0        # the zone's AQI follows its cameras by this much
+    traffic_rise: 1.0         # veh/min per s that counts as traffic having risen
+  calls:
+    surge_factor: 3.0         # times the rolling baseline mean
+    surge_min: 4.0            # calls/min, both conditions must hold
+assessor:                   # log-odds evidence model (spec 8.3.2)
+  prior:                    # log-odds of an incident kind before any finding
+    FLOOD_RISK: -2.0
+    CONGESTION: -2.0
+    GRID_STRESS: -2.0
+    AIR_QUALITY: -2.0
+    CALL_SURGE: -2.0
+  log_lr:                   # one finding's weight in log-odds, before trust and score
+    LEVEL_HIGH: 3.2
+    LEVEL_CRITICAL: 6.0
+    RISING: 1.2
+    FLOW_ANOMALY: 2.6
+    FLOW_NORMAL: 2.6
+    LOAD_HIGH: 4.5
+    LOAD_JUMP: 1.0
+    AQI_HIGH: 5.0
+    AQ_TRAFFIC_COUPLED: 1.4
+    CALL_SURGE: 5.0
+  trust_exponent: 2.0       # a doubtful source carries doubtful information, not half of it
+  correlation_bonus: 1.0    # a CONFIRMED correlation is itself evidence; the others are not
+  validated_trust: 0.9      # trust at or above this counts as VALIDATED for a correlation
+  open_belief: 0.4
+  confirm_belief: 0.8
+  close_belief: 0.3
+  confirm_sustain_s: 5.0    # single-sensor domains must hold the belief this long to confirm
+  reopen_cooldown_s: 10.0
+  severity:                 # belief at or above each bound
+    medium: 0.5
+    high: 0.7
+    critical: 0.9
+  single_sensor_kinds: [GRID_STRESS, CALL_SURGE, AIR_QUALITY]
+  couplings:                # kind pairs the city's physics links (spec 8.3.4)
+    - [TRAFFIC_FLOW, TRAFFIC_FLOW]
+    - [AIR_QUALITY, TRAFFIC_FLOW]
+verification:
+  open_rate_max: -0.01
+  open_window_s: 3.0
+  close_rate_min: 0.005
+  close_window_s: 15.0
+catalog:                    # the declarative response table (spec 8.5)
+  CONGESTION:
+    steps:
+      - {capability: signal, state: boost, risk: R1, window_s: 20.0, comparator: ">=", per_s: 0.25}
+      - {capability: dispatch, state: traffic_accident, risk: R2, window_s: 30.0,
+         comparator: "<=", per_s: -0.02}
+    escalate_with: [CALL_SURGE]   # another live incident that skips straight to the next step
+  AIR_QUALITY:
+    steps:
+      - {capability: signal, state: restrict, risk: R1, window_s: 20.0, comparator: "<=", per_s: -0.25}
+  GRID_STRESS:
+    steps:
+      - {capability: grid, state: shed, risk: R2, window_s: 15.0, comparator: "<=", per_s: -0.333}
+      - {capability: grid, state: secondary, risk: R2, window_s: 15.0, comparator: "<=", per_s: -0.333}
+  CALL_SURGE:
+    steps:
+      - {capability: dispatch, state: medical_surge, risk: R2, window_s: 30.0,
+         comparator: "<=", per_s: -0.02}
+  FLOOD_RISK:
+    requires_finding: LEVEL_CRITICAL   # the valve is the water planner's job; this is the callout
+    requires_valve_open: true
+    steps:
+      - {capability: dispatch, state: flood, risk: R2, window_s: 30.0, comparator: "<=", per_s: -0.02}
+approvals:
+  wait_s: 60.0              # how long an R3 waits for an operator before it is blocked
+shield:
+  zone_capabilities: [dispatch]   # these act on a zone, not on one device
+  cooldown_s:
+    valve: 5.0
+    signal: 20.0
+    grid: 15.0
+    dispatch: 120.0
+  rate_limit:
+    burst: 8
+    per_s: 2.0
+trust:
+  verdict_wait_s: 2.0
+  pending_weight: 0.5
+  implicit_ok: true         # if no explicit verdict arrives, healthy devices (status=ok) are trusted
+  caps:
+    TRUSTED: 1.0
+    DOUBTFUL: 0.5
+    UNTRUSTED: 0.0
+    UNKNOWN: 0.0
+modes:
+  guardian_optional: true   # don't degrade when guardian doesn't publish heartbeats
+  guardian_heartbeat_timeout_s: 5.0
+  verdict_lag_degraded_s: 3.0
+  verdict_lag_recover_s: 1.0
+  recover_sustain_s: 5.0
+  twin_stale_timeout_s: 2.0
+  safe_baseline_r1: false
+epochs:
+  seq_drop: 100
+  ts_back_s: 60
+  confirm_devices: 5
+  confirm_ticks: 20
+  seq_jump_max: 6000

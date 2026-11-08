@@ -77,6 +77,22 @@ When a new Kafka password is provided during reload, the Twin executes a safety 
 3. If the check succeeds, the candidate producer is swapped in and the old producer is drained.
 4. If the check fails or times out, the candidate producer is immediately discarded, the existing producer remains active without dropping messages, and the reload endpoint reports an error without leaking secret values.
 
+### HashiCorp Vault Communication Key Synchronization
+The Twin Layer can optionally synchronize dynamic inter-layer communication keys directly from HashiCorp Vault KV v2 via AppRole authentication:
+- **Paths synchronized:**
+  - `comm/twin/guardian/private`
+  - `comm/twin/brain/private`
+  - `comm/guardian/twin/public`
+  - `comm/brain/twin/public`
+- **Configuration:** Set `VAULT_ADDR="https://<cluster>.hashicorp.cloud:8200"`, `VAULT_ROLE_ID_FILE=/app/secrets/vault_twin_role_id`, and `VAULT_SECRET_ID_FILE=/app/secrets/vault_twin_secret_id` (host: `secrets/...`).
+- **Formats supported:**
+  - `pem-key`: Standard PEM payload format `{"key": "<PEM>"}`.
+  - `kid`: Future rotating format `{"kid": "...", "private_key"|"public_key": "<PEM>", "fingerprint": "<sha256 hex>", "active_after": "..."}`.
+- **Algorithm detection:** Automatically detects key types via standard `cryptography` primitives (`X25519`, `Ed25519`, `RSA-<bits>`).
+- **Rotation discipline:** For `kid` format private keys, if `active_after` is in the future, the Twin uses `version-1` as the active key. For public keys, both latest and previous versions are retained in memory.
+- **Traffic usage note:** Communication keys are fetched and refreshed in background memory, but not yet used for traffic encryption.
+- **Inspection:** Live metadata (path, version, algorithm, kid, last_refresh_wall, last_error) is exposed at `GET /api/status` under the `vault` key.
+
 ---
 
 ## 3. Containment Persistence Across Restarts
