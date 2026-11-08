@@ -88,6 +88,19 @@ KAFKA_PASSWORD_FILE=/app/secrets/kafka_password \
 docker compose up -d
 ```
 
+#### (c) Scenario runner from host against Guardian cluster
+
+```bash
+export KAFKA_BOOTSTRAP_SERVERS=localhost:29094,localhost:29095,localhost:29096
+export KAFKA_TOPIC=telemetry-ingest
+export SCENARIO_KAFKA_SECURITY_PROTOCOL=SASL_PLAINTEXT
+export SCENARIO_KAFKA_USERNAME=<a user with Read on the topic and on group prefix scenario-runner>
+export SCENARIO_KAFKA_PASSWORD_FILE=secrets/<file>
+python3 scenarios/run_all.py --partners
+```
+
+The Twin's user `twin` is write-only on that cluster, so the cluster owner must grant a reader (topic Read + Describe, group prefix Read).
+
 If the Brain runs on the same host, set `TWIN_RED_TEAM_HOST_PORT` (default 8100) and `TWIN_MCP_HOST_PORT` (default 8000) to prevent port collisions.
 
 ---
