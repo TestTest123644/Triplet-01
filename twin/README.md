@@ -101,6 +101,20 @@ python3 scenarios/run_all.py --partners
 
 The Twin's user `twin` is write-only on that cluster, so the cluster owner must grant a reader (topic Read + Describe, group prefix Read).
 
+#### (d) Partner verdicts on the timeline
+
+```bash
+export VERDICT_TOPIC=<guardian verdict topic>
+export VERDICT_KAFKA_BOOTSTRAP_SERVERS=localhost:29094,localhost:29095,localhost:29096
+export VERDICT_KAFKA_SECURITY_PROTOCOL=SASL_PLAINTEXT
+export VERDICT_KAFKA_USERNAME=<user with Read on that topic and group>
+export VERDICT_KAFKA_PASSWORD_FILE=secrets/<file>
+export TIMELINE_LOG_DIR=$PWD/logs/partners
+cd twin && python3 -m console.verdict_collector
+```
+
+The operations console dashboard must be started with the same `TIMELINE_LOG_DIR` to display the correlated partner verdicts alongside Twin telemetry and MCP actuations.
+
 If the Brain runs on the same host, set `TWIN_RED_TEAM_HOST_PORT` (default 8100) and `TWIN_MCP_HOST_PORT` (default 8000) to prevent port collisions.
 
 ---

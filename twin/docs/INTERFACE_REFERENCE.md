@@ -343,18 +343,27 @@ All runtime networking, authentication, and port bindings are configurable via e
 | `KAFKA_ACKS` | `all` | Producer durability: `all` (with idempotence), `1`, or `0` |
 | `KAFKA_BROKER_ADDRESS_FAMILY` | `any` | Address family: `any`, `v4`, `v6` (use `v4` to suppress IPv6 connection refused logs) |
 | `WAIT_FOR_KAFKA` | `true` | Skip broker describe check on startup if `false` (useful under restrictive broker ACLs) |
+| `MCP_HOST` / `MCP_PORT` | `0.0.0.0` / `8000` | MCP server binding address |
+| `TWIN_MCP_HOST_PORT` | `8000` | Host port mapped to container port 8000 (MCP command server) |
+| `MCP_AUTH_TOKENS` | *(unset)* | Bearer tokens `principal:token,...` (off by default; callers logged as "anonymous") |
+| `MCP_AUTH_TOKENS_FILE` | *(unset)* | Path to file containing bearer tokens (takes priority over `MCP_AUTH_TOKENS`) |
+| `RED_TEAM_PORT` | `8100` | Dedicated red-team attack injection REST port |
+| `TWIN_RED_TEAM_HOST_PORT` | `8100` | Host port mapped to container port 8100 (Red Team REST API) |
+| `TWIN_CONSOLE_HOST_PORT` | `8501` | Host port mapped to container port 8501 (Streamlit operations console) |
+| `RED_TEAM_TOKEN` | *(unset)* | Red-team API token literal |
+| `RED_TEAM_TOKEN_FILE` | *(unset)* | Path to red-team token file (compose writes to `/app/data/red_team.token`) |
+| `TWIN_SECRET_HOOK` | *(unset)* | Pluggable secret resolver `module:func` called as `func(name) -> str | None` |
+| `TWIN_SECRET_RELOAD_SECONDS` | *(unset)* | Periodic background reload interval in seconds (optional) |
 | `TRIPLET_NETWORK` | `city_network` | Docker bridge network name (e.g. `shared-backend` for Guardian) |
 | `TRIPLET_NETWORK_EXTERNAL` | `false` | Set `true` to connect to an existing external Docker network |
 | `TWIN_SECRETS_DIR` | `./secrets` | Host secrets directory mounted read-only to `/app/secrets:ro` (`../secrets` in `twin/`) |
-| `TWIN_MCP_HOST_PORT` | `8000` | Host port mapped to container port 8000 (MCP command server) |
-| `TWIN_RED_TEAM_HOST_PORT` | `8100` | Host port mapped to container port 8100 (Red Team REST API) |
-| `TWIN_CONSOLE_HOST_PORT` | `8501` | Host port mapped to container port 8501 (Streamlit operations console) |
 | `VAULT_ADDR` | *(unset)* | Vault cluster URL (e.g. `https://<cluster>.hashicorp.cloud:8200`; unset = disabled) |
 | `VAULT_NAMESPACE` | `admin` | Vault namespace header (default `admin`; empty string = no header) |
 | `VAULT_ROLE_ID_FILE` | *(unset)* | Path to AppRole Role ID file (e.g. `./secrets/vault_twin_role_id`; container `/app/secrets/vault_twin_role_id`) |
 | `VAULT_SECRET_ID_FILE` | *(unset)* | Path to AppRole Secret ID file (e.g. `./secrets/vault_twin_secret_id`; container `/app/secrets/vault_twin_secret_id`) |
 | `VAULT_CACERT` | *(unset)* | Path to custom CA bundle (unset = certifi or system default; verification never disabled) |
 | `VAULT_REFRESH_SECONDS` | `300` | Background key refresh interval in seconds (0 = disabled) |
+| `SIM_SPEED` | `1.0` | Simulation speed multiplier (pass `20.0` for scenarios) |
 
 ### Path resolution: host vs container
 
@@ -371,6 +380,28 @@ The Twin optionally fetches and maintains dynamic communication keys from HashiC
 - **Rotation:** Private keys with future `active_after` pick version-1; public keys preserve latest and previous versions.
 - **Status inspection:** Query `GET /api/status` for the `vault` metadata block.
 - **Traffic usage note:** Communication keys are fetched and kept fresh in memory but not yet used for any traffic encryption.
+
+---
+
+## 7. Behaviour Changes in Rework
+
+1. `get_device_state` and `get_city_state` return the last broadcast value, not physical truth.
+2. Actuation with unknown `target_state`, or on isolated/quarantined devices, returns structured error.
+3. Repeating an idempotency key returns cached output without re-executing.
+4. Public keys and sequence counters persist across restarts.
+5. Rogue messages reach `twin.sensors` wire topic.
+6. Red-team REST API moved to isolated port 8100.
+7. Zone 2 coordinates placed on land in La Goulette.
+8. MCP supports optional bearer auth and adds `/mcp` streamable HTTP transport alongside `/sse`.
+9. Root compose network named `city_network`.
+10. `get_reading` for missing ID returns `READING_NOT_FOUND` error object instead of null.
+11. `get_device_state` and `get_command_result` return structured errors instead of null. `get_device_key` returns null for unknown devices.
+12. Containment on rogue IDs blocks subsequent wire frames.
+13. `reinstate_device` and `release_device` both restore devices to status `ok`.
+14. Diurnal physical kinetics: power load peaks at mid-day, traffic peaks at rush hours, water valves affect water levels.
+15. Water level is continuous without artificial sensor jitter.
+16. Containment state persists across restarts.
+
 
 
 

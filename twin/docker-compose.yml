@@ -87,10 +87,45 @@ services:
       TWIN_API_URL: "http://twin_layer:8100"
       MCP_URL: "http://twin_layer:8000"
       RED_TEAM_TOKEN_FILE: "/app/data/red_team.token"
+      TIMELINE_LOG_DIR: "${TIMELINE_LOG_DIR:-}"
     ports:
       - "${TWIN_CONSOLE_HOST_PORT:-8501}:8501"  # Streamlit operations console
     volumes:
       - shared_data:/app/data
+      - timeline_logs:/app/timeline_logs
+    networks:
+      - twin_network
+    restart: unless-stopped
+
+  verdict-collector:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: twin_verdict_collector
+    profiles:
+      - verdicts
+    command: python3 -m console.verdict_collector
+    depends_on:
+      - twin_layer
+    environment:
+      GROUND_TRUTH_DB_PATH: "/app/data/ground_truth.db"
+      TIMELINE_LOG_DIR: "${TIMELINE_LOG_DIR:-/app/timeline_logs}"
+      VERDICT_TOPIC: "${VERDICT_TOPIC:-}"
+      VERDICT_LAYER: "${VERDICT_LAYER:-guardian}"
+      VERDICT_KAFKA_BOOTSTRAP_SERVERS: "${VERDICT_KAFKA_BOOTSTRAP_SERVERS:-${KAFKA_BOOTSTRAP_SERVERS:-kafka:9092}}"
+      VERDICT_KAFKA_SECURITY_PROTOCOL: "${VERDICT_KAFKA_SECURITY_PROTOCOL:-${KAFKA_SECURITY_PROTOCOL:-PLAINTEXT}}"
+      VERDICT_KAFKA_SASL_MECHANISM: "${VERDICT_KAFKA_SASL_MECHANISM:-${KAFKA_SASL_MECHANISM:-PLAIN}}"
+      VERDICT_KAFKA_USERNAME: "${VERDICT_KAFKA_USERNAME:-${KAFKA_USERNAME:-}}"
+      VERDICT_KAFKA_PASSWORD_FILE: "${VERDICT_KAFKA_PASSWORD_FILE:-${KAFKA_PASSWORD_FILE:-}}"
+      VERDICT_KAFKA_PASSWORD: "${VERDICT_KAFKA_PASSWORD:-${KAFKA_PASSWORD:-}}"
+      VERDICT_KAFKA_SSL_CA_LOCATION: "${VERDICT_KAFKA_SSL_CA_LOCATION:-${KAFKA_SSL_CA_LOCATION:-}}"
+      VERDICT_KAFKA_BROKER_ADDRESS_FAMILY: "${VERDICT_KAFKA_BROKER_ADDRESS_FAMILY:-${KAFKA_BROKER_ADDRESS_FAMILY:-any}}"
+      VERDICT_GROUP_ID: "${VERDICT_GROUP_ID:-twin-verdict-collector}"
+      VERDICT_OFFSET_RESET: "${VERDICT_OFFSET_RESET:-latest}"
+    volumes:
+      - shared_data:/app/data:ro
+      - timeline_logs:/app/timeline_logs
+      - ${TWIN_SECRETS_DIR:-../secrets}:/app/secrets:ro
     networks:
       - twin_network
     restart: unless-stopped
@@ -104,4 +139,5 @@ networks:
 volumes:
   shared_data:
   twin_keys:
+  timeline_logs:
 

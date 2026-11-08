@@ -382,7 +382,6 @@ class WireConsumer:
         self.config_error: Optional[str] = None
         self.creation_error: Optional[str] = None
         self.consumer_config: Optional[Dict[str, Any]] = None
-        self._preflight_buffer: List[Tuple[bytes, Dict[str, Any]]] = []
 
         if not self.queue_source:
             try:
@@ -411,7 +410,6 @@ class WireConsumer:
             except Exception:
                 pass
             self.consumer = None
-        self._preflight_buffer.clear()
         if not self.config_error and self.consumer_config:
             try:
                 import confluent_kafka
@@ -428,9 +426,6 @@ class WireConsumer:
 
     def poll(self, timeout: float = 1.0) -> Optional[Tuple[bytes, Dict[str, Any]]]:
         """Returns (raw_bytes, payload_dict) or None."""
-        if self._preflight_buffer:
-            return self._preflight_buffer.pop(0)
-
         if self.queue_source:
             raw = self.queue_source.get_reading(timeout=timeout)
             if raw is None:

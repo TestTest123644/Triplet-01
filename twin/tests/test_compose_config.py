@@ -188,3 +188,35 @@ def test_twin_compose_custom_environment():
         str(p.get("published")): p.get("target") for p in console_service["ports"]
     }
     assert console_ports.get("8510") == 8501
+
+
+def test_root_compose_verdicts_profile():
+    """Root docker-compose.yml with --profile verdicts includes verdict-collector service."""
+    repo_root = str(_find_repo_root())
+    cmd = ["docker", "compose", "-f", str(Path(repo_root) / "docker-compose.yml"), "--profile", "verdicts", "config", "--format", "json"]
+    proc = subprocess.run(cmd, cwd=repo_root, capture_output=True, text=True, check=True)
+    config = json.loads(proc.stdout)
+
+    assert "verdict-collector" in config["services"]
+    vc = config["services"]["verdict-collector"]
+    assert vc.get("command") == ["python3", "-m", "console.verdict_collector"] or vc.get("command") == "python3 -m console.verdict_collector"
+
+    # Verify ledger volume is mounted read-only
+    ro_vols = [v for v in vc.get("volumes", []) if v.get("target") == "/app/data" and v.get("read_only") is True]
+    assert len(ro_vols) == 1, "Expected /app/data to be mounted read-only"
+
+
+def test_twin_compose_verdicts_profile():
+    """twin/docker-compose.yml with --profile verdicts includes verdict-collector service."""
+    repo_root = str(_find_repo_root())
+    cmd = ["docker", "compose", "-f", str(Path(repo_root) / "twin" / "docker-compose.yml"), "--profile", "verdicts", "config", "--format", "json"]
+    proc = subprocess.run(cmd, cwd=repo_root, capture_output=True, text=True, check=True)
+    config = json.loads(proc.stdout)
+
+    assert "verdict-collector" in config["services"]
+    vc = config["services"]["verdict-collector"]
+    assert vc.get("command") == ["python3", "-m", "console.verdict_collector"] or vc.get("command") == "python3 -m console.verdict_collector"
+
+    ro_vols = [v for v in vc.get("volumes", []) if v.get("target") == "/app/data" and v.get("read_only") is True]
+    assert len(ro_vols) == 1, "Expected /app/data to be mounted read-only"
+

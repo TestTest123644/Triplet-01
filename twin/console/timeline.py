@@ -416,6 +416,12 @@ def build_timeline_rows(
         zone_id = details.get("zone_id") or extract_zone_from_device(dev_id, device_zone_map)
 
         if layer == "guardian" and event not in ("mock_started", "mock_stopped"):
+            reason_part = details.get("reason") or json.dumps(details)
+            src_tag = ""
+            if details.get("sim_ts_source") == "reading_id":
+                src_tag = " (sim time from reading_id)"
+            elif details.get("sim_ts_source") == "device_latest":
+                src_tag = " (sim time approximate)"
             rows.append(
                 TimelineRow(
                     row_id=f"log:guardian:{l_idx}",
@@ -424,7 +430,7 @@ def build_timeline_rows(
                     event_type="verdict",
                     device_id=dev_id,
                     zone_id=zone_id,
-                    summary=f"Guardian verdict: {event} ({details.get('reason') or json.dumps(details)})",
+                    summary=f"Guardian verdict: {event} ({reason_part}){src_tag}",
                     raw_json=log_record,
                 )
             )
