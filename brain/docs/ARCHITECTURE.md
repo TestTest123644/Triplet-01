@@ -971,12 +971,12 @@ guardian:{ profile: "profiles/guardian-triplet07.yaml", public_key_file: "/run/s
 policy:  { file: "policy/default.yaml", authorization_mode: "brain" }   # or "gate"
 params:  { file: "params/twin-triplet07-v1.yaml" }
 logs:    { dir: "../logs", sign: true }
-api:     { port: 8100, operator_token_env: "BRAIN_OPERATOR_TOKEN" }
+api:     { port: 8200, operator_token_env: "BRAIN_OPERATOR_TOKEN" }
 ```
 
 ### 14.3 Ports
 
-Twin: 19092 (Kafka external), 8000 (MCP), 8501 (Twin dashboard). Brain: 8100 (REST and metrics), 8110 (read-only MCP server), 8120 (timeline).
+Twin: 19092 (Kafka external), 8000 (MCP), 8501 (Twin dashboard). Brain: 8200 (REST and metrics, `BRAIN_REST_PORT`; host 8100 is the Twin's red-team API), 8110 (read-only MCP server), 8120 (timeline).
 
 ---
 
