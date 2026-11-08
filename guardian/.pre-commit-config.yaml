@@ -1,0 +1,30 @@
+repos:
+  - repo: local
+    hooks:
+      - id: ruff-format
+        name: Check Ruff format
+        entry: uv run ruff format --check .
+        language: system
+        pass_filenames: false
+      - id: ruff-lint
+        name: Check Ruff lint
+        entry: uv run ruff check .
+        language: system
+        pass_filenames: false
+
+      - id: tests
+        name: Run tests
+        entry: uv run pytest tests -v
+        language: system
+        pass_filenames: false
+
+  - repo: https://github.com/commitizen-tools/commitizen
+    rev: v4.10.0
+    hooks:
+      - id: commitizen
+        stages: [commit-msg]
+
+  - repo: https://github.com/efrecon/pre-commit-hook-branch-check
+    rev: v0.3.0
+    hooks:
+      - id: branch-check

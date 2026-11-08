@@ -1,0 +1,64 @@
+
+[project]
+name = "guardian-layer"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "numpy<2.2.0",
+    "cryptography>=50.0.2",
+    "httpx>=0.27,<1",
+    "psycopg[binary,pool]>=3.2,<4",
+    "pywavelets>=1.10.0",
+    "pydantic>=2.13.5",
+    "sqlalchemy>=2.0,<3",
+    "xgboost-cpu>=3.4.1",
+    "pydantic-settings[yaml]>=2.15.0",
+    "hvac>=2.4.0",
+    "apache-flink==2.3.0",
+    "fastmcp>=4.1.4",
+    "confluent-kafka>=2.16.1",
+    "tenacity>=9.2.1",
+]
+
+[project.scripts]
+guardian-layer = "guardian:main"
+
+[build-system]
+requires = ["uv_build>=0.12.20,<0.13.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "basedpyright>=1.40.2",
+    "commitizen>=4.19.1",
+    "mypy>=2.3.1",
+    "pre-commit>=4.6.2",
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+    "pytest-benchmark>=5.3.0",
+    "pytest-timeout>=2.4.0",
+    "ruff>=0.16.9",
+    "scikit-learn>=1.9.1",
+]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 88
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "B", "UP"]
+ignore = ["B008"]
+
+# ------------------------------------------------------------------------------
+# Centralized Basedpyright Configuration
+# ------------------------------------------------------------------------------
+[tool.basedpyright]
+typeCheckingMode = "standard"
+pythonVersion = "3.12"
+
+include = [
+    "./src/*", "./tests/*",
+]
+exclude = ["**/__pycache__", "**/.venv", "**/.uv"]

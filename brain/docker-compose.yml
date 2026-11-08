@@ -15,15 +15,25 @@ services:
     image: city-brain:latest
     environment:
       BRAIN__MODE: triplet
-      BRAIN__KAFKA__BOOTSTRAP: ${BRAIN_KAFKA_BOOTSTRAP:-kafka:9092}
+      BRAIN__KAFKA__BOOTSTRAP: ${BRAIN_KAFKA_BOOTSTRAP:-kafka-1:19094,kafka-2:19094,kafka-3:19094}
       BRAIN__TWIN__MCP_URL: ${BRAIN_TWIN_MCP:-http://twin_layer:8000/sse}
       BRAIN__LOGS_DIR: /app/logs
-      BRAIN_OPERATOR_TOKEN: ${BRAIN_OPERATOR_TOKEN:?set BRAIN_OPERATOR_TOKEN}
+      BRAIN_OPERATOR_TOKEN: ${BRAIN_OPERATOR_TOKEN:-operator-token}
+      BRAIN_REST_PORT: ${BRAIN_REST_PORT:-8200}
+      BRAIN_MCP_PORT: ${BRAIN_MCP_PORT:-8110}
+      KAFKA_SECURITY_PROTOCOL: ${KAFKA_SECURITY_PROTOCOL:-SASL_PLAINTEXT}
+      KAFKA_SASL_MECHANISM: ${KAFKA_SASL_MECHANISM:-PLAIN}
+      KAFKA_USERNAME: ${KAFKA_USERNAME:-brain}
+      KAFKA_PASSWORD: ${KAFKA_PASSWORD:-}
+      KAFKA_PASSWORD_FILE: ${KAFKA_PASSWORD_FILE:-}
+      MCP_AUTH_TOKEN: ${MCP_AUTH_TOKEN:-}
+      MCP_AUTH_TOKENS: ${MCP_AUTH_TOKENS:-}
+      MCP_AUTH_TOKENS_FILE: ${MCP_AUTH_TOKENS_FILE:-}
     command: ["python", "-m", "city_brain", "--config", "config/triplet.yaml",
               "--journal", "/app/logs/brain.db"]
     ports:
-      - "8100:8100"   # REST query and operator API
-      - "8110:8110"   # read-only MCP
+      - "${BRAIN_REST_PORT:-8200}:${BRAIN_REST_PORT:-8200}"   # REST query and operator API (avoids 8100 host collision)
+      - "${BRAIN_MCP_PORT:-8110}:${BRAIN_MCP_PORT:-8110}"   # read-only MCP
     volumes:
       - brain-logs:/app/logs
     networks: [twin_network]
@@ -34,7 +44,7 @@ services:
     build: .
     image: city-brain:latest
     command: ["python", "-m", "timeline", "--logs", "/app/logs", "--host", "0.0.0.0",
-              "--brain-api", "http://brain:8100"]
+              "--brain-api", "http://brain:8200"]
     ports:
       - "8120:8120"
     volumes:
@@ -102,6 +112,8 @@ services:
       BRAIN__KAFKA__BOOTSTRAP: kafka:9092
       BRAIN__TWIN__MCP_URL: http://mock-twin:8000/sse
       BRAIN__LOGS_DIR: /app/logs
+      BRAIN_REST_PORT: 8200
+      BRAIN_MCP_PORT: 8110
       # The mock Guardian writes its public key here; the Brain refuses verdicts it cannot verify.
       BRAIN__GUARDIAN__PUBLIC_KEY_FILE: /app/logs/guardian-triplet07.pub
       BRAIN_OPERATOR_TOKEN: ${BRAIN_OPERATOR_TOKEN:-change-me}
@@ -113,7 +125,7 @@ services:
       mock-twin:
         condition: service_started
     ports:
-      - "8100:8100"
+      - "8200:8200"
       - "8110:8110"
     volumes:
       - brain-logs:/app/logs
@@ -126,4 +138,4 @@ networks:
   # The triplet's shared network. `external: true` for the real run; the mock profile
   # creates it if it is not already there.
   twin_network:
-    name: ${TWIN_NETWORK:-twin_network}
+    name: ${DOCKER_NETWORK:-${SHARED_NETWORK:-${TWIN_NETWORK:-city_network}}}

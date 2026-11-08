@@ -203,3 +203,29 @@ async def test_the_brain_mcp_server_offers_only_read_tools(tmp_path):
     tools = await server.list_tools()
     assert sorted(t.name for t in tools) == sorted(BRAIN_TOOLS)
     assert not any("set" in t.name or "dispatch" in t.name for t in tools)
+
+
+async def test_mcp_twin_client_passes_bearer_token(monkeypatch):
+    from unittest.mock import MagicMock
+    from city_brain.adapters.mcp_twin.client import McpTwinClient
+
+    captured_headers = {}
+
+    class DummySSEClient:
+        def __init__(self, url, headers=None):
+            captured_headers.update(headers or {})
+
+        async def __aenter__(self):
+            return (MagicMock(), MagicMock())
+
+        async def __aexit__(self, *args):
+            pass
+
+    monkeypatch.setattr("city_brain.adapters.mcp_twin.client.sse_client", DummySSEClient)
+    client = McpTwinClient("http://twin:8000/sse", auth_token="test-secret-token")
+    # connect establishes session and starts receive loop
+    monkeypatch.setattr("city_brain.adapters.mcp_twin.client.ClientSession", MagicMock())
+    await client.connect()
+    assert captured_headers.get("Authorization") == "Bearer test-secret-token"
+    await client.close()
+

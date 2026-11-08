@@ -114,12 +114,14 @@ shield:
 trust:
   verdict_wait_s: 2.0
   pending_weight: 0.5
+  implicit_ok: false        # enabled in triplet mode if guardian.optional is true
   caps:
     TRUSTED: 1.0
     DOUBTFUL: 0.5
     UNTRUSTED: 0.0
     UNKNOWN: 0.0
 modes:
+  guardian_optional: false  # enabled in triplet mode if guardian.optional is true
   guardian_heartbeat_timeout_s: 5.0
   verdict_lag_degraded_s: 3.0
   verdict_lag_recover_s: 1.0

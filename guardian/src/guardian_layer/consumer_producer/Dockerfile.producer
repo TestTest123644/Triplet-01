@@ -1,0 +1,57 @@
+# ==========================================
+# Stage 1: Builder
+# ==========================================
+FROM python:3.12-slim AS builder
+
+WORKDIR /build
+
+# Install dependencies required to build Python packages
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Python dependencies into wheel files
+COPY kafka_producer/requirements.txt .
+
+RUN pip wheel \
+    --no-cache-dir \
+    --wheel-dir /wheels \
+    -r requirements.txt
+
+
+# ==========================================
+# Stage 2: Runtime
+# ==========================================
+FROM python:3.12-slim AS runtime
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/app/src
+
+WORKDIR /app
+
+# Install dependencies from the builder stage
+COPY --from=builder /wheels /wheels
+COPY kafka_producer/requirements.txt .
+
+RUN pip install \
+    --no-cache-dir \
+    --no-index \
+    --find-links=/wheels \
+    -r requirements.txt \
+    && rm -rf /wheels
+
+# Preserve the complete src package structure
+COPY kafka_producer/ /app/src/guardian_layer/consumer_producer/kafka_producer/
+
+# Run from the producer directory so relative data paths resolve correctly
+WORKDIR /app/src/guardian_layer/consumer_producer/kafka_producer
+
+# Create a non-root user
+RUN useradd --create-home --shell /usr/sbin/nologin producer \
+    && mkdir -p data \
+    && chown -R producer:producer /app
+
+USER producer
+
+CMD ["python", "-m", "guardian_layer.consumer_producer.kafka_producer.main"]

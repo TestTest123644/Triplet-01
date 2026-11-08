@@ -1,0 +1,349 @@
+x-wait-for-postgres: &wait-for-postgres
+  depends_on:
+    postgres:
+      condition: service_healthy
+
+x-kafka-environment: &kafka-environment
+  CLUSTER_ID: "4L6g3nShT-eMCtK--X86sw"
+  KAFKA_PROCESS_ROLES: broker,controller
+  KAFKA_LISTENERS: "SASL_PLAINTEXT://:19094,CONTROLLER://:9093,SASL_PLAINTEXT_HOST://:9094"
+  KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "CONTROLLER:SASL_PLAINTEXT,SASL_PLAINTEXT:SASL_PLAINTEXT,SASL_PLAINTEXT_HOST:SASL_PLAINTEXT"
+  KAFKA_SASL_MECHANISM_CONTROLLER_PROTOCOL: PLAIN
+  KAFKA_LISTENER_NAME_CONTROLLER_SASL_ENABLED_MECHANISMS: PLAIN
+  KAFKA_INTER_BROKER_LISTENER_NAME: SASL_PLAINTEXT
+  KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+  KAFKA_EARLY_START_LISTENERS: "CONTROLLER"
+  KAFKA_CONTROLLER_QUORUM_VOTERS: "1@kafka-1:9093,2@kafka-2:9093,3@kafka-3:9093"
+  KAFKA_SASL_ENABLED_MECHANISMS: PLAIN
+  KAFKA_SASL_MECHANISM_INTER_BROKER_PROTOCOL: PLAIN
+  KAFKA_AUTHORIZER_CLASS_NAME: org.apache.kafka.metadata.authorizer.StandardAuthorizer
+  KAFKA_ALLOW_EVERYONE_IF_NO_ACL_FOUND: "false"
+  KAFKA_SUPER_USERS: "User:broker;User:admin"
+  KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 3
+  KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 3
+  KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 2
+  KAFKA_DEFAULT_REPLICATION_FACTOR: 3
+  KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+  KAFKA_MESSAGE_MAX_BYTES: 5242880
+  KAFKA_MIN_INSYNC_REPLICAS: 2
+  KAFKA_LOG_DIRS: /var/lib/kafka/data
+
+x-kafka-common: &kafka-common
+  image: apache/kafka:4.3.1
+  restart: unless-stopped
+  stop_grace_period: 30s
+  entrypoint: ["/bin/sh", "/scripts/kafka-entrypoint.sh"]
+  environment:
+    <<: *kafka-environment
+  volumes:
+    - ./scripts/kafka-entrypoint.sh:/scripts/kafka-entrypoint.sh
+
+
+x-flink-common: &flink-common
+  build:
+    context: ./src/
+    dockerfile: guardian_layer/consumer_producer/kafka_consumer/Dockerfile.flink     # same Dockerfile as before
+  image: sensor-flink:1.20
+  restart: unless-stopped
+  extra_hosts:
+    - "host.docker.internal:host-gateway"
+  environment: &flink-env
+    KAFKA_BOOTSTRAP: kafka-1:19094,kafka-2:19094,kafka-3:19094
+    KAFKA_INPUT_TOPIC: telemetry-ingest
+    KAFKA_VALIDATED_TOPIC: telemetry-validated
+    KAFKA_DLQ_TOPIC: telemetry-dlq
+    KAFKA_GROUP_ID: guardian-processor
+    MCP_URL: http://twin_layer:8000/sse
+    ENV: dev
+    FLINK_PROPERTIES: |
+      jobmanager.rpc.address: jobmanager
+      jobmanager.memory.process.size: 1024m
+      taskmanager.memory.process.size: 2048m
+      taskmanager.numberOfTaskSlots: 3
+      parallelism.default: 6
+      python.executable: /usr/bin/python3
+      python.client.executable: /usr/bin/python3
+      state.backend.type: hashmap
+      state.checkpoints.dir: file:///opt/flink/checkpoints
+      state.savepoints.dir: file:///opt/flink/savepoints
+      restart-strategy.type: exponential-delay
+      restart-strategy.exponential-delay.initial-backoff: 1s
+      restart-strategy.exponential-delay.max-backoff: 1min
+  volumes:
+    - flink_checkpoints:/opt/flink/checkpoints
+    - flink_savepoints:/opt/flink/savepoints
+
+services:
+  kafka-1:
+    <<: *kafka-common
+    hostname: kafka-1
+    ports:
+      - "127.0.0.1:29094:9094"
+    environment:
+      <<: *kafka-environment
+      KAFKA_NODE_ID: 1
+      KAFKA_ADVERTISED_LISTENERS: "SASL_PLAINTEXT://kafka-1:19094,SASL_PLAINTEXT_HOST://localhost:29094"
+    secrets:
+      - kafka_broker_password
+      - kafka_admin_password
+      - kafka_client_password
+      - kafka_twin_password
+      - kafka_brain_password
+      - kafka_broadcast_password
+      - kafka_action_taker_password
+      
+    volumes:
+      - ./scripts/kafka-entrypoint.sh:/scripts/kafka-entrypoint.sh:ro
+      - kafka1_data:/var/lib/kafka/data
+    networks:
+      - shared-backend
+
+  kafka-2:
+    <<: *kafka-common
+    hostname: kafka-2
+    ports:
+      - "127.0.0.1:29095:9094"
+    environment:
+      <<: *kafka-environment
+      KAFKA_NODE_ID: 2
+      KAFKA_ADVERTISED_LISTENERS: "SASL_PLAINTEXT://kafka-2:19094,SASL_PLAINTEXT_HOST://localhost:29095"
+    secrets:
+      - kafka_broker_password
+      - kafka_admin_password
+      - kafka_client_password
+      - kafka_twin_password
+      - kafka_brain_password
+      - kafka_broadcast_password
+      - kafka_action_taker_password
+    volumes:
+      - ./scripts/kafka-entrypoint.sh:/scripts/kafka-entrypoint.sh:ro
+      - kafka2_data:/var/lib/kafka/data
+    networks:
+      - shared-backend
+
+  kafka-3:
+    <<: *kafka-common
+    hostname: kafka-3
+    ports:
+      - "127.0.0.1:29096:9094"
+    environment:
+      <<: *kafka-environment
+      KAFKA_NODE_ID: 3
+      KAFKA_ADVERTISED_LISTENERS: "SASL_PLAINTEXT://kafka-3:19094,SASL_PLAINTEXT_HOST://localhost:29096"
+    secrets:
+      - kafka_broker_password
+      - kafka_admin_password
+      - kafka_client_password
+      - kafka_twin_password
+      - kafka_brain_password
+      - kafka_broadcast_password
+      - kafka_action_taker_password
+    volumes:
+      - ./scripts/kafka-entrypoint.sh:/scripts/kafka-entrypoint.sh:ro
+      - kafka3_data:/var/lib/kafka/data
+    networks:
+      - shared-backend
+
+  kafka-init:
+    image: apache/kafka:4.3.1
+    restart: "no"
+    depends_on:
+      - kafka-1
+      - kafka-2
+      - kafka-3
+    secrets:
+      - kafka_admin_password
+    volumes:
+      - ./scripts/kafka-init.sh:/scripts/kafka-init.sh:ro
+    entrypoint: ["/bin/sh", "/scripts/kafka-init.sh"]
+    networks:
+      - shared-backend
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: postgres
+    ports:
+      - "127.0.0.1:5432:5432"
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-guardian}
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+      POSTGRES_DB: ${POSTGRES_DB:-guardian}
+    secrets:
+      - postgres_password
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.15.0
+    container_name: elasticsearch
+    environment:
+      discovery.type: single-node
+      xpack.security.enabled: "true"
+      xpack.security.http.ssl.enabled: "false"
+      ELASTIC_PASSWORD: ${ELASTIC_PASSWORD:?required}
+      ES_JAVA_OPTS: "-Xms512m -Xmx512m"
+    ports:
+      - "127.0.0.1:9200:9200"
+    volumes:
+      - elasticsearch_data:/usr/share/elasticsearch/data
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "curl -fsS -u elastic:$${ELASTIC_PASSWORD} http://localhost:9200 >/dev/null || exit 1",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
+  jobmanager:
+    <<: *flink-common
+    container_name: flink-jobmanager
+    command: jobmanager
+    ports:
+      - "127.0.0.1:8081:8081"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8081/overview"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 15s
+
+  taskmanager:
+    <<: *flink-common
+    command: taskmanager
+    depends_on:
+      jobmanager:
+        condition: service_healthy
+    deploy:
+      replicas: 2        # 2 x 3 slots = 6 slots = env.set_parallelism(6)
+  job-submitter:
+    <<: *flink-common
+    restart: "no"
+    command: >
+      flink run -d -m jobmanager:8081
+      -py /opt/flink/usrlib/guardian_layer/consumer_producer/kafka_consumer/job.py
+    environment:
+      <<: *flink-env
+      KAFKA_USERNAME: guardian
+      KAFKA_PASSWORD_FILE: /run/secrets/kafka_client_password
+    secrets:
+      - kafka_client_password
+    depends_on:
+      jobmanager:
+        condition: service_healthy
+      taskmanager:
+        condition: service_started
+      kafka-init:
+        condition: service_completed_successfully
+  
+  device-metadata-producer:
+    build:
+      context: ./src/guardian_layer/consumer_producer/
+      dockerfile: Dockerfile.producer
+
+    container_name: device-metadata-producer
+    restart: unless-stopped
+
+    environment:
+      Sync_confgig: /app/src/guardian_layer/consumer_producer/kafka_producer/utils/settings.yaml
+      LOG_LEVEL: INFO
+      KAFKA_PASSWORD: /run/secrets/kafka_broadcast_password
+      MCP_URL: http://twin_layer:8000/sse
+    secrets:
+      - kafka_broadcast_password
+
+    volumes:
+      - ./src/guardian_layer/consumer_producer/kafka_producer/data:/app/src/guardian_layer/consumer_producer/kafka_producer/data
+
+    networks:
+      - shared-backend
+  action-taker:
+    build:
+      # ./src, not the package folder: action_taker imports guardian_layer.mcp_client
+      context: ./src
+      dockerfile: Dockerfile.action_taker
+    container_name: action-taker
+    restart: unless-stopped
+    stop_grace_period: 15s
+    environment:
+      ACTION_TAKER_CONFIG: /app/src/guardian_layer/consumer_producer/action_taker/utils/settings.yaml
+      GUARDIAN_LAYER_LOG: INFO
+    secrets:
+      - kafka_action_taker_password
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+    networks:
+      - shared-backend
+  twin-mcp:
+    build:
+      context: ./mocks/twin/
+      dockerfile: Dockerfile.mcp
+      target: runtime
+    image: twin-mcp:latest
+    container_name: twin-mcp
+    restart: unless-stopped
+    environment:
+      MCP_HOST: 0.0.0.0
+      MCP_PORT: "8000"
+    ports:
+      - "${MCP_PORT:-8000}:8000"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import socket; socket.create_connection(('127.0.0.1', 8000), 2).close()"
+      interval: 30s
+      timeout: 3s
+      start_period: 10s
+      retries: 3
+    # Hardening (the mock needs no writes or extra privileges)
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - shared-backend
+
+
+networks:
+  shared-backend:
+    external: true
+volumes:
+  postgres_data:
+  kafka1_data:
+  kafka2_data:
+  kafka3_data:
+  elasticsearch_data:
+  vault_data:
+  producer_data:
+  flink_checkpoints:
+  flink_savepoints:
+secrets:
+  kafka_broker_password:
+    file: ./secrets/kafka_broker_password.txt
+  kafka_admin_password:
+    file: ./secrets/kafka_admin_password.txt
+  kafka_client_password:
+    file: ./secrets/kafka_client_password.txt
+  kafka_twin_password:
+    file: ./secrets/kafka_twin_password.txt
+  kafka_brain_password:
+    file: ./secrets/kafka_brain_password.txt
+  kafka_broadcast_password:
+    file: ./secrets/kafka_broadcast_password.txt
+  kafka_action_taker_password:
+    file: ./secrets/kafka_action_taker_password.txt
+  postgres_password:
+    file: ./secrets/postgres_password.txt

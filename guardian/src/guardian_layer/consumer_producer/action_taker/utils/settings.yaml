@@ -1,0 +1,27 @@
+# action_taker configuration. The Kafka password is not here: it is read from
+# kafka.password_file (the Docker secret).
+
+kafka:
+  bootstrap_servers: "kafka-1:19094,kafka-2:19094,kafka-3:19094"
+  username: "action_taker"
+  password_file: "/run/secrets/kafka_action_taker_password"
+  group_id: "action-taker-processor"
+  dlq_topic: "telemetry-dlq"
+  anomaly_topic: "telemetry-anomaly"
+  auto_offset_reset: "earliest"
+  pause_seconds: 5.0
+
+mcp:
+  url: "http://host.docker.internal:8000/sse"
+  timeout: 3.0
+  retry_attempts: 5
+  retry_backoff_seconds: 0.5
+
+rules:
+  # quarantine (DLQ validation errors) / isolate (spoofing) after this many hits
+  # for one device within the window
+  repeat_threshold: 3
+  repeat_window_seconds: 60.0
+
+# first run: log the intended actions without calling MCP
+dry_run: true

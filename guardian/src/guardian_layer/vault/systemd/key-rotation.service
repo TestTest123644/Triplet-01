@@ -1,0 +1,11 @@
+[Unit]
+Description=Rotate guardian/twin/brain communication keys in Vault
+After=network-online.target
+
+[Service]
+Type=oneshot
+# Contains VAULT_ADDR, VAULT_CACERT, ROTATOR_ROLE_ID, ROTATOR_SECRET_ID, ALERT_WEBHOOK_URL (chmod 600, never in git)
+EnvironmentFile=/etc/guardian/rotator.env
+WorkingDirectory=/opt/guardian_layer
+ExecStart=/opt/guardian_layer/.venv/bin/python vault/rotate_keys.py
+# A non-zero exit code marks the unit as failed: visible in `systemctl --failed` and the journal

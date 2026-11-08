@@ -1,0 +1,170 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage[margin=2cm,top=2.2cm,bottom=2.2cm]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{enumitem}
+\usepackage{fancyhdr}
+\usepackage{titlesec}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{microtype}
+\usepackage[colorlinks=true,linkcolor=blue!70!black,citecolor=blue!70!black,urlcolor=blue!70!black]{hyperref}
+
+% Header and Footer styling
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\small\textsf{\textbf{Guardian Inputs for Shared Parts} \textbar\ 3-Layer Urban IoT Platform}}
+\fancyhead[R]{\small\textsf{Page \thepage}}
+\fancyfoot[L]{\small\textsf{Guardian Layer Team Report \textbar\ Shared Addendum}}
+\fancyfoot[R]{\small\textsf{Part 0 \& Part 4 Deliverables}}
+\renewcommand{\headrulewidth}{0.5pt}
+\renewcommand{\footrulewidth}{0.5pt}
+
+% Section formatting
+\titleformat{\section}
+  {\normalfont\sffamily\Large\bfseries\color{blue!80!black}}
+  {\thesection}{0.8em}{}
+\titleformat{\subsection}
+  {\normalfont\sffamily\large\bfseries\color{blue!70!black}}
+  {\thesubsection}{0.6em}{}
+\titleformat{\subsubsection}
+  {\normalfont\sffamily\normalsize\bfseries\color{black}}
+  {\thesubsubsection}{0.5em}{}
+
+\titlespacing*{\section}{0pt}{10pt}{5pt}
+\titlespacing*{\subsection}{0pt}{8pt}{4pt}
+\titlespacing*{\subsubsection}{0pt}{5pt}{2pt}
+\setlength{\parskip}{3pt}
+\setlength{\parindent}{0pt}
+
+% Code listing styling
+\definecolor{codegray}{rgb}{0.96,0.96,0.96}
+\definecolor{codeframe}{rgb}{0.85,0.85,0.85}
+\lstset{
+  backgroundcolor=\color{codegray},
+  basicstyle=\ttfamily\footnotesize,
+  breaklines=true,
+  frame=single,
+  rulecolor=\color{codeframe},
+  captionpos=b,
+  keepspaces=true,
+  showspaces=false,
+  showstringspaces=false
+}
+
+\title{\sffamily\bfseries\huge Guardian Inputs for Shared Report Parts\\[0.3em]
+\Large Contributions to Part 0 (System Overview) and Part 4 (Test Book)}
+\author{\textsf{The Guardian Layer Engineering Team}}
+\date{\textsf{Version 1.0 \textbar\ November 2026}}
+
+\begin{document}
+
+\maketitle
+\thispagestyle{fancy}
+
+\begin{abstract}
+\noindent This document compiles the Guardian engineering team's modular contributions to the collective 20-page 3-layer urban monitoring platform report. It provides the exact inputs required for \textbf{Part 0 (Shared System Overview: End-to-End Operational Scenario)} and \textbf{Part 4 (Shared Test Book: Guardian Edge Verification Scenarios G-01 through G-05)}, specifying objective verification criteria, cryptographic test vectors, and terminal reproduction commands.
+\end{abstract}
+
+\vspace{0.5cm}
+
+\section{Part 0 Input: The Guardian's Role in End-to-End Operation}
+
+\subsection{End-to-End Scenario: Urban Flash Flood Detection and Gate Control (Bab Alioua Watershed)}
+
+In an active municipal stormwater event, raw water level, pump station, and rain gauge telemetry stream at 10\,Hz from field transmitters into the platform. The Guardian intercepts this untrusted ingest stream at the broker perimeter, immediately validating Ed25519 digital payload signatures against public keys dynamically resolved from the Digital Twin's FastMCP service and routing unauthenticated or corrupted packets to the Dead-Letter Queue (\texttt{telemetry-dlq}). Validated telemetry is buffered into non-blocking sliding memory windows, where the Guardian computes Haar wavelet decompositions, Robust $Z$-scores via Median Absolute Deviation, and spatial $k$-NN Haversine peer differences. Within 102\,ms ($p_{50}$), the Guardian's dual-horizon XGBoost models classify the readings, distinguishing physical water surges from sensor hardware malfunctions (such as stuck floats or electrical impulse spikes) and regional weather trends. Verified sensor readings, accompanied by confidence-scored anomaly verdicts, are published to \texttt{telemetry-validated} and ingested by the City Brain to execute automated stormwater barrier deployment and emergency evacuation alerts.
+
+\section{Part 4 (Test Book) Input: Guardian Verification Scenarios}
+
+The following five end-to-end scenarios constitute the Guardian's contribution to the platform-wide Test Book. Each scenario validates an explicit security, filtering, or analytical boundary under simulated adversarial or degraded conditions.
+
+\subsection{Scenario G-01: Cryptographic Ingestion Gate \& Signature Mismatch Isolation}
+\begin{itemize}[leftmargin=*,itemsep=1.5pt]
+  \item \textbf{Objective:} Verify that payloads with invalid, tampered, or forged signatures are rejected at the edge before entering state memory.
+  \item \textbf{Input Payload:} Telemetry JSON record where the Base64 signature \texttt{sig} does not match the Ed25519 signature over canonical sorted payload bytes:
+\begin{lstlisting}
+{"device_id": "sensor-water-01", "ts": "2026-11-05T12:00:00Z", "value": 3.42, "unit": "m", "seq": 101, "status": "ok", "sig": "aW52YWxpZF9zaWduYXR1cmVfZm9yZ2Vk"}
+\end{lstlisting}
+  \item \textbf{Expected Output:} \texttt{VerifySignature} ProcessFunction rejects the payload to the side-output tag routing to \texttt{telemetry-dlq}. The emitted record contains:
+\begin{lstlisting}
+{"error_code": "E200_BAD_SIGNATURE", "detail": "signature mismatch", "raw_payload": "..."}
+\end{lstlisting}
+  The message is never emitted to \texttt{telemetry-validated}, and buffer state remains unmutated.
+  \item \textbf{How to Reproduce:}
+\begin{lstlisting}
+uv run pytest tests/consumer_producer/ -k test_bad_signature
+\end{lstlisting}
+\end{itemize}
+
+\subsection{Scenario G-02: Rogue / Unregistered Edge Device Key Rejection}
+\begin{itemize}[leftmargin=*,itemsep=1.5pt]
+  \item \textbf{Objective:} Ensure devices lacking provisioning or valid public keys in the Digital Twin key service are quarantined immediately.
+  \item \textbf{Input Payload:} Inbound sensor payload presenting an unknown identifier:
+\begin{lstlisting}
+{"device_id": "unregistered-node-999", "ts": "2026-11-05T12:00:00Z", "value": 1.15, "unit": "m", "seq": 1, "status": "ok", "sig": "..."}
+\end{lstlisting}
+  \item \textbf{Expected Output:} FastMCP client calls \texttt{get\_device\_key("unregistered-node-999")} and receives null; \texttt{DeviceKeyProvider} raises an unknown device error. The payload is quarantined to \texttt{telemetry-dlq} with structured error code \texttt{E201\_UNKNOWN\_DEVICE}.
+  \item \textbf{How to Reproduce:}
+\begin{lstlisting}
+uv run pytest tests/consumer_producer/ -k test_unknown_device
+\end{lstlisting}
+\end{itemize}
+
+\subsection{Scenario G-03: Live Short-Window Anomaly Classification (Impulse Spike)}
+\begin{itemize}[leftmargin=*,itemsep=1.5pt]
+  \item \textbf{Objective:} Validate that high-frequency physical anomalies are correctly identified and classified within the 20-second live horizon.
+  \item \textbf{Input:} 200 readings (20 seconds at 10\,Hz) generated by \texttt{mocks/telemetry\_generator.py} modeling water levels, with a synthetic single-point impulse spike injected into reading index 145 ($+4.8\sigma$ deviation).
+  \item \textbf{Expected Output:}
+  \begin{enumerate}[label=\alph*.,leftmargin=1.5em]
+    \item \texttt{StaticCheck.out\_of\_range} verifies the value remains within extreme electrical bounds.
+    \item \texttt{PreProcess} extracts an elevated Robust $Z$-score ($Z = 4.82$) and elevated Haar wavelet detail energy.
+    \item \texttt{AnomalyDetector} scores the feature vector in $<125$\,ms, outputting:
+\begin{lstlisting}
+Verdict(sensor_id="sensor-water-01", score=0.982, label="sensor_malfunction")
+\end{lstlisting}
+  \end{enumerate}
+  \item \textbf{How to Reproduce:}
+\begin{lstlisting}
+python -m mocks.telemetry_generator --samples 200 --anomaly-type spike --out telemetry.jsonl
+uv run pytest tests/ai/inference/ -k test_short_window_spike
+\end{lstlisting}
+\end{itemize}
+
+\subsection{Scenario G-04: Multi-Hour Drift Detection vs. Spatial Cluster Environmental Shift}
+\begin{itemize}[leftmargin=*,itemsep=1.5pt]
+  \item \textbf{Objective:} Confirm that the 24-hour long-window model distinguishes true hardware calibration drift from regional environmental shifts affecting all peer sensors.
+  \item \textbf{Input:} 24-hour batch window (288 readings at 300\,s intervals) across a cluster of 5 water stations. Sensors 1 through 4 exhibit a shared natural flood trend of $+0.12$\,m/hour. Sensor 5 exhibits an anomalous sensor drift of $+0.48$\,m/hour.
+  \item \textbf{Expected Output:}
+  \begin{enumerate}[label=\alph*.,leftmargin=1.5em]
+    \item \texttt{LongPreProcess} calculates cluster median slope $\text{median}(\text{slope}) = 0.12$.
+    \item For Sensors 1--4, cluster slope delta is $0.00$, suppressing false alarms (verdict: \texttt{Normal}).
+    \item For Sensor 5, cluster slope delta is $0.36$; \texttt{LongAnomalyDetector} classifies the window as \texttt{sensor\_malfunction} with a drift indicator.
+  \end{enumerate}
+  \item \textbf{How to Reproduce:}
+\begin{lstlisting}
+uv run pytest tests/pipelines/ -k test_long_preprocess_cluster_slope
+\end{lstlisting}
+\end{itemize}
+
+\subsection{Scenario G-05: Fail-Safe In-Memory Buffer Rollback on Downstream Backpressure}
+\begin{itemize}[leftmargin=*,itemsep=1.5pt]
+  \item \textbf{Objective:} Verify zero telemetry loss during downstream database or channel stalls via atomic rollback.
+  \item \textbf{Input:} Continuous stream of 250 readings ingested into \texttt{BufferManager} with $\text{high\_watermark} = 200$ and $\text{flush\_size} = 100$. The downstream \texttt{FlushChannel} is artificially saturated (\texttt{queue.Full}).
+  \item \textbf{Expected Output:}
+  \begin{enumerate}[label=\alph*.,leftmargin=1.5em]
+    \item Capacity trigger extracts a 100-reading \texttt{FlushedBatch}.
+    \item \texttt{\_sink\_to\_queue} catches \texttt{queue.Full}.
+    \item \texttt{buffer.restore(batch.readings)} atomically prepends the 100 readings back to the head of the buffer.
+    \item Total buffer length recovers to 200 readings; no records dropped from process memory.
+  \end{enumerate}
+  \item \textbf{How to Reproduce:}
+\begin{lstlisting}
+uv run pytest tests/managers/test_buffer_manager_v2.py -k test_bench_add_with_flush
+\end{lstlisting}
+\end{itemize}
+
+\end{document}

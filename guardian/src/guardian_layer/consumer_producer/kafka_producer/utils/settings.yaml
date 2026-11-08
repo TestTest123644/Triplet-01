@@ -1,0 +1,13 @@
+# Metadata synchronizer configuration
+
+mcp:
+  url: http://localhost:8000/sse
+  timeout: 15.0
+
+kafka:
+  username: "broadcast"
+  topic: "devices.metadata"
+  bootstrap_servers: "kafka-1:19094,kafka-2:19094,kafka-3:19094"
+  connector_jar: "flink-sql-connector-kafka-2.3.0.jar"
+
+data_path: "data/device_metadata.json"

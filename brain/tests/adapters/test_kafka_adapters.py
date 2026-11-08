@@ -202,6 +202,29 @@ def test_the_producer_is_idempotent():
     assert KafkaSink("broker:9092").config["enable.idempotence"] is True
 
 
+def test_sink_and_source_incorporate_sasl_config():
+    sec = {
+        "security.protocol": "SASL_PLAINTEXT",
+        "sasl.mechanism": "PLAIN",
+        "sasl.username": "broadcast",
+        "sasl.password": "secret123",
+    }
+    sink = KafkaSink("broker:9092", security_config=sec, acks=1)
+    cfg = sink.config
+    assert cfg["security.protocol"] == "SASL_PLAINTEXT"
+    assert cfg["sasl.username"] == "broadcast"
+    assert cfg["sasl.password"] == "secret123"
+    assert cfg["acks"] == 1
+    assert cfg["batch.num.messages"] == 1000
+    assert cfg["enable.idempotence"] is False
+
+    src = KafkaSource("broker:9092", "test-grp", ["topic1"], security_config=sec)
+    src_cfg = src.config
+    assert src_cfg["security.protocol"] == "SASL_PLAINTEXT"
+    assert src_cfg["sasl.username"] == "broadcast"
+    assert src_cfg["sasl.password"] == "secret123"
+
+
 def test_a_full_queue_is_counted_not_raised():
     sink = KafkaSink("broker:9092", producer=FakeProducer(fail=True))
     assert sink.publish(EVENT) is False and sink.dropped == 1

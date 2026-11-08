@@ -1,0 +1,5 @@
+confluent-kafka==2.16.1
+mcp==2.3.0
+pydantic==2.14.2
+pydantic-settings[yaml]>=2.15.0
+tenacity==9.2.1

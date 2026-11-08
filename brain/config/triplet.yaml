@@ -1,12 +1,16 @@
 mode: triplet
 logs_dir: ../../logs
-policy_file: ../policy/default.yaml
+policy_file: ../policy/triplet.yaml
 params_file: ../params/twin-triplet07-v1.yaml
 kafka:
-  bootstrap: kafka:9092
-  group: city-brain
+  bootstrap: kafka-1:19094,kafka-2:19094,kafka-3:19094
+  group: brain-processor
+  security_protocol: SASL_PLAINTEXT
+  sasl_mechanism: PLAIN
+  sasl_username: brain
+  acks: 1
   topics:
-    readings: twin.sensors
+    readings: telemetry-ingest
     verdicts: guardian.verdicts
     events: guardian.events
 twin:
@@ -15,4 +19,4 @@ twin:
   call_timeout_s: 2
 guardian:
   profile: guardian-triplet07
-  public_key_file: keys/guardian-triplet07.pub
+  optional: true
