@@ -28,7 +28,7 @@ def test_triplet_yaml_parses_with_spec_values():
     assert cfg.twin.profile == "twin-triplet07" and cfg.guardian.profile == "guardian-triplet07"
     assert cfg.twin.mcp_url == "http://twin_layer:8000/sse"
     assert cfg.twin.call_timeout_s == 2
-    assert cfg.twin.auth_token == "91e44d55cc4fc01383c101bc4dd5312d14cc8b9790c7c16f"
+    assert cfg.twin.auth_token is None
     assert cfg.policy["trust"]["pending_weight"] == 0.5
     assert cfg.guardian.optional is True
 
