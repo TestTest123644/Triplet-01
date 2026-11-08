@@ -205,3 +205,209 @@ Principals and credentials:
 - **Expected Brain output:** Re-evaluates water level telemetry and diagnoses actuator discrepancy (to confirm with partner team).
 - **How to verify:** Run `python3 scenarios/t11_actuator_refusal.py --with-mocks`; verify `logs/t11-*.log` ends with `{"event":"result","pass":true}`.
 
+---
+
+## Guardian Layer & Cross-Layer Zero-Trust Test Suite (Layer 3)
+
+The Guardian layer verifies telemetry integrity through deterministic static bounds, spatial peer correlation, short-window wavelet ML (XGBoost), and 24-hour long-window temporal drift analysis.
+
+### Zero-Trust Verification Architecture
+1. **Telemetry Egress:** Digital Twin (Layer 1) broadcasts signed sensor telemetry to the message broker (`telemetry-validated` / `twin.sensors`).
+2. **Brain Gating:** City Brain (Layer 2) ingests telemetry but suspends execution in `WAITING_FOR_GUARDIAN_TRUST` state pending cryptographic trust validation.
+3. **Guardian Anomaly Scoring:** Guardian (Layer 3) processes flushed batches through:
+   - Static range and signal silence checks.
+   - Spatial cluster peer divergence checks.
+   - AI Short-Window Haar Wavelet energy feature extraction & XGBoost classifier.
+   - AI Long-Window 24-hour hourly trend evaluation.
+4. **Trust Verdict Publication:** Guardian signs verdicts with Ed25519 identity keys and publishes to `telemetry-confirmation`:
+   - `state='TRUSTED', trusted=True` -> Twin logs `'trusted message'`.
+   - `state='UNTRUSTED', trusted=False` -> Twin logs `'not trusted'`.
+5. **Brain Execution:**
+   - On `TRUSTED`: Brain releases gate and executes autonomous municipal operations (`OPERATIONAL_DECISION_EXECUTED`).
+   - On `UNTRUSTED`: Brain rejects corrupt data and triggers automated municipal defensive relief (`FLOOD_RELIEF_ACTUATED`, `MAINTENANCE_DISPATCHED`, `REPAIR_DISPATCHED`, `SECURITY_CONTAINMENT_VERIFIED`).
+6. **Physical Containment:** Guardian ActionTaker executes autonomous containment commands (`quarantine_device` / `isolate_device`) against the Twin Layer via MCP JSON-RPC.
+
+---
+
+### G1: Nominal Stream Operation
+- **ID:** G1 (`scenario_1_normal`)
+- **Name:** Nominal Stream Operation [BASELINE]
+- **Layers involved:** Layer 1 (Twin), Layer 2 (Brain), Layer 3 (Guardian)
+- **Target Device:** `z1-wl1` (Water Level Sensor)
+- **Category:** `BASELINE`
+- **Description:** Clean, nominal telemetry stream within expected physical thresholds. Verifies baseline ML inference and dual PostgreSQL/SQLite persistence.
+- **Trigger:** Normal telemetry batch generation (100 readings, nominal value range).
+- **Expected Twin output:**
+  - Emits 100 nominal readings to broker.
+  - Consumes `telemetry-confirmation` with `trusted=True` -> logs `'trusted message'`.
+  - Device status remains `ok`.
+- **Expected Guardian output:**
+  - Detected anomalies: `0`.
+  - ML short-window anomaly score ~ `0.000` (`is_anomaly=False`).
+  - Persists 100 raw readings and `ModelOutput` record in database.
+  - Publishes signed confirmation: `state='TRUSTED', trusted=True`.
+- **Expected Brain output:**
+  - Releases `WAITING_FOR_GUARDIAN_TRUST` gate.
+  - Executes municipal optimization actuation: `OPERATIONAL_DECISION_EXECUTED`.
+- **How to verify:** Run `python3 scenarios/run_scenarios.py`; verify Scenario 1 logs `PASS [✓]`.
+
+---
+
+### G2: Physical Range Breach (Static Check)
+- **ID:** G2 (`scenario_2_out_of_range`)
+- **Name:** Physical Range Breach [STATIC_CHECK]
+- **Layers involved:** Layer 1 (Twin), Layer 2 (Brain), Layer 3 (Guardian)
+- **Target Device:** `z1-wl1` (Water Level Sensor)
+- **Category:** `STATIC_CHECK`
+- **Description:** Sensor reading breaches physical upper envelope (15.5 m > 12.0 m maximum range). Evaluates instantaneous boundary policing.
+- **Trigger:** Telemetry batch with value 15.5 m exceeding upper range.
+- **Expected Twin output:**
+  - Emits 100 out-of-range readings to broker.
+  - Consumes `telemetry-confirmation` with `trusted=False` -> logs `'not trusted'`.
+  - Receives MCP command `quarantine_device(device_id="z1-wl1")`; transitions status to `quarantined`.
+- **Expected Guardian output:**
+  - Static boundary check fires: `Anomalies.OUT_OF_RANGE`.
+  - Stores ModelOutput record (`score=1.000`, `is_anomaly=True`).
+  - Publishes signed confirmation: `state='UNTRUSTED', trusted=False`.
+  - ActionTaker issues MCP call `quarantine_device(target="z1-wl1")`.
+- **Expected Brain output:**
+  - Gate releases on untrusted verdict.
+  - Triggers emergency flood safety mitigation: `FLOOD_RELIEF_ACTUATED`.
+- **How to verify:** Run `python3 scenarios/run_scenarios.py`; verify Scenario 2 logs `PASS [✓]`.
+
+---
+
+### G3: Sensor Silence / Loss of Signal (Static Check)
+- **ID:** G3 (`scenario_3_sensor_is_down`)
+- **Name:** Sensor Silence / Loss of Signal [STATIC_CHECK]
+- **Layers involved:** Layer 1 (Twin), Layer 2 (Brain), Layer 3 (Guardian)
+- **Target Device:** `z2-wl2` (Water Level Sensor)
+- **Category:** `STATIC_CHECK`
+- **Description:** Sensor telemetric transmission halts or packets lag wall clock by >60 seconds. Tests watchdog heartbeat and liveness detection.
+- **Trigger:** Telemetry batch with stale timestamps (>60s delta) followed by silence.
+- **Expected Twin output:**
+  - Sensor stream stops publishing.
+  - Receives MCP command `quarantine_device(device_id="z2-wl2")`; transitions status to `quarantined`.
+- **Expected Guardian output:**
+  - Watchdog flags `Anomalies.SENSOR_IS_DOWN`.
+  - Publishes signed confirmation: `state='UNTRUSTED', trusted=False`.
+  - ActionTaker issues MCP call `quarantine_device(target="z2-wl2")`.
+- **Expected Brain output:**
+  - Detects sensor failure / untrusted signal.
+  - Dispatches field maintenance crew: `MAINTENANCE_DISPATCHED`.
+- **How to verify:** Run `python3 scenarios/run_scenarios.py`; verify Scenario 3 logs `PASS [✓]`.
+
+---
+
+### G4: Spatial Cluster Spoofing (Spatial Check)
+- **ID:** G4 (`scenario_4_spoofed_data`)
+- **Name:** Spatial Cluster Spoofing [SPATIAL_CHECK]
+- **Layers involved:** Layer 1 (Twin), Layer 2 (Brain), Layer 3 (Guardian)
+- **Target Device:** `z1-wl1` (Water Level Sensor)
+- **Category:** `SPATIAL_CHECK`
+- **Description:** Adversary tampers with a single sensor while nearby cluster peers report nominal environmental conditions. Evaluates cluster covariance and peer residual checks.
+- **Trigger:** Telemetry batch where `z1-wl1` reading diverges significantly from its spatial peer cluster.
+- **Expected Twin output:**
+  - Emits diverged reading on wire.
+  - Receives MCP command `isolate_device(device_id="z1-wl1")`; transitions status to `isolated`.
+- **Expected Guardian output:**
+  - Spatial correlation pipeline flags `Anomalies.SPOOFED_DATA`.
+  - Publishes signed confirmation: `state='UNTRUSTED', trusted=False`.
+  - ActionTaker issues MCP call `isolate_device(target="z1-wl1")`.
+- **Expected Brain output:**
+  - Ignores diverged spoofed reading; validates isolation: `SECURITY_CONTAINMENT_VERIFIED`.
+- **How to verify:** Run `python3 scenarios/run_scenarios.py`; verify Scenario 4 logs `PASS [✓]`.
+
+---
+
+### G5: Hardware Malfunction & Noise Burst (AI Short-Window)
+- **ID:** G5 (`scenario_5_sensor_malfunction`)
+- **Name:** Hardware Malfunction & Noise Burst [AI_INFERENCE]
+- **Layers involved:** Layer 1 (Twin), Layer 2 (Brain), Layer 3 (Guardian)
+- **Target Device:** `z3-tc1` (Traffic Camera Sensor)
+- **Category:** `AI_INFERENCE`
+- **Description:** Hardware degradation generates high-frequency jitter and electrical noise bursts. Evaluates 100-sample Haar wavelet multi-resolution energy subbands scored by XGBoost classifier.
+- **Trigger:** Telemetry batch exhibiting high-frequency Gaussian noise burst and jitter.
+- **Expected Twin output:**
+  - Emits erratic noisy packets on wire.
+  - Receives MCP command `quarantine_device(device_id="z3-tc1")`; transitions status to `quarantined`.
+- **Expected Guardian output:**
+  - Haar wavelet feature extraction detects abnormal high-frequency detail band energy.
+  - XGBoost ShortAnomalyDetector classifies `Anomalies.SENSOR_MALFUNCTION`.
+  - Stores ModelOutput record with `model_version='short_window'`.
+  - Publishes signed confirmation: `state='UNTRUSTED', trusted=False`.
+  - ActionTaker issues MCP call `quarantine_device(target="z3-tc1")`.
+- **Expected Brain output:**
+  - Dispatches automated diagnostic and repair task: `REPAIR_DISPATCHED`.
+- **How to verify:** Run `python3 scenarios/run_scenarios.py`; verify Scenario 5 logs `PASS [✓]`.
+
+---
+
+### G6: Non-Physical Bitstream Inversion (AI Short-Window)
+- **ID:** G6 (`scenario_6_not_sensor_data`)
+- **Name:** Non-Physical Bitstream Inversion [AI_INFERENCE]
+- **Layers involved:** Layer 1 (Twin), Layer 2 (Brain), Layer 3 (Guardian)
+- **Target Device:** `z4-tc1` (Traffic Camera Sensor)
+- **Category:** `AI_INFERENCE`
+- **Description:** Adversary injects synthetic, square-wave bitstream inversions lacking natural physical entropy. Evaluated by XGBoost as non-sensor payload.
+- **Trigger:** Telemetry batch containing synthetic rectangular waveform patterns.
+- **Expected Twin output:**
+  - Emits inverted synthetic payloads.
+  - Receives MCP command `isolate_device(device_id="z4-tc1")`; transitions status to `isolated`.
+- **Expected Guardian output:**
+  - Wavelet energy and kurtosis features deviate completely from physical sensors.
+  - XGBoost classifier scores `Anomalies.NOT_SENSOR_DATA` (`score=1.000`).
+  - Publishes signed confirmation: `state='UNTRUSTED', trusted=False`.
+  - ActionTaker issues MCP call `isolate_device(target="z4-tc1")`.
+- **Expected Brain output:**
+  - Confirms security threat isolation: `SECURITY_CONTAINMENT_VERIFIED`.
+- **How to verify:** Run `python3 scenarios/run_scenarios.py`; verify Scenario 6 logs `PASS [✓]`.
+
+---
+
+### G7: Hourly Database Long-Window Prediction (AI Long-Window)
+- **ID:** G7 (`scenario_7_hourly`)
+- **Name:** Hourly Database Long-Window Prediction [AI_LONG_WINDOW]
+- **Layers involved:** Layer 3 (Guardian Orchestrator, PostgreSQL Storage)
+- **Target Device:** `z1-wl1-hourly`
+- **Category:** `AI_LONG_WINDOW`
+- **Description:** Periodic hourly cron evaluator queries 24-hour historical raw readings from PostgreSQL database, extracts multi-scale temporal trend features, and scores with LongAnomalyDetector.
+- **Trigger:** Invocation of `orchestrator.evaluate_hourly_database_window(lookback_seconds=3600.0)`.
+- **Expected Guardian output:**
+  - Evaluates historical reading windows from PostgreSQL storage.
+  - Extracts 24-hour Haar wavelet macro features.
+  - Produces `ModelOutput` database record with `model_version='long_window_24h'`.
+  - Persists verdicts to database audit tables.
+- **How to verify:** Run `python3 scenarios/run_scenarios.py`; verify Scenario 7 logs `PASS [✓]`.
+
+---
+
+### G8: Anti-Corruption ACL Gateway (Dropping Quarantined Readings)
+- **ID:** G8 (`scenario_8_quarantine_filter`)
+- **Name:** Anti-Corruption ACL Quarantine Gate [SECURITY_GATE]
+- **Layers involved:** Layer 1 (Twin), Layer 3 (Guardian Boundary Adapter)
+- **Target Device:** `z1-wl1`
+- **Category:** `SECURITY_GATE`
+- **Description:** Verifies that telemetry emitted by an isolated or quarantined device is immediately intercepted, sanitized, and dropped at the `TwinToGuardian` boundary adapter before entering downstream AI pipelines.
+- **Trigger:** Telemetry payloads passed with `status='ok'` vs `status='quarantined'`.
+- **Expected Gateway output:**
+  - Active device payload (`status='ok'`): Validated and transformed into `Sensor` domain object.
+  - Contained device payload (`status='quarantined'`): Flagged, isolated, and prevented from reaching internal processing queues.
+- **How to verify:** Run `python3 scenarios/run_scenarios.py`; verify Scenario 8 logs `PASS [✓]`.
+
+---
+
+### Cross-Layer Guardian Scorecard Summary
+
+| Scenario ID | Test Name | Category | Target Device | Expected Anomaly | Expected Twin Status | Expected Brain Action |
+|:---|:---|:---|:---|:---|:---|:---|
+| **G1** | Nominal Stream Operation | `BASELINE` | `z1-wl1` | `None` | `ok` | `OPERATIONAL_DECISION_EXECUTED` |
+| **G2** | Physical Range Breach | `STATIC_CHECK` | `z1-wl1` | `OUT_OF_RANGE` | `quarantined` | `FLOOD_RELIEF_ACTUATED` |
+| **G3** | Sensor Silence / Loss of Signal | `STATIC_CHECK` | `z2-wl2` | `SENSOR_IS_DOWN` | `quarantined` | `MAINTENANCE_DISPATCHED` |
+| **G4** | Spatial Cluster Spoofing | `SPATIAL_CHECK` | `z1-wl1` | `SPOOFED_DATA` | `isolated` | `SECURITY_CONTAINMENT_VERIFIED` |
+| **G5** | Hardware Malfunction & Jitter | `AI_INFERENCE` | `z3-tc1` | `SENSOR_MALFUNCTION` | `quarantined` | `REPAIR_DISPATCHED` |
+| **G6** | Non-Physical Bitstream Inversion | `AI_INFERENCE` | `z4-tc1` | `NOT_SENSOR_DATA` | `isolated` | `SECURITY_CONTAINMENT_VERIFIED` |
+| **G7** | Hourly Database AI Evaluation | `AI_LONG_WINDOW` | `z1-wl1-hourly` | Multi-hour drift | `persisted` | `LONG_WINDOW_EVALUATED` |
+| **G8** | Anti-Corruption Quarantine Gate | `SECURITY_GATE` | `z1-wl1` | Contained device | `dropped` | `TRAFFIC_BLOCKED` |
+
+
