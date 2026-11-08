@@ -17,6 +17,7 @@ class _Strict(BaseModel):
 class KafkaConfig(_Strict):
     bootstrap: str = ""
     group: str = "city-brain"
+    offset_reset: str = "earliest"
     topics: dict[str, str] = Field(default_factory=dict)
     security_protocol: str = "PLAINTEXT"
     sasl_mechanism: str = "PLAIN"
@@ -116,6 +117,7 @@ def _apply_standard_kafka_env(data: dict, env: Mapping[str, str]) -> None:
     kafka = data.setdefault("kafka", {})
     mapping = {
         "KAFKA_BOOTSTRAP_SERVERS": "bootstrap",
+        "KAFKA_AUTO_OFFSET_RESET": "offset_reset",
         "KAFKA_SECURITY_PROTOCOL": "security_protocol",
         "KAFKA_SASL_MECHANISM": "sasl_mechanism",
         "KAFKA_USERNAME": "sasl_username",

@@ -9,8 +9,11 @@ The consumer is injected so the adapter can be exercised without a broker; `conn
 builds the real one.
 """
 
+import logging
 from collections.abc import Mapping, Sequence
 from typing import Any
+
+logger = logging.getLogger("city_brain.kafka_source")
 
 PAUSE_AT = 10_000
 RESUME_AT = 5_000
@@ -86,7 +89,12 @@ class KafkaSource:
         for message in self._consume(timeout_s, limit):
             if message is None:
                 break
-            if message.error():
+            err = message.error()
+            if err:
+                code_fn = getattr(err, "code", None)
+                code_str = str(code_fn()) if code_fn else ""
+                if code_str not in ("_PARTITION_EOF", "-191"):
+                    logger.warning("KafkaSource poll error on topic %s: %s", message.topic(), err)
                 continue  # a broker-side error is not a reading; the next poll tries again
             stream = self._by_topic.get(message.topic())
             if stream is None:
