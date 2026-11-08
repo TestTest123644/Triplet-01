@@ -241,3 +241,13 @@ uv run ruff format .
 - **NIST SP 800-207 (Zero Trust Architecture):** The City Brain holds incoming telemetry in `WAITING_FOR_GUARDIAN_TRUST`, preventing unverified readings from triggering false city actuations.
 - **NIST SP 800-57 & Ed25519 Cryptography:** Asymmetric signatures provide cryptographic non-repudiation on ingest streams and outgoing trust confirmation messages.
 - **Least Privilege:** Microservices use dedicated SASL credentials with topic-scoped permissions. Internal database and broker ports are bound strictly to `127.0.0.1`.
+
+
+----
+
+## 10. Incase Of error
+if uv complain about missing JAVA_HOME simply run as follow
+
+```bash
+JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64 uv sync
+```
