@@ -129,28 +129,27 @@ def _apply_standard_kafka_env(data: dict, env: Mapping[str, str]) -> None:
             kafka[conf_key] = env[env_key]
 
     twin = data.setdefault("twin", {})
-    if "auth_token" not in twin:
-        if "MCP_AUTH_TOKEN" in env:
-            twin["auth_token"] = env["MCP_AUTH_TOKEN"]
-        elif "MCP_AUTH_TOKENS" in env:
-            # Parse 'brain:<tok>,guardian:<tok>'
-            for entry in env["MCP_AUTH_TOKENS"].split(","):
+    if "MCP_AUTH_TOKEN" in env:
+        twin["auth_token"] = env["MCP_AUTH_TOKEN"]
+    elif "MCP_AUTH_TOKENS" in env:
+        # Parse 'brain:<tok>,guardian:<tok>'
+        for entry in env["MCP_AUTH_TOKENS"].split(","):
+            entry = entry.strip()
+            if ":" in entry:
+                principal, token = entry.split(":", 1)
+                if principal.strip().lower() == "brain":
+                    twin["auth_token"] = token.strip()
+                    break
+    elif "MCP_AUTH_TOKENS_FILE" in env:
+        p = Path(env["MCP_AUTH_TOKENS_FILE"])
+        if p.is_file():
+            for entry in p.read_text(encoding="utf-8").split(","):
                 entry = entry.strip()
                 if ":" in entry:
                     principal, token = entry.split(":", 1)
                     if principal.strip().lower() == "brain":
                         twin["auth_token"] = token.strip()
                         break
-        elif "MCP_AUTH_TOKENS_FILE" in env:
-            p = Path(env["MCP_AUTH_TOKENS_FILE"])
-            if p.is_file():
-                for entry in p.read_text(encoding="utf-8").split(","):
-                    entry = entry.strip()
-                    if ":" in entry:
-                        principal, token = entry.split(":", 1)
-                        if principal.strip().lower() == "brain":
-                            twin["auth_token"] = token.strip()
-                            break
 
 
 def _apply_env(data: dict, env: Mapping[str, str]) -> None:
