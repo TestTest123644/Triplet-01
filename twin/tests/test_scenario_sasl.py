@@ -244,8 +244,9 @@ def test_wire_preflight_skipped_with_queue_source(tmp_path, monkeypatch):
         assert ctx.queue_source is not None
 
 
-def test_run_all_stops_on_exit_2(monkeypatch, capsys):
+def test_run_all_stops_on_exit_2(tmp_path, monkeypatch, capsys):
     """run_all.py stops immediately at the first scenario that fails preflight with exit code 2."""
+    monkeypatch.chdir(tmp_path)
     scenarios_executed = []
 
     class MockModule1:
@@ -271,7 +272,11 @@ def test_run_all_stops_on_exit_2(monkeypatch, capsys):
         raise ImportError(name)
 
     monkeypatch.setattr("importlib.import_module", mock_import)
-    monkeypatch.setattr(sys, "argv", ["run_all.py", "--red-team-token", "dummy"])
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["run_all.py", "--red-team-token", "dummy", "--log-dir", str(tmp_path)],
+    )
 
     # Mock ScenarioContext preflights and settle on run_all.ScenarioContext so mock_mod1 runs without real services
     monkeypatch.setattr(run_all.ScenarioContext, "_check_wire_preflight", lambda self: None)
