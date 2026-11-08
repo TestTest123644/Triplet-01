@@ -25,6 +25,8 @@ def run(ctx: ScenarioContext) -> bool:
     event_id = inj_res.get("event_id")
     ctx.log_event("", "scenario", "inject_event", {"event_id": event_id, "response": inj_res})
     ctx.record_check("fire_injected", bool(event_id), f"event_id: {event_id}")
+    if not event_id:
+        return ctx.finish()
 
     # Monitor wire until AQI on z5-aq1 exceeds 150
     print(f"[{ctx.scenario_id}] Monitoring z5-aq1 for fire plume (AQI > 150)...")

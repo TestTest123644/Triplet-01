@@ -18,7 +18,7 @@ from typing import Any, Dict, List, Literal, Optional, Tuple, Union
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from twin.crypto_utils import canonicalize_for_signing, sign_payload, verify_payload_signature
-from twin.kafka_config import kafka_client_config
+from twin.kafka_config import get_broker_address_family, kafka_client_config
 from twin.wire_limits import WIRE_VALUE_MAX, WIRE_VALUE_MIN
 
 logger = logging.getLogger("twin.kafka_streamer")
@@ -170,8 +170,9 @@ class KafkaStreamer:
         self._producer_conf: Dict[str, Any] = {}
         self._cached_password: Optional[str] = None
 
-        # Validate KAFKA_ACKS env var on startup (raises ValueError if invalid)
+        # Validate KAFKA_ACKS and KAFKA_BROKER_ADDRESS_FAMILY env vars on startup (raises ValueError if invalid)
         get_producer_acks_config()
+        get_broker_address_family()
 
         if not mock_mode:
             try:
@@ -210,6 +211,7 @@ class KafkaStreamer:
             "message.timeout.ms": message_timeout_ms,
             "acks": acks_val,
             "enable.idempotence": enable_idempotence,
+            "broker.address.family": get_broker_address_family(),
         }
         conf.update(sasl_conf)
         if producer_config:

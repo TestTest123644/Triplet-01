@@ -322,4 +322,55 @@ During reload:
 - Kafka producer validates new credentials against the broker with a metadata probe before swapping; if authentication fails, the active producer is preserved and `"error: new credentials rejected by broker"` is reported. Message sequence continuity is maintained across successful swaps (`seq` numbers increment continuously).
 - Rotation events are written to the SQLite ledger `secret_rotations` table and visible via `GET /api/journal`.
 
+---
+
+## 6. Environment and Compose Configuration
+
+All runtime networking, authentication, and port bindings are configurable via environment variables without editing compose files.
+
+### Configuration reference
+
+| Variable | Default | Description |
+| :--- | :--- | :--- |
+| `KAFKA_BOOTSTRAP_SERVERS` | `kafka:9092` (`localhost:19092` host) | Comma-separated broker list (`h1:p,h2:p,h3:p`) |
+| `KAFKA_TOPIC` | `twin.sensors` | Telemetry topic name (must already exist; Twin does not create topics) |
+| `KAFKA_SECURITY_PROTOCOL` | `PLAINTEXT` | Broker protocol: `PLAINTEXT`, `SASL_PLAINTEXT`, `SASL_SSL` |
+| `KAFKA_SASL_MECHANISM` | `PLAIN` | SASL auth mechanism: `PLAIN`, `SCRAM-SHA-256`, `SCRAM-SHA-512` |
+| `KAFKA_USERNAME` | *(unset)* | SASL username (required when protocol is `SASL_*`) |
+| `KAFKA_PASSWORD_FILE` | *(unset)* | Path to file containing SASL password (48 hex chars from `openssl rand -hex 24`) |
+| `KAFKA_PASSWORD` | *(unset)* | SASL plaintext password (used if `KAFKA_PASSWORD_FILE` unset) |
+| `KAFKA_SSL_CA_LOCATION` | *(unset)* | Path to CA certificate file (optional for `SASL_SSL`) |
+| `KAFKA_ACKS` | `all` | Producer durability: `all` (with idempotence), `1`, or `0` |
+| `KAFKA_BROKER_ADDRESS_FAMILY` | `any` | Address family: `any`, `v4`, `v6` (use `v4` to suppress IPv6 connection refused logs) |
+| `WAIT_FOR_KAFKA` | `true` | Skip broker describe check on startup if `false` (useful under restrictive broker ACLs) |
+| `TRIPLET_NETWORK` | `city_network` | Docker bridge network name (e.g. `shared-backend` for Guardian) |
+| `TRIPLET_NETWORK_EXTERNAL` | `false` | Set `true` to connect to an existing external Docker network |
+| `TWIN_SECRETS_DIR` | `./secrets` | Host secrets directory mounted read-only to `/app/secrets:ro` (`../secrets` in `twin/`) |
+| `TWIN_MCP_HOST_PORT` | `8000` | Host port mapped to container port 8000 (MCP command server) |
+| `TWIN_RED_TEAM_HOST_PORT` | `8100` | Host port mapped to container port 8100 (Red Team REST API) |
+| `TWIN_CONSOLE_HOST_PORT` | `8501` | Host port mapped to container port 8501 (Streamlit operations console) |
+| `VAULT_ADDR` | *(unset)* | Vault cluster URL (e.g. `https://<cluster>.hashicorp.cloud:8200`; unset = disabled) |
+| `VAULT_NAMESPACE` | `admin` | Vault namespace header (default `admin`; empty string = no header) |
+| `VAULT_ROLE_ID_FILE` | *(unset)* | Path to AppRole Role ID file (e.g. `./secrets/vault_twin_role_id`; container `/app/secrets/vault_twin_role_id`) |
+| `VAULT_SECRET_ID_FILE` | *(unset)* | Path to AppRole Secret ID file (e.g. `./secrets/vault_twin_secret_id`; container `/app/secrets/vault_twin_secret_id`) |
+| `VAULT_CACERT` | *(unset)* | Path to custom CA bundle (unset = certifi or system default; verification never disabled) |
+| `VAULT_REFRESH_SECONDS` | `300` | Background key refresh interval in seconds (0 = disabled) |
+
+### Path resolution: host vs container
+
+When configuring `KAFKA_PASSWORD_FILE`, `MCP_AUTH_TOKENS_FILE`, `VAULT_ROLE_ID_FILE`, or `VAULT_SECRET_ID_FILE`:
+- **Running on host (`python -m twin.main`):** Use the host relative or absolute path (e.g. `KAFKA_PASSWORD_FILE=./secrets/kafka_password`, `VAULT_ROLE_ID_FILE=./secrets/vault_twin_role_id`, `VAULT_SECRET_ID_FILE=./secrets/vault_twin_secret_id`).
+- **Running in Docker Compose:** The host directory `${TWIN_SECRETS_DIR:-./secrets}` is mounted to `/app/secrets:ro`. Configure the container-internal path (e.g. `KAFKA_PASSWORD_FILE=/app/secrets/kafka_password`, `VAULT_ROLE_ID_FILE=/app/secrets/vault_twin_role_id`, `VAULT_SECRET_ID_FILE=/app/secrets/vault_twin_secret_id`).
+
+### HashiCorp Vault Key Synchronization
+
+The Twin optionally fetches and maintains dynamic communication keys from HashiCorp Vault KV v2:
+- **Paths synchronized:** `comm/twin/guardian/private`, `comm/twin/brain/private`, `comm/guardian/twin/public`, `comm/brain/twin/public`.
+- **Formats supported:** PEM (`{"key": "<PEM>"}`) and kid (`{"kid", "private_key"|"public_key", "fingerprint", "active_after"}`).
+- **Key algorithms:** Automatically detects X25519, Ed25519, and RSA keys.
+- **Rotation:** Private keys with future `active_after` pick version-1; public keys preserve latest and previous versions.
+- **Status inspection:** Query `GET /api/status` for the `vault` metadata block.
+- **Traffic usage note:** Communication keys are fetched and kept fresh in memory but not yet used for any traffic encryption.
+
+
 

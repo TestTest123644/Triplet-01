@@ -13,7 +13,7 @@ import time
 
 # Zero twin.* imports
 sys.path.insert(0, os.path.dirname(__file__))
-from _twin_common import ScenarioContext, make_common_parser
+from _twin_common import ScenarioContext, TwinRestClient, make_common_parser
 
 SCENARIOS = [
     ("t1", "t1_baseline_stream"),
@@ -33,6 +33,30 @@ SCENARIOS = [
 def main() -> int:
     parser = make_common_parser("Run all Layer 1 Digital Twin scenarios (t1 through t11)")
     args = parser.parse_args()
+
+    # Preflight check: verify Twin reachability and Red Team token before running scenarios
+    twin_url = getattr(args, "twin_host", "http://localhost:8100").rstrip("/")
+    token = getattr(args, "red_team_token", None) or os.getenv("RED_TEAM_TOKEN")
+    client = TwinRestClient(base_url=twin_url, token=token)
+    st = client.get_status()
+    code = st.get("status_code")
+    err_str = str(st.get("error", ""))
+
+    if code in (401, 403) or st.get("code") == "UNAUTHORIZED":
+        print(
+            "Invalid or missing RED_TEAM_TOKEN / --red-team-token. "
+            "To retrieve the active token from Docker: docker exec twin_layer cat /app/data/red_team.token",
+            file=sys.stderr,
+        )
+        return 2
+
+    if code in (0, 500) and any(term in err_str for term in ("Connection refused", "URLError", "Errno 61", "Errno 111", "Failed to establish")):
+        print(f"Twin is not running at {twin_url} (connection refused).", file=sys.stderr)
+        return 2
+
+    if "sim_speed" not in st and code != 200:
+        print(f"Twin is not running at {twin_url} (HTTP {code}: {err_str}).", file=sys.stderr)
+        return 2
 
     results = []
     print("=" * 70)

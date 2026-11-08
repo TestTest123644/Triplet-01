@@ -33,9 +33,13 @@ async def wait_for_kafka_ready(bootstrap_servers: str, max_retries: int = 30, de
     """Check connectivity to Kafka broker before starting high-rate streaming."""
     logger.info(f"Checking connectivity to Kafka broker at {bootstrap_servers}...")
     import confluent_kafka.admin
-    from twin.kafka_config import kafka_client_config
+    from twin.kafka_config import get_broker_address_family, kafka_client_config
 
-    admin_conf = {"bootstrap.servers": bootstrap_servers, "socket.timeout.ms": 2000}
+    admin_conf = {
+        "bootstrap.servers": bootstrap_servers,
+        "socket.timeout.ms": 2000,
+        "broker.address.family": get_broker_address_family(),
+    }
     admin_conf.update(kafka_client_config())
 
     for attempt in range(1, max_retries + 1):
@@ -194,6 +198,13 @@ async def main() -> None:
     )
     red_team_server = uvicorn.Server(red_team_config)
 
+    # 5.b Start optional Vault key synchronization (non-blocking)
+    try:
+        from twin.vault_keys import start_vault_sync
+        start_vault_sync()
+    except Exception as e:
+        logger.warning(f"Error starting Vault key synchronization: {e}")
+
     stop_event = asyncio.Event()
 
     def handle_signal(*_):
@@ -261,6 +272,11 @@ async def main() -> None:
                 for task in pending:
                     task.cancel()
     finally:
+        try:
+            from twin.vault_keys import stop_vault_sync
+            stop_vault_sync()
+        except Exception:
+            pass
         sim.close()
 
 
